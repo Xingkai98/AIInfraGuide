@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>L10 · Continuous Batching 调度 - AIInfraGuide</title>
+    <meta
+      name="description"
+      content="迭代级调度循环的逐步回放：每个 tick 从 waiting 队列取请求、running 队列各生成一步、处理完成与抢占，并把它与 Static Batching 并排画在同一根时间轴上。"
+    />
+    <link rel="canonical" href="./02-continuous-batching.html" />
+    <link rel="stylesheet" href="./assets/vendor/katex/katex.min.css" />
+    <link rel="stylesheet" href="./assets/engine/lab.css" />
+    <link rel="stylesheet" href="./assets/engine/views/gantt.css" />
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        margin: 0;
+        padding: 20px 22px 56px;
+        background: #f9fafb;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+          'Helvetica Neue', 'Noto Sans CJK SC', sans-serif;
+      }
+      @media (prefers-color-scheme: dark) { body { background: #0b1120; } }
+      .lab-back { display: inline-block; margin-bottom: 14px; color: #007aff; font-size: 13.5px; text-decoration: none; }
+      .lab-provenance {
+        margin-top: 22px; padding-top: 14px;
+        border-top: 1px solid rgba(128, 128, 128, 0.25);
+        color: #6b7280; font-size: 12px; line-height: 1.6;
+      }
+      @media (prefers-color-scheme: dark) { .lab-provenance { color: #9ca3af; } }
+      .lab-provenance code {
+        background: rgba(128, 128, 128, 0.14); border-radius: 4px;
+        padding: 1px 5px;
+        font: 0.92em/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .lab-banner {
+        margin: 0 0 14px; padding: 8px 12px;
+        border: 1px solid rgba(0, 122, 255, 0.35); border-radius: 8px;
+        background: rgba(0, 122, 255, 0.07); font-size: 12.5px; color: #1f2937;
+      }
+      @media (prefers-color-scheme: dark) { .lab-banner { color: #e5e7eb; } }
+
+      /* The comparison is this lab's point, so it leads the page — above the
+         engine's own two-column block rather than inside it. */
+      .lab-gantt-panel .lab-panel-bd { padding: 10px 12px; max-height: 560px; overflow: auto; }
+
+      .l10-scenario { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
+      .l10-scenario-btn {
+        padding: 5px 12px; border-radius: 8px; cursor: pointer;
+        border: 1px solid var(--lab-line, #e3e6ec);
+        background: var(--lab-panel, #fff);
+        color: var(--lab-fg, #1f2937); font-size: 12.5px;
+      }
+      .l10-scenario-btn.lab-on { background: #007aff; border-color: #007aff; color: #fff; }
+      .l10-scenario-note { color: var(--lab-faint, #9ca3af); font-size: 11.5px; margin-left: 4px; }
+      .l10-readout { display: flex; flex-wrap: wrap; gap: 16px; margin: 0 0 10px; }
+      .l10-readout-item { color: var(--lab-dim, #6b7280); font-size: 11.5px; }
+      .l10-readout-item b {
+        display: block; color: var(--lab-fg, #1f2937);
+        font: 650 17px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .l10-verdict {
+        margin-top: 10px; padding: 8px 11px; border-radius: 8px;
+        border: 1px solid color-mix(in srgb, #0f7b52 45%, transparent);
+        background: color-mix(in srgb, #0f7b52 10%, transparent);
+        font-size: 12px; color: var(--lab-fg, #1f2937);
+      }
+
+      /* The seats. One cell per max_num_seqs slot: the direct picture of "how
+         many of the seats are producing right now", which is the quantity the
+         whole comparison is about. Colours deliberately match the gantt's kind
+         colours so the two panels read as one picture. */
+      .l10-seats { display: flex; gap: 4px; }
+      .l10-seat {
+        width: 26px; height: 15px; border-radius: 3px;
+        border: 1px dashed var(--lab-line, #e3e6ec);
+        background: transparent;
+      }
+      .l10-seat-prefill { background: #2f8f6f; border: 1px solid #2f8f6f; }
+      .l10-seat-decode { background: #3f8fd6; border: 1px solid #3f8fd6; }
+      .l10-seat-stalled { background: #d9a13b; border: 1px solid #d9a13b; }
+      @media (prefers-color-scheme: dark) {
+        .l10-seat-prefill { background: #3fae87; border-color: #3fae87; }
+        .l10-seat-decode { background: #559fe0; border-color: #559fe0; }
+      }
+    </style>
+  </head>
+  <!--
+    Two build-time facts this document depends on, both learned the hard way in
+    the scaffolding ticket:
+
+      * The no-index marker must wrap the whole document. On a bare <meta> tag
+        Pagefind ignores it and indexes the page anyway.
+      * Asset paths are relative to the SERVED location, not to this source
+        file: scripts/build-labs.mjs flattens labs/pages/*.html to
+        public/labs/*.html, so this page lands beside assets/ and must use
+        ./assets/… — a ../ would 404 the whole engine.
+
+    The page holds a trace set and a config. Every scheduling decision is in
+    labs/traces/continuous_batching.py; every drawing decision is in
+    assets/engine/views/gantt.js. This file is the wiring between them.
+  -->
+  <body data-pagefind-ignore>
+    <a class="lab-back" href="./">← 全部实验室</a>
+    <p class="lab-banner" id="lab-banner" hidden></p>
+
+    <div id="lab-params"></div>
+    <!-- The cross-arm readout lives OUTSIDE the player's mount on purpose: the
+         player replaces a panel's innerHTML on every paint, so anything the page
+         injects into a panel body is wiped by the next frame. This is per-config
+         text, not per-step text, so it belongs beside the selector rather than
+         inside a panel at all. -->
+    <div id="lab-readout"></div>
+    <div id="lab-stage"></div>
+
+    <p class="lab-provenance" id="lab-provenance"></p>
+
+    <!-- KaTeX is vendored, never a CDN: a lab page must make zero external requests. -->
+    <script src="./assets/vendor/katex/katex.min.js"></script>
+    <script src="./assets/engine/trace-model.js"></script>
+    <script src="./assets/engine/layout.js"></script>
+    <script src="./assets/engine/formula.js"></script>
+    <script src="./assets/engine/dag.js"></script>
+    <script src="./assets/engine/tensors.js"></script>
+    <script src="./assets/engine/narrow.js"></script>
+    <script src="./assets/engine/views/gantt.js"></script>
+    <script src="./assets/engine/player.js"></script>
+    <script src="./assets/engine/verify.js"></script>
+
+    <!--
+      The whole trace set — the manifest plus every configuration it names — is
+      substituted here at build time (see the trace-set step in
+      scripts/build-labs.mjs). The manifest is written by the generator, so the
+      selector's positions and the traces behind them are defined in one place
+      and cannot drift apart.
+    -->
+    <!-- traces:continuous-batching -->
+
+    <script>
+      (function () {
+        'use strict';
+
+        var SET = 'continuous-batching';
+        var traces = window.LabTraces || {};
+        var manifest = (window.LabTraceSets || {})[SET];
+        var esc = LabEngine.formula.escapeText;
+
+        var paramsHost = document.getElementById('lab-params');
+        var stage = document.getElementById('lab-stage');
+        var banner = document.getElementById('lab-banner');
+
+        if (!manifest || !traces[manifest.default]) {
+          stage.textContent = 'trace 未加载：本页的 trace 占位符没有被构建脚本替换。';
+          return;
+        }
+
+        /* -------------------------------------------------------------- ids
+         *
+         * Config ids are `<set>-<schedule>-<scenario>`. The page never builds
+         * one by hand outside `configId`, and every id it does build is looked
+         * up in the manifest first — a name the generator did not produce has
+         * to be unreachable, or the selector would be offering a configuration
+         * with no trace behind it. */
+        function configId(schedule, scenario) {
+          return SET + '-' + schedule + '-' + scenario;
+        }
+
+        var player = null;
+        var current = null;
+
+        /* ---------------------------------------------------- the readout
+         *
+         * The counters the ticket asks for, read from the trace's own
+         * meta.metrics. Nothing is computed here — the generator's reference
+         * recomputation is what these numbers are, and the page only prints
+         * them. */
+        function readout(statTrace, contTrace) {
+          var s = statTrace.meta.metrics, c = contTrace.meta.metrics;
+          var items = [
+            ['收干耗时', s.makespan + ' → ' + c.makespan + ' tick'],
+            ['槽位利用率', pct(s.utilization) + ' → ' + pct(c.utilization)],
+            ['平均延迟', s.mean_latency.toFixed(1) + ' → ' + c.mean_latency.toFixed(1) + ' tick'],
+            ['空转槽位', s.stalled_slot_ticks + ' → ' + c.stalled_slot_ticks + ' slot·tick'],
+            ['吞吐', s.throughput.toFixed(2) + ' → ' + c.throughput.toFixed(2) + ' tok/tick']
+          ];
+          if (c.preemptions) {
+            items.push(['抢占', c.preemptions + ' 次 · 重算 ' + c.recompute_tokens + ' token']);
+          }
+          return '<div class="l10-readout">' + items.map(function (it) {
+            return '<span class="l10-readout-item"><b>' + esc(it[1]) + '</b>' + esc(it[0]) +
+                   '</span>';
+          }).join('') + '</div>';
+        }
+
+        function pct(x) { return (100 * x).toFixed(1) + '%'; }
+
+        /* --------------------------------------------------- the comparison
+         *
+         * One gantt per arm, on ONE axis. The axis length is the longer arm's,
+         * because the finding is that the other arm finishes early — and an
+         * axis that stopped at the faster arm would crop exactly the whitespace
+         * that shows it. Both charts are drawn at the same cursor, so column t
+         * means tick t in both. */
+        function comparisonPanel(statTrace, contTrace) {
+          var view = LabEngine.gantt.comparison({
+            id: 'gantt-compare',
+            label: 'Static vs Continuous',
+            arms: [
+              { label: 'Static Batching',
+                note: '攒一批 → 跑完整批才释放',
+                trace: statTrace,
+                metrics: { winner: false, items: [
+                  { label: 'tick 收干', value: statTrace.meta.metrics.makespan },
+                  { label: '利用率', value: pct(statTrace.meta.metrics.utilization) },
+                  { label: '空转', value: statTrace.meta.metrics.stalled_slot_ticks + ' slot·tick' }
+                ] } },
+              { label: 'Continuous Batching',
+                note: '每 tick 完成即退、随退随补',
+                trace: contTrace,
+                metrics: { winner: true, items: [
+                  { label: 'tick 收干', value: contTrace.meta.metrics.makespan },
+                  { label: '利用率', value: pct(contTrace.meta.metrics.utilization) },
+                  { label: '空转', value: contTrace.meta.metrics.stalled_slot_ticks + ' slot·tick' }
+                ] } }
+            ]
+          });
+          return function (step, ctx) { return view.render(ctx.cursor, ctx); };
+        }
+
+        /* The per-tick batch composition. The ticket asks for it, and it answers
+         * a question the gantt alone makes you count: "how full was this tick".
+         *
+         * Counters come from `ctx.snapshot`, which is the RESOLVED state, not
+         * from `step.state` — a step records only the values that changed, and a
+         * tick where nothing changed has an empty `state` and would read as "—"
+         * for every counter. Resolving is the engine's job and this just reads
+         * the result, which is also how the tensor inspector gets it right. */
+        function batchPanel(trace) {
+          return function (step, ctx) {
+            var snap = ctx.snapshot || {};
+            function val(name) {
+              var rec = snap[name];
+              return rec && rec.value !== undefined ? rec.value : '—';
+            }
+            var bars = step.bars || [];
+            var counts = {};
+            bars.forEach(function (b) { counts[b.kind] = (counts[b.kind] || 0) + 1; });
+            var cfg = trace.meta.config;
+            var total = cfg.max_num_seqs;
+            var html = '<div class="lab-gantt" style="padding:0">';
+            html += '<div class="lab-gantt-metrics" style="margin-bottom:6px">' +
+              '<span class="lab-gantt-metric"><b>' + esc(String(val('batch_tokens'))) +
+              '</b> / ' + cfg.token_budget + ' token 预算</span>' +
+              '<span class="lab-gantt-metric"><b>' + esc(String(val('kv_free'))) +
+              '</b> / ' + cfg.num_blocks + ' 空闲 KV block</span>' +
+              '<span class="lab-gantt-metric"><b>' +
+              (counts.prefill || 0) + '</b> prefill · <b>' + (counts.decode || 0) +
+              '</b> decode · <b>' + (counts.stalled || 0) + '</b> 空转</span>' +
+              '</div>';
+            /* The seats, drawn as one cell each: filled for a request that is
+             * producing, a distinct colour for one that is holding a seat and
+             * not producing (stalled), and outlined for an empty seat. The
+             * stalled cell is the whole subject of this lab, which is why it
+             * gets its own colour rather than being left blank.
+             *
+             * A cell is filled from the IN-FLIGHT bars only. `prefill` and
+             * `decode` are producing; `stalled` is occupying a seat and not
+             * producing. `waiting` and `preempted` are not in the batch at all —
+             * a queued request holds no seat — so they are counted separately
+             * below rather than being allowed to fill a cell. Pairing cell i
+             * with bar i over the whole list would do exactly that and would
+             * draw a chart claiming more concurrency than the server has. */
+            var inFlight = bars.filter(function (b) {
+              return b.kind === 'prefill' || b.kind === 'decode' || b.kind === 'stalled';
+            });
+            html += '<div class="l10-seats">';
+            for (var i = 0; i < total; i++) {
+              var bar = inFlight[i];
+              html += '<span class="l10-seat' + (bar ? ' l10-seat-' + bar.kind : '') +
+                      '" title="' + esc(bar ? bar.row + ' · ' + bar.kind : '空位') +
+                      '"></span>';
+            }
+            html += '</div>';
+            var queued = bars.filter(function (b) { return b.kind === 'waiting'; }).length;
+            html += '<div style="margin-top:5px;color:var(--lab-faint);font-size:11px">' +
+              total + ' 个槽位 · 在途 ' + inFlight.length + ' 个 · waiting 队列 ' +
+              queued + ' 个</div>';
+            html += '<div style="margin-top:7px;color:var(--lab-dim);font-size:11.5px;line-height:1.55">' +
+              esc(step.narration || '') + '</div>';
+            html += '</div>';
+            return html;
+          };
+        }
+
+        /* ------------------------------------------------------ the mounting
+         *
+         * The player is mounted on the STATIC arm, not the continuous one, and
+         * that is a deliberate choice rather than an oversight. The player's
+         * scrubber is bounded by its own trace's length, and the two arms have
+         * different lengths — that difference IS the finding. Mounting on the
+         * faster arm would cap the timeline at the moment the faster arm
+         * finished, hiding the static arm's whole tail: the 20 wasted ticks
+         * are the picture. So the slower arm drives the cursor, and the
+         * continuous chart holds its last frame while the reader walks the rest
+         * of the static run, watching it stay empty. */
+        function mount(scenario) {
+          var sid = configId('static', scenario);
+          var cid = configId('continuous', scenario);
+          if (manifest.traces.indexOf(sid) === -1 || manifest.traces.indexOf(cid) === -1) {
+            stage.textContent = '缺少配置 ' + sid + ' / ' + cid + '（manifest 与 trace 不同步）。';
+            return;
+          }
+          var statTrace = traces[sid];
+          var contTrace = traces[cid];
+
+          if (player) { try { player.destroy(); } catch (e) { /* already gone */ } }
+          stage.innerHTML = '';
+          var slot = document.createElement('main');
+          stage.appendChild(slot);
+          current = scenario;
+
+          var compare = comparisonPanel(statTrace, contTrace);
+          player = LabEngine.lab(statTrace, {
+            mount: slot,
+            title: 'Continuous Batching 调度回放',
+            lead: '每 tick 是一次完整调度：running 队列各生成一步，剩余预算用来从 waiting 队列拉新请求，' +
+                  '完成的立刻退出、KV 立刻归还。右边这一半是同一个算法的 Static 版本 —— ' +
+                  '同一批请求、同一份预算，只是要等整批跑完才释放。',
+            tier: 'num',
+            speed: 520,
+            panels: [
+              { id: 'gantt', label: '甘特 · Static vs Continuous（共用时间轴）',
+                render: compare },
+              { id: 'batch', label: '本 tick 的批次组成', render: batchPanel(statTrace) }
+            ],
+            tutorial: {
+              href: '/AIInfraGuide/inference/模块四-推理优化/第2章-推理引擎核心技术/22-continuous-batching',
+              label: '返回教程正文：2.2 Continuous Batching'
+            }
+          });
+
+          var proof = document.createElement('section');
+          proof.className = 'lab-panel lab-panel-extra';
+          proof.innerHTML = '<div class="lab-panel-hd"><span class="lab-panel-t">自检 · 引擎正确性</span>' +
+            '<span class="lab-panel-sub">在浏览器里真跑，不是预期值</span></div>' +
+            '<div class="lab-panel-bd" style="padding:10px 12px"></div>';
+          slot.appendChild(proof);
+          LabEngine.verify.panel(proof.querySelector('.lab-panel-bd'), statTrace, player.index);
+
+          /* The comparison leads: it is the lab's teaching point, and it needs
+             the full width, so it goes above the engine's own block rather than
+             inside it. */
+          var ganttEl = document.querySelector('[data-panel="gantt"]');
+          if (ganttEl) {
+            ganttEl.classList.add('lab-gantt-panel');
+            document.querySelector('.lab-panel-dag').before(ganttEl);
+          }
+
+          document.getElementById('lab-readout').innerHTML =
+            readout(statTrace, contTrace) +
+            '<div class="l10-verdict">两个图共用一根时间轴：第 t 列在两个图里都是第 t 个 tick。' +
+            'Continuous 提前收干，右侧留白就是它比 Static 少花的那些 tick —— ' +
+            '<b>而 Static 那边这些 tick 并没有空着</b>：槽位还占着，只是不再产出，' +
+            '甘特图里那些琥珀色的格子就是它们。</div>';
+
+          window.__p = player;
+          window.__labTrace = statTrace;
+          window.__labTraces = { static: statTrace, continuous: contTrace };
+          window.__labConfig = sid;
+          window.__labCompare = compare;
+          return player;
+        }
+
+        /* ------------------------------------------------------ the selector */
+        var SCENARIO_LABEL = { base: '稳态到达', burst: '突发到达（KV 吃紧）' };
+
+        function buildSelector() {
+          var scenarios = manifest.params.scenario;
+          var html = '<div class="l10-scenario"><span class="l10-readout-item">场景</span>';
+          scenarios.forEach(function (sc) {
+            html += '<button class="l10-scenario-btn" data-scenario="' + esc(sc) + '">' +
+                    esc(SCENARIO_LABEL[sc] || sc) + '</button>';
+          });
+          html += '<span class="l10-scenario-note" data-note></span></div>';
+          paramsHost.innerHTML = html;
+          Array.prototype.forEach.call(
+            paramsHost.querySelectorAll('[data-scenario]'),
+            function (btn) {
+              btn.addEventListener('click', function () { apply(btn.dataset.scenario); });
+            }
+          );
+        }
+
+        function paintSelector() {
+          Array.prototype.forEach.call(
+            paramsHost.querySelectorAll('[data-scenario]'),
+            function (btn) { btn.classList.toggle('lab-on', btn.dataset.scenario === current); }
+          );
+          var note = paramsHost.querySelector('[data-note]');
+          if (note) {
+            var id = configId('continuous', current);
+            note.textContent = (manifest.notes || {})[id] || '';
+          }
+        }
+
+        function apply(scenario, keepStep) {
+          if (manifest.params.scenario.indexOf(scenario) === -1) return;
+          var url = new URL(location.href);
+          url.searchParams.set('scenario', scenario);
+          if (!keepStep) url.searchParams.set('step', '0');
+          try { history.replaceState(null, '', url); } catch (e) { /* file:// */ }
+          mount(scenario);
+          paintSelector();
+        }
+
+        /* Deep links: ?scenario= and ?step=, each announced when out of range
+           rather than silently ignored — the same terms the player uses. */
+        var query = new URLSearchParams(location.search);
+        var messages = [];
+        var asked = query.get('scenario');
+        var start = manifest.params.scenario.indexOf(asked) === -1
+          ? manifest.params.scenario[0] : asked;
+        if (asked && manifest.params.scenario.indexOf(asked) === -1) {
+          messages.push('深链里的 ?scenario=' + asked + ' 不在本页的 ' +
+            manifest.params.scenario.length + ' 个场景里，已载入「' +
+            (SCENARIO_LABEL[start] || start) + '」。');
+        }
+        buildSelector();
+        apply(start, true);
+        /* ?step is validated here as well as by the player, and the two have to
+           agree about what an out-of-range value means. The player's own rule
+           (see parseStepFromUrl) is to CLAMP to the trace's last step, so this
+           message says that rather than "停在第一步" — a banner that describes
+           a different frame than the one on screen is worse than no banner. */
+        var requestedStep = query.get('step');
+        if (requestedStep !== null) {
+          var n = parseInt(requestedStep, 10);
+          var len = traces[configId('static', start)].steps.length;
+          if (isNaN(n)) {
+            messages.push('深链里的 ?step=' + requestedStep + ' 不是数字，已停在第一步。');
+            player.setCursor(0);
+          } else if (n < 0) {
+            messages.push('深链里的 ?step=' + requestedStep + ' 是负数，已停在第一步。');
+            player.setCursor(0);
+          } else if (n > len - 1) {
+            messages.push('深链里的 ?step=' + requestedStep + ' 超出范围（本场景共 ' +
+              len + ' 步），已停在最后一步。');
+            player.setCursor(len - 1);
+          } else {
+            player.setCursor(n);
+          }
+        }
+        if (messages.length) {
+          banner.hidden = false;
+          banner.textContent = messages.join(' ');
+        }
+
+        document.getElementById('lab-provenance').innerHTML =
+          '本页每个数字都来自一次真实的调度模拟，不是手编的时间线。两份 trace（Static / Continuous）' +
+          '由 <code>labs/traces/continuous_batching.py</code> 用同一份请求表跑出来，它做四件事：' +
+          '① 逐 tick 执行 vLLM V1 形状的调度循环（token budget、KV block 池、显存耗尽时抢占并重计算）；' +
+          '② 用 <b>torch</b> 从逐 tick 占用矩阵<b>独立重算</b>页面上每个数字，整数要求逐位相同' +
+          '（<code>np.array_equal</code>，零容差），比值 float64 相对容差 1e-12；' +
+          '③ 断言「甘特图上画出来的每一条」与 token 台账严格对得上，且连续批处理在收干时间、' +
+          '平均延迟、槽位利用率上都确实优于静态批处理，差距大到一眼可见；' +
+          '④ 用契约 lint 自查，并跑一组「故意破坏」的对照组 —— 破坏必须被抓到，否则那份「0 gap」不算数。' +
+          '不通过就拒绝写文件。' +
+          '甘特组件本身在 <code>labs/assets/engine/views/gantt.js</code>，不含任何调度逻辑 —— ' +
+          'L16 的 1F1B 与 L17 的梯度分桶是同一份代码换一份行配置。';
+      })();
+    </script>
+  </body>
+</html>

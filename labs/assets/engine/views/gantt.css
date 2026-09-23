@@ -1,0 +1,252 @@
+/* L00 engine · view: gantt — styles.
+ *
+ * A separate file from lab.css for the same reason tiling-stage.css is: lab.css
+ * belongs to the engine core and is shared by every lab, while this is one view
+ * component's own chrome. A lab that does not use the gantt never downloads it,
+ * and a change here cannot regress the player, the DAG or the tensor inspector.
+ *
+ * Colours come from lab.css's custom properties, which are declared on
+ * .lab-root and are therefore already in scope — so the gantt is theme-aware
+ * without restating either palette.
+ *
+ * HOW THE CHART IS LAID OUT
+ *
+ * Rows are `flex` lines with a fixed-width label column and a lane that is
+ * `axisMax × colWidth` wide. Nothing is measured: the lane's width is a
+ * computed number, and every bar's left/width is a plain multiple of the same
+ * column width. That is what lets two charts be read against each other — tick
+ * 17 is at the same x in both because both computed it, not because they were
+ * laid out to match.
+ *
+ * A chart wider than its panel scrolls horizontally (`.lab-scroll` comes from
+ * lab.css); the label column is sticky so the reader never loses track of which
+ * row they are on.
+ */
+
+.lab-gantt {
+  font-size: 11.5px;
+  padding: 2px 0 4px;
+}
+
+/* ---- header: the chart's own title, used in the single-chart mode ---- */
+.lab-gantt-hd {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.lab-gantt-title { font-weight: 650; color: var(--lab-fg); }
+.lab-gantt-caption { color: var(--lab-faint); font-size: 11px; }
+
+/* ---- the tick ruler ---- */
+.lab-gantt-axis {
+  position: relative;
+  height: 15px;
+  margin-left: 128px;
+  border-bottom: 1px solid var(--lab-line);
+  margin-bottom: 3px;
+}
+.lab-gantt-tick {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  color: var(--lab-faint);
+  font: 9.5px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+/* The cursor's column. One tick wide, spanning the whole chart height, so the
+ * reader can see at a glance how far the replay has come — and, in the
+ * comparison mode, that both arms are being read at the same tick. */
+.lab-gantt-cursor {
+  position: absolute;
+  top: -2px;
+  bottom: -400px;
+  width: 1px;
+  background: color-mix(in srgb, var(--lab-accent) 55%, transparent);
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* ---- one row ---- */
+.lab-gantt-row {
+  display: flex;
+  align-items: center;
+  min-height: 14px;
+}
+.lab-gantt-rowlabel {
+  width: 128px;
+  flex: 0 0 128px;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding-right: 8px;
+  overflow: hidden;
+  white-space: nowrap;
+  /* Sticky so a horizontally scrolled chart keeps its row names. */
+  position: sticky;
+  left: 0;
+  background: var(--lab-panel);
+  z-index: 1;
+}
+.lab-gantt-rowid {
+  font: 600 10.5px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--lab-fg);
+}
+.lab-gantt-rowspec {
+  color: var(--lab-faint);
+  font-size: 9.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lab-gantt-lane {
+  position: relative;
+  flex: 0 0 auto;
+  height: 100%;
+  background-image: linear-gradient(to right,
+    color-mix(in srgb, var(--lab-line) 60%, transparent) 1px, transparent 1px);
+  background-size: 5ch 100%;
+}
+.lab-gantt-track {
+  margin: 6px 0 2px 128px;
+  font: 600 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--lab-accent);
+  letter-spacing: 0.04em;
+}
+
+/* ---- a bar ---- */
+.lab-gantt-bar {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  border-radius: 3px;
+  background: var(--lab-faint);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  transition: background-color 0.16s ease;
+}
+.lab-gantt-bar i {
+  font-style: normal;
+  font-size: 9px;
+  color: #ffffff;
+  padding: 0 3px;
+  white-space: nowrap;
+  opacity: 0.9;
+}
+/* The bar the cursor is currently extending. Marked with a ring rather than a
+ * colour change, so the kind's colour keeps meaning the same thing frame to
+ * frame and the highlight is a separate channel. */
+.lab-gantt-bar.lab-gantt-growing {
+  box-shadow: 0 0 0 1.5px var(--lab-fg);
+  z-index: 1;
+}
+
+/* ---- the kind vocabulary ----
+ *
+ * L10's five activities. These are this lab's colours, but they are named for
+ * the activity rather than for the lab, so a trace that reuses the vocabulary
+ * reads the same way; L16 and L17 will bring their own and inherit the default
+ * grey for anything not listed here.
+ *
+ * "useful" reads as the accent (blue/teal), "not working for you" as warm
+ * greys and ambers, and "this went wrong" as red — so a reader can tell at a
+ * glance whether a row is producing or burning.
+ */
+.lab-gantt-prefill   { background: #2f8f6f; }   /* teal: work, front of the journey */
+.lab-gantt-decode    { background: #3f8fd6; }   /* blue: work, steady state */
+.lab-gantt-waiting   { background: #b9c0cb; }   /* grey: queued, nothing spent */
+.lab-gantt-stalled   { background: #d9a13b; }   /* amber: a seat burning */
+.lab-gantt-preempted { background: #c0504d; }   /* red: evicted, progress lost */
+
+@media (prefers-color-scheme: dark) {
+  .lab-gantt-prefill   { background: #3fae87; }
+  .lab-gantt-decode    { background: #559fe0; }
+  .lab-gantt-waiting   { background: #46536b; }
+  .lab-gantt-stalled   { background: #d9a13b; }
+  .lab-gantt-preempted { background: #d9615e; }
+}
+.lab-gantt-bar.lab-gantt-waiting i { color: var(--lab-fg); }
+
+/* ---- legend ---- */
+.lab-gantt-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 8px 0 0 128px;
+  padding-top: 6px;
+  border-top: 1px solid var(--lab-line);
+}
+.lab-gantt-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--lab-dim);
+  font-size: 10.5px;
+}
+.lab-gantt-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+/* ---- the comparison mode ---- */
+.lab-gantt-compare {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.lab-gantt-arm {
+  border: 1px solid var(--lab-line);
+  border-radius: 10px;
+  background: var(--lab-panel);
+  padding: 8px 10px 10px;
+}
+.lab-gantt-arm-win {
+  border-color: color-mix(in srgb, var(--lab-ok) 55%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--lab-ok) 22%, transparent);
+}
+.lab-gantt-armhd {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.lab-gantt-armlabel { font-weight: 650; color: var(--lab-fg); font-size: 12.5px; }
+.lab-gantt-armnote { color: var(--lab-faint); font-size: 11px; }
+.lab-gantt-armbody { overflow-x: auto; padding-bottom: 3px; }
+.lab-gantt-armbody .lab-gantt-rowlabel { background: var(--lab-panel); }
+.lab-gantt-armbody .lab-gantt-axis { margin-left: 46px; }
+.lab-gantt-armbody .lab-gantt-rowlabel {
+  width: 46px;
+  flex: 0 0 46px;
+  padding-right: 6px;
+}
+.lab-gantt-armbody .lab-gantt-rowspec { display: none; }
+.lab-gantt-done {
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px dashed var(--lab-line);
+  color: var(--lab-ok);
+  font-size: 10.5px;
+}
+
+/* ---- the per-arm metric strip ---- */
+.lab-gantt-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 2px 0 6px;
+}
+.lab-gantt-metric {
+  color: var(--lab-dim);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+.lab-gantt-metric b {
+  color: var(--lab-fg);
+  font: 650 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lab-gantt-bar { transition: none; }
+}

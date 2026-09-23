@@ -1,0 +1,3412 @@
+{
+ "meta": {
+  "lab": "L10",
+  "title": "Continuous Batching 调度回放（突发到达）",
+  "source": "docs/guides/模块四-推理优化/第2章-推理引擎核心技术/2.2-Continuous Batching.md",
+  "config": {
+   "schedule": "continuous",
+   "scenario": "burst",
+   "n_requests": 12,
+   "max_num_seqs": 4,
+   "token_budget": 32,
+   "block_size": 4,
+   "num_blocks": 17
+  },
+  "reference": "调度循环逐步模拟：27 步收干，83 个输出 token，槽位利用率 90.7%（98/108 个 slot·tick），空转 0 个 slot·tick（continuous 恒为 0）；每个数字都用 torch 从逐 tick 占用矩阵独立重算过，整数逐位相同（np.array_equal），比值 float64 相对容差 1e-12",
+  "metrics": {
+   "makespan": 27,
+   "output_tokens": 83,
+   "mean_latency": 13.083333333333334,
+   "max_latency": 26.0,
+   "utilization": 0.9074074074074074,
+   "useful_slot_ticks": 98,
+   "stalled_slot_ticks": 0,
+   "idle_slot_ticks": 10,
+   "slots_total": 108,
+   "waiting_ticks": 55,
+   "throughput": 3.074074074074074,
+   "preemptions": 4,
+   "recompute_tokens": 45,
+   "kind_ticks": {
+    "prefill": 12,
+    "decode": 26,
+    "waiting": 20,
+    "stalled": 0,
+    "preempted": 4
+   },
+   "static_stall_closed_form": null
+  }
+ },
+ "tensors": {
+  "waiting_q": {
+   "shape": [
+    12
+   ],
+   "dtype": "int",
+   "at": "调度器",
+   "role": "queue",
+   "init": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "note": "waiting 队列（优先级队列，这里用 FCFS）里有哪些请求，1 = 在排队"
+  },
+  "running_q": {
+   "shape": [
+    12
+   ],
+   "dtype": "int",
+   "at": "调度器",
+   "role": "queue",
+   "init": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "note": "running 列表：本 tick 结束时仍在批里的请求"
+  },
+  "done_q": {
+   "shape": [
+    12
+   ],
+   "dtype": "int",
+   "at": "调度器",
+   "role": "state",
+   "init": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "note": "已经生成完 output 个 token、KV 已归还的请求"
+  },
+  "computed": {
+   "shape": [
+    12
+   ],
+   "dtype": "int",
+   "at": "KV 显存",
+   "role": "state",
+   "init": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "note": "每个请求的 num_computed_tokens —— 被抢占时归零（重计算）"
+  },
+  "kv_blocks": {
+   "shape": [
+    12
+   ],
+   "dtype": "int",
+   "at": "KV 显存",
+   "role": "state",
+   "init": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "note": "每个请求占用的 KV block 数（block_size = 4）"
+  },
+  "batch_tokens": {
+   "shape": [],
+   "dtype": "int",
+   "at": "调度器",
+   "role": "counter",
+   "init": 0,
+   "note": "本 tick 从 token budget 里花掉的 token 数"
+  },
+  "kv_free": {
+   "shape": [],
+   "dtype": "int",
+   "at": "KV 显存",
+   "role": "counter",
+   "init": 17,
+   "note": "还剩多少空闲 KV block（共 17）"
+  },
+  "stalled": {
+   "shape": [],
+   "dtype": "int",
+   "at": "调度器",
+   "role": "counter",
+   "init": 0,
+   "note": "本 tick 里已经生成完、却还占着槽位的请求数（它们不再算 token，占的只是并发额度）"
+  }
+ },
+ "graph": {
+  "nodes": [
+   {
+    "id": "t0",
+    "title": "tick 0 · 4 个 prefill",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "预热"
+   },
+   {
+    "id": "t1",
+    "title": "tick 1 · 4 个 decode，2 个完成",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "预热"
+   },
+   {
+    "id": "t2",
+    "title": "tick 2 · 2 个 prefill，2 个 decode，1 个完成",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t3",
+    "title": "tick 3 · 1 个 prefill，3 个 decode，1 个完成",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t4",
+    "title": "tick 4 · 1 个 prefill，3 个 decode",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t5",
+    "title": "tick 5 · 4 个 decode，1 个完成",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t6",
+    "title": "tick 6 · 1 个 prefill，3 个 decode",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t7",
+    "title": "tick 7 · 4 个 decode",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t8",
+    "title": "tick 8 · 4 个 decode",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t9",
+    "title": "tick 9 · 4 个 decode，1 个完成",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t10",
+    "title": "tick 10 · 1 个 prefill，3 个 decode",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t11",
+    "title": "tick 11 · 4 个 decode",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t12",
+    "title": "tick 12 · 3 个 decode，抢占 1",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t13",
+    "title": "tick 13 · 1 个 prefill，2 个 decode，抢占 1",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t14",
+    "title": "tick 14 · 1 个 prefill，3 个 decode",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t15",
+    "title": "tick 15 · 3 个 decode，抢占 1",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t16",
+    "title": "tick 16 · 1 个 prefill，3 个 decode，1 个完成",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t17",
+    "title": "tick 17 · 1 个 prefill，3 个 decode",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t18",
+    "title": "tick 18 · 4 个 decode",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t19",
+    "title": "tick 19 · 4 个 decode，1 个完成",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t20",
+    "title": "tick 20 · 1 个 prefill，3 个 decode",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "排空"
+   },
+   {
+    "id": "t21",
+    "title": "tick 21 · 3 个 decode，抢占 1，1 个完成",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t22",
+    "title": "tick 22 · 1 个 prefill，2 个 decode",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "排空"
+   },
+   {
+    "id": "t23",
+    "title": "tick 23 · 3 个 decode",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "排空"
+   },
+   {
+    "id": "t24",
+    "title": "tick 24 · 3 个 decode",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "排空"
+   },
+   {
+    "id": "t25",
+    "title": "tick 25 · 3 个 decode，1 个完成",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "排空"
+   },
+   {
+    "id": "t26",
+    "title": "tick 26 · 2 个 decode，2 个完成",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "排空"
+   }
+  ],
+  "edges": [
+   {
+    "from": "t0",
+    "to": "t1",
+    "tensor": ""
+   },
+   {
+    "from": "t1",
+    "to": "t2",
+    "tensor": ""
+   },
+   {
+    "from": "t2",
+    "to": "t3",
+    "tensor": ""
+   },
+   {
+    "from": "t3",
+    "to": "t4",
+    "tensor": ""
+   },
+   {
+    "from": "t4",
+    "to": "t5",
+    "tensor": ""
+   },
+   {
+    "from": "t5",
+    "to": "t6",
+    "tensor": ""
+   },
+   {
+    "from": "t6",
+    "to": "t7",
+    "tensor": ""
+   },
+   {
+    "from": "t7",
+    "to": "t8",
+    "tensor": ""
+   },
+   {
+    "from": "t8",
+    "to": "t9",
+    "tensor": ""
+   },
+   {
+    "from": "t9",
+    "to": "t10",
+    "tensor": ""
+   },
+   {
+    "from": "t10",
+    "to": "t11",
+    "tensor": ""
+   },
+   {
+    "from": "t11",
+    "to": "t12",
+    "tensor": ""
+   },
+   {
+    "from": "t12",
+    "to": "t13",
+    "tensor": ""
+   },
+   {
+    "from": "t13",
+    "to": "t14",
+    "tensor": ""
+   },
+   {
+    "from": "t14",
+    "to": "t15",
+    "tensor": ""
+   },
+   {
+    "from": "t15",
+    "to": "t16",
+    "tensor": ""
+   },
+   {
+    "from": "t16",
+    "to": "t17",
+    "tensor": ""
+   },
+   {
+    "from": "t17",
+    "to": "t18",
+    "tensor": ""
+   },
+   {
+    "from": "t18",
+    "to": "t19",
+    "tensor": ""
+   },
+   {
+    "from": "t19",
+    "to": "t20",
+    "tensor": ""
+   },
+   {
+    "from": "t20",
+    "to": "t21",
+    "tensor": ""
+   },
+   {
+    "from": "t21",
+    "to": "t22",
+    "tensor": ""
+   },
+   {
+    "from": "t22",
+    "to": "t23",
+    "tensor": ""
+   },
+   {
+    "from": "t23",
+    "to": "t24",
+    "tensor": ""
+   },
+   {
+    "from": "t24",
+    "to": "t25",
+    "tensor": ""
+   },
+   {
+    "from": "t25",
+    "to": "t26",
+    "tensor": ""
+   }
+  ]
+ },
+ "gantt": {
+  "rows": [
+   {
+    "id": "R1",
+    "label": "R1",
+    "sub": "到达 t=0 · prompt 8 · 生成 2"
+   },
+   {
+    "id": "R2",
+    "label": "R2",
+    "sub": "到达 t=0 · prompt 8 · 生成 26"
+   },
+   {
+    "id": "R3",
+    "label": "R3",
+    "sub": "到达 t=0 · prompt 8 · 生成 3"
+   },
+   {
+    "id": "R4",
+    "label": "R4",
+    "sub": "到达 t=0 · prompt 8 · 生成 2"
+   },
+   {
+    "id": "R5",
+    "label": "R5",
+    "sub": "到达 t=0 · prompt 8 · 生成 15"
+   },
+   {
+    "id": "R6",
+    "label": "R6",
+    "sub": "到达 t=0 · prompt 8 · 生成 2"
+   },
+   {
+    "id": "R7",
+    "label": "R7",
+    "sub": "到达 t=1 · prompt 8 · 生成 13"
+   },
+   {
+    "id": "R8",
+    "label": "R8",
+    "sub": "到达 t=1 · prompt 8 · 生成 2"
+   },
+   {
+    "id": "R9",
+    "label": "R9",
+    "sub": "到达 t=1 · prompt 8 · 生成 4"
+   },
+   {
+    "id": "R10",
+    "label": "R10",
+    "sub": "到达 t=2 · prompt 8 · 生成 6"
+   },
+   {
+    "id": "R11",
+    "label": "R11",
+    "sub": "到达 t=2 · prompt 8 · 生成 3"
+   },
+   {
+    "id": "R12",
+    "label": "R12",
+    "sub": "到达 t=2 · prompt 8 · 生成 5"
+   }
+  ],
+  "kinds": [
+   "prefill",
+   "decode",
+   "waiting",
+   "stalled",
+   "preempted"
+  ],
+  "kindsLabel": {
+   "prefill": "prefill（新请求上车）",
+   "decode": "decode（生成 1 个 token）",
+   "waiting": "waiting（排队等待）",
+   "stalled": "stalled（已完成 · 空转）",
+   "preempted": "preempted（被抢占）"
+  }
+ },
+ "steps": [
+  {
+   "id": "t0",
+   "title": "tick 0 · 4 个 prefill",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "预热",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "0",
+     "num": "0"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{0}|",
+     "num": "0"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{0}} p_r",
+     "num": "32"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{0}",
+     "num": "32"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens",
+    "computed",
+    "running_q",
+    "waiting_q"
+   ],
+   "state": {
+    "waiting_q": [
+     0,
+     0,
+     0,
+     0,
+     1,
+     1,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "running_q": [
+     1,
+     1,
+     1,
+     1,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "computed": [
+     9,
+     33,
+     10,
+     9,
+     22,
+     9,
+     20,
+     9,
+     11,
+     13,
+     10,
+     12
+    ],
+    "batch_tokens": 32
+   },
+   "bars": [
+    {
+     "row": "R1",
+     "kind": "prefill"
+    },
+    {
+     "row": "R2",
+     "kind": "prefill"
+    },
+    {
+     "row": "R3",
+     "kind": "prefill"
+    },
+    {
+     "row": "R4",
+     "kind": "prefill"
+    },
+    {
+     "row": "R5",
+     "kind": "waiting"
+    },
+    {
+     "row": "R6",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 32 / 32 个 token 预算。新上车：R1（prompt 8）、R2（prompt 8）、R3（prompt 8）、R4（prompt 8）。还有 2 个在 waiting 队列里排队。"
+  },
+  {
+   "id": "t1",
+   "title": "tick 1 · 4 个 decode，2 个完成",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "预热",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "1",
+     "num": "1"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{1}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{1}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{1}",
+     "num": "4"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens",
+    "done_q",
+    "running_q",
+    "waiting_q"
+   ],
+   "state": {
+    "waiting_q": [
+     0,
+     0,
+     0,
+     0,
+     1,
+     1,
+     1,
+     1,
+     1,
+     0,
+     0,
+     0
+    ],
+    "running_q": [
+     0,
+     1,
+     1,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "done_q": [
+     1,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "batch_tokens": 4
+   },
+   "bars": [
+    {
+     "row": "R1",
+     "kind": "decode"
+    },
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R3",
+     "kind": "decode"
+    },
+    {
+     "row": "R4",
+     "kind": "decode"
+    },
+    {
+     "row": "R5",
+     "kind": "waiting"
+    },
+    {
+     "row": "R6",
+     "kind": "waiting"
+    },
+    {
+     "row": "R7",
+     "kind": "waiting"
+    },
+    {
+     "row": "R8",
+     "kind": "waiting"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 4 / 32 个 token 预算。退出的请求立刻让出槽位。还有 5 个在 waiting 队列里排队。",
+   "regions": {
+    "EXIT": "本步有 R1、R4 生成了最后一个 token，KV block 立刻归还空闲池。腾出的槽位下一步就能被新请求补上，这就是「随退随补」。"
+   }
+  },
+  {
+   "id": "t2",
+   "title": "tick 2 · 2 个 prefill，2 个 decode，1 个完成",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "2",
+     "num": "2"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{2}|",
+     "num": "2"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{2}} p_r",
+     "num": "16"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{2}",
+     "num": "18"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens",
+    "done_q",
+    "running_q",
+    "waiting_q"
+   ],
+   "state": {
+    "waiting_q": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1
+    ],
+    "running_q": [
+     0,
+     1,
+     0,
+     0,
+     1,
+     1,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "done_q": [
+     1,
+     0,
+     1,
+     1,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "batch_tokens": 18
+   },
+   "bars": [
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R3",
+     "kind": "decode"
+    },
+    {
+     "row": "R5",
+     "kind": "prefill"
+    },
+    {
+     "row": "R6",
+     "kind": "prefill"
+    },
+    {
+     "row": "R7",
+     "kind": "waiting"
+    },
+    {
+     "row": "R8",
+     "kind": "waiting"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 18 / 32 个 token 预算。新上车：R5（prompt 8）、R6（prompt 8）。退出的请求立刻让出槽位。还有 6 个在 waiting 队列里排队。",
+   "regions": {
+    "EXIT": "本步有 R3 生成了最后一个 token，KV block 立刻归还空闲池。腾出的槽位下一步就能被新请求补上，这就是「随退随补」。"
+   }
+  },
+  {
+   "id": "t3",
+   "title": "tick 3 · 1 个 prefill，3 个 decode，1 个完成",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "3",
+     "num": "3"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{3}|",
+     "num": "3"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{3}} p_r",
+     "num": "8"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{3}",
+     "num": "11"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens",
+    "done_q",
+    "running_q",
+    "waiting_q"
+   ],
+   "state": {
+    "waiting_q": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     1,
+     1,
+     1,
+     1,
+     1
+    ],
+    "running_q": [
+     0,
+     1,
+     0,
+     0,
+     1,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "done_q": [
+     1,
+     0,
+     1,
+     1,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "batch_tokens": 11
+   },
+   "bars": [
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R5",
+     "kind": "decode"
+    },
+    {
+     "row": "R6",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "prefill"
+    },
+    {
+     "row": "R8",
+     "kind": "waiting"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 11 / 32 个 token 预算。新上车：R7（prompt 8）。退出的请求立刻让出槽位。还有 5 个在 waiting 队列里排队。",
+   "regions": {
+    "EXIT": "本步有 R6 生成了最后一个 token，KV block 立刻归还空闲池。腾出的槽位下一步就能被新请求补上，这就是「随退随补」。"
+   }
+  },
+  {
+   "id": "t4",
+   "title": "tick 4 · 1 个 prefill，3 个 decode",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "4",
+     "num": "4"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{4}|",
+     "num": "3"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{4}} p_r",
+     "num": "8"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{4}",
+     "num": "11"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "running_q",
+    "waiting_q"
+   ],
+   "state": {
+    "waiting_q": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     1,
+     1,
+     1,
+     1
+    ],
+    "running_q": [
+     0,
+     1,
+     0,
+     0,
+     1,
+     0,
+     1,
+     1,
+     0,
+     0,
+     0,
+     0
+    ]
+   },
+   "bars": [
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R5",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "decode"
+    },
+    {
+     "row": "R8",
+     "kind": "prefill"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 11 / 32 个 token 预算。新上车：R8（prompt 8）。还有 4 个在 waiting 队列里排队。"
+  },
+  {
+   "id": "t5",
+   "title": "tick 5 · 4 个 decode，1 个完成",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "5",
+     "num": "5"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{5}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{5}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{5}",
+     "num": "4"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens",
+    "done_q",
+    "running_q"
+   ],
+   "state": {
+    "running_q": [
+     0,
+     1,
+     0,
+     0,
+     1,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "done_q": [
+     1,
+     0,
+     1,
+     1,
+     0,
+     1,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0
+    ],
+    "batch_tokens": 4
+   },
+   "bars": [
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R5",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "decode"
+    },
+    {
+     "row": "R8",
+     "kind": "decode"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 4 / 32 个 token 预算。退出的请求立刻让出槽位。还有 4 个在 waiting 队列里排队。",
+   "regions": {
+    "EXIT": "本步有 R8 生成了最后一个 token，KV block 立刻归还空闲池。腾出的槽位下一步就能被新请求补上，这就是「随退随补」。"
+   }
+  },
+  {
+   "id": "t6",
+   "title": "tick 6 · 1 个 prefill，3 个 decode",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "6",
+     "num": "6"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{6}|",
+     "num": "3"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{6}} p_r",
+     "num": "8"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{6}",
+     "num": "11"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens",
+    "running_q",
+    "waiting_q"
+   ],
+   "state": {
+    "waiting_q": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     1,
+     1,
+     1
+    ],
+    "running_q": [
+     0,
+     1,
+     0,
+     0,
+     1,
+     0,
+     1,
+     0,
+     1,
+     0,
+     0,
+     0
+    ],
+    "batch_tokens": 11
+   },
+   "bars": [
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R5",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "decode"
+    },
+    {
+     "row": "R9",
+     "kind": "prefill"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 11 / 32 个 token 预算。新上车：R9（prompt 8）。还有 3 个在 waiting 队列里排队。"
+  },
+  {
+   "id": "t7",
+   "title": "tick 7 · 4 个 decode",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "7",
+     "num": "7"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{7}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{7}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{7}",
+     "num": "4"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens"
+   ],
+   "state": {
+    "batch_tokens": 4
+   },
+   "bars": [
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R5",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "decode"
+    },
+    {
+     "row": "R9",
+     "kind": "decode"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 4 / 32 个 token 预算。还有 3 个在 waiting 队列里排队。"
+  },
+  {
+   "id": "t8",
+   "title": "tick 8 · 4 个 decode",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "8",
+     "num": "8"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{8}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{8}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{8}",
+     "num": "4"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [],
+   "state": {},
+   "bars": [
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R5",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "decode"
+    },
+    {
+     "row": "R9",
+     "kind": "decode"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 4 / 32 个 token 预算。还有 3 个在 waiting 队列里排队。"
+  },
+  {
+   "id": "t9",
+   "title": "tick 9 · 4 个 decode，1 个完成",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "9",
+     "num": "9"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{9}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{9}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{9}",
+     "num": "4"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "done_q",
+    "running_q"
+   ],
+   "state": {
+    "running_q": [
+     0,
+     1,
+     0,
+     0,
+     1,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "done_q": [
+     1,
+     0,
+     1,
+     1,
+     0,
+     1,
+     0,
+     1,
+     1,
+     0,
+     0,
+     0
+    ]
+   },
+   "bars": [
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R5",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "decode"
+    },
+    {
+     "row": "R9",
+     "kind": "decode"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 4 / 32 个 token 预算。退出的请求立刻让出槽位。还有 3 个在 waiting 队列里排队。",
+   "regions": {
+    "EXIT": "本步有 R9 生成了最后一个 token，KV block 立刻归还空闲池。腾出的槽位下一步就能被新请求补上，这就是「随退随补」。"
+   }
+  },
+  {
+   "id": "t10",
+   "title": "tick 10 · 1 个 prefill，3 个 decode",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "10",
+     "num": "10"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{10}|",
+     "num": "3"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{10}} p_r",
+     "num": "8"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{10}",
+     "num": "11"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens",
+    "running_q",
+    "waiting_q"
+   ],
+   "state": {
+    "waiting_q": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     1,
+     1
+    ],
+    "running_q": [
+     0,
+     1,
+     0,
+     0,
+     1,
+     0,
+     1,
+     0,
+     0,
+     1,
+     0,
+     0
+    ],
+    "batch_tokens": 11
+   },
+   "bars": [
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R5",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "decode"
+    },
+    {
+     "row": "R10",
+     "kind": "prefill"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 11 / 32 个 token 预算。新上车：R10（prompt 8）。还有 2 个在 waiting 队列里排队。"
+  },
+  {
+   "id": "t11",
+   "title": "tick 11 · 4 个 decode",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "11",
+     "num": "11"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{11}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{11}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{11}",
+     "num": "4"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens"
+   ],
+   "state": {
+    "batch_tokens": 4
+   },
+   "bars": [
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R5",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "decode"
+    },
+    {
+     "row": "R10",
+     "kind": "decode"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 4 / 32 个 token 预算。还有 2 个在 waiting 队列里排队。"
+  },
+  {
+   "id": "t12",
+   "title": "tick 12 · 3 个 decode，抢占 1",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{PREEMPT}{\\text{抢占}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{PREEMPT}{\\text{抢占}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{PREEMPT}{\\text{抢占}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "12",
+     "num": "12"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{12}|",
+     "num": "3"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{12}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{12}",
+     "num": "3"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens",
+    "running_q",
+    "waiting_q"
+   ],
+   "state": {
+    "waiting_q": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     1,
+     1,
+     1
+    ],
+    "running_q": [
+     0,
+     1,
+     0,
+     0,
+     1,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "batch_tokens": 3
+   },
+   "bars": [
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R5",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "decode"
+    },
+    {
+     "row": "R10",
+     "kind": "preempted"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 3 / 32 个 token 预算。KV 不够，R10 被抢占并打回 waiting 队头，下次调度要从头重新 prefill。还有 3 个在 waiting 队列里排队。",
+   "regions": {
+    "PREEMPT": "KV 不够，allocate_slots 拿不到块：踢掉 running 里最后来的 R10，它的 KV 全部释放、num_computed_tokens 归零（重计算恢复），打回 waiting 队头，等有资源了优先恢复。"
+   }
+  },
+  {
+   "id": "t13",
+   "title": "tick 13 · 1 个 prefill，2 个 decode，抢占 1",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{PREEMPT}{\\text{抢占}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{PREEMPT}{\\text{抢占}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{PREEMPT}{\\text{抢占}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "13",
+     "num": "13"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{13}|",
+     "num": "2"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{13}} p_r",
+     "num": "8"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{13}",
+     "num": "11"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens",
+    "running_q",
+    "waiting_q"
+   ],
+   "state": {
+    "waiting_q": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     1,
+     1
+    ],
+    "running_q": [
+     0,
+     1,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0
+    ],
+    "batch_tokens": 11
+   },
+   "bars": [
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R5",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "preempted"
+    },
+    {
+     "row": "R10",
+     "kind": "prefill"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 11 / 32 个 token 预算。新上车：R10（prompt 8）。KV 不够，R7 被抢占并打回 waiting 队头，下次调度要从头重新 prefill。还有 3 个在 waiting 队列里排队。",
+   "regions": {
+    "PREEMPT": "KV 不够，allocate_slots 拿不到块：踢掉 running 里最后来的 R7，它的 KV 全部释放、num_computed_tokens 归零（重计算恢复），打回 waiting 队头，等有资源了优先恢复。"
+   }
+  },
+  {
+   "id": "t14",
+   "title": "tick 14 · 1 个 prefill，3 个 decode",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "14",
+     "num": "14"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{14}|",
+     "num": "3"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{14}} p_r",
+     "num": "8"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{14}",
+     "num": "11"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "running_q",
+    "waiting_q"
+   ],
+   "state": {
+    "waiting_q": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     1,
+     1
+    ],
+    "running_q": [
+     0,
+     1,
+     0,
+     0,
+     1,
+     0,
+     1,
+     0,
+     0,
+     1,
+     0,
+     0
+    ]
+   },
+   "bars": [
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R5",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "prefill"
+    },
+    {
+     "row": "R10",
+     "kind": "decode"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 11 / 32 个 token 预算。新上车：R7（prompt 8）。还有 2 个在 waiting 队列里排队。"
+  },
+  {
+   "id": "t15",
+   "title": "tick 15 · 3 个 decode，抢占 1",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{PREEMPT}{\\text{抢占}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{PREEMPT}{\\text{抢占}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{PREEMPT}{\\text{抢占}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "15",
+     "num": "15"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{15}|",
+     "num": "3"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{15}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{15}",
+     "num": "4"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens",
+    "running_q",
+    "waiting_q"
+   ],
+   "state": {
+    "waiting_q": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     1,
+     1,
+     1
+    ],
+    "running_q": [
+     0,
+     1,
+     0,
+     0,
+     1,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "batch_tokens": 4
+   },
+   "bars": [
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R5",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "decode"
+    },
+    {
+     "row": "R10",
+     "kind": "preempted"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 4 / 32 个 token 预算。KV 不够，R10 被抢占并打回 waiting 队头，下次调度要从头重新 prefill。还有 3 个在 waiting 队列里排队。",
+   "regions": {
+    "PREEMPT": "KV 不够，allocate_slots 拿不到块：踢掉 running 里最后来的 R10，它的 KV 全部释放、num_computed_tokens 归零（重计算恢复），打回 waiting 队头，等有资源了优先恢复。"
+   }
+  },
+  {
+   "id": "t16",
+   "title": "tick 16 · 1 个 prefill，3 个 decode，1 个完成",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "16",
+     "num": "16"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{16}|",
+     "num": "3"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{16}} p_r",
+     "num": "8"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{16}",
+     "num": "11"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens",
+    "done_q",
+    "running_q",
+    "waiting_q"
+   ],
+   "state": {
+    "waiting_q": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     1,
+     1
+    ],
+    "running_q": [
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     1,
+     0,
+     0
+    ],
+    "done_q": [
+     1,
+     0,
+     1,
+     1,
+     1,
+     1,
+     0,
+     1,
+     1,
+     0,
+     0,
+     0
+    ],
+    "batch_tokens": 11
+   },
+   "bars": [
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R5",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "decode"
+    },
+    {
+     "row": "R10",
+     "kind": "prefill"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 11 / 32 个 token 预算。新上车：R10（prompt 8）。退出的请求立刻让出槽位。还有 2 个在 waiting 队列里排队。",
+   "regions": {
+    "EXIT": "本步有 R5 生成了最后一个 token，KV block 立刻归还空闲池。腾出的槽位下一步就能被新请求补上，这就是「随退随补」。"
+   }
+  },
+  {
+   "id": "t17",
+   "title": "tick 17 · 1 个 prefill，3 个 decode",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "17",
+     "num": "17"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{17}|",
+     "num": "3"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{17}} p_r",
+     "num": "8"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{17}",
+     "num": "11"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "running_q",
+    "waiting_q"
+   ],
+   "state": {
+    "waiting_q": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     1
+    ],
+    "running_q": [
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     1,
+     1,
+     0
+    ]
+   },
+   "bars": [
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "decode"
+    },
+    {
+     "row": "R10",
+     "kind": "decode"
+    },
+    {
+     "row": "R11",
+     "kind": "prefill"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 11 / 32 个 token 预算。新上车：R11（prompt 8）。还有 1 个在 waiting 队列里排队。"
+  },
+  {
+   "id": "t18",
+   "title": "tick 18 · 4 个 decode",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "18",
+     "num": "18"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{18}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{18}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{18}",
+     "num": "4"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens"
+   ],
+   "state": {
+    "batch_tokens": 4
+   },
+   "bars": [
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "decode"
+    },
+    {
+     "row": "R10",
+     "kind": "decode"
+    },
+    {
+     "row": "R11",
+     "kind": "decode"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 4 / 32 个 token 预算。还有 1 个在 waiting 队列里排队。"
+  },
+  {
+   "id": "t19",
+   "title": "tick 19 · 4 个 decode，1 个完成",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "19",
+     "num": "19"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{19}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{19}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{19}",
+     "num": "4"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "done_q",
+    "running_q"
+   ],
+   "state": {
+    "running_q": [
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     1,
+     0,
+     0
+    ],
+    "done_q": [
+     1,
+     0,
+     1,
+     1,
+     1,
+     1,
+     0,
+     1,
+     1,
+     0,
+     1,
+     0
+    ]
+   },
+   "bars": [
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "decode"
+    },
+    {
+     "row": "R10",
+     "kind": "decode"
+    },
+    {
+     "row": "R11",
+     "kind": "decode"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 4 / 32 个 token 预算。退出的请求立刻让出槽位。还有 1 个在 waiting 队列里排队。",
+   "regions": {
+    "EXIT": "本步有 R11 生成了最后一个 token，KV block 立刻归还空闲池。腾出的槽位下一步就能被新请求补上，这就是「随退随补」。"
+   }
+  },
+  {
+   "id": "t20",
+   "title": "tick 20 · 1 个 prefill，3 个 decode",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "排空",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "20",
+     "num": "20"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{20}|",
+     "num": "3"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{20}} p_r",
+     "num": "8"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{20}",
+     "num": "11"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens",
+    "running_q",
+    "waiting_q"
+   ],
+   "state": {
+    "waiting_q": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "running_q": [
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     1,
+     0,
+     1
+    ],
+    "batch_tokens": 11
+   },
+   "bars": [
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "decode"
+    },
+    {
+     "row": "R10",
+     "kind": "decode"
+    },
+    {
+     "row": "R12",
+     "kind": "prefill"
+    }
+   ],
+   "narration": "本 tick 花掉 11 / 32 个 token 预算。新上车：R12（prompt 8）。"
+  },
+  {
+   "id": "t21",
+   "title": "tick 21 · 3 个 decode，抢占 1，1 个完成",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}} \\;\\region{PREEMPT}{\\text{抢占}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}} \\;\\region{PREEMPT}{\\text{抢占}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}} \\;\\region{PREEMPT}{\\text{抢占}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "21",
+     "num": "21"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{21}|",
+     "num": "3"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{21}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{21}",
+     "num": "3"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens",
+    "done_q",
+    "running_q",
+    "waiting_q"
+   ],
+   "state": {
+    "waiting_q": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     1
+    ],
+    "running_q": [
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "done_q": [
+     1,
+     0,
+     1,
+     1,
+     1,
+     1,
+     0,
+     1,
+     1,
+     1,
+     1,
+     0
+    ],
+    "batch_tokens": 3
+   },
+   "bars": [
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "decode"
+    },
+    {
+     "row": "R10",
+     "kind": "decode"
+    },
+    {
+     "row": "R12",
+     "kind": "preempted"
+    }
+   ],
+   "narration": "本 tick 花掉 3 / 32 个 token 预算。KV 不够，R12 被抢占并打回 waiting 队头，下次调度要从头重新 prefill。退出的请求立刻让出槽位。还有 1 个在 waiting 队列里排队。",
+   "regions": {
+    "EXIT": "本步有 R10 生成了最后一个 token，KV block 立刻归还空闲池。腾出的槽位下一步就能被新请求补上，这就是「随退随补」。",
+    "PREEMPT": "KV 不够，allocate_slots 拿不到块：踢掉 running 里最后来的 R12，它的 KV 全部释放、num_computed_tokens 归零（重计算恢复），打回 waiting 队头，等有资源了优先恢复。"
+   }
+  },
+  {
+   "id": "t22",
+   "title": "tick 22 · 1 个 prefill，2 个 decode",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "排空",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "22",
+     "num": "22"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{22}|",
+     "num": "2"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{22}} p_r",
+     "num": "8"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{22}",
+     "num": "10"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens",
+    "running_q",
+    "waiting_q"
+   ],
+   "state": {
+    "waiting_q": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "running_q": [
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ],
+    "batch_tokens": 10
+   },
+   "bars": [
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "decode"
+    },
+    {
+     "row": "R12",
+     "kind": "prefill"
+    }
+   ],
+   "narration": "本 tick 花掉 10 / 32 个 token 预算。新上车：R12（prompt 8）。"
+  },
+  {
+   "id": "t23",
+   "title": "tick 23 · 3 个 decode",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "排空",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "23",
+     "num": "23"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{23}|",
+     "num": "3"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{23}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{23}",
+     "num": "3"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens"
+   ],
+   "state": {
+    "batch_tokens": 3
+   },
+   "bars": [
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "decode"
+    },
+    {
+     "row": "R12",
+     "kind": "decode"
+    }
+   ],
+   "narration": "本 tick 花掉 3 / 32 个 token 预算。"
+  },
+  {
+   "id": "t24",
+   "title": "tick 24 · 3 个 decode",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "排空",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "24",
+     "num": "24"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{24}|",
+     "num": "3"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{24}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{24}",
+     "num": "3"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [],
+   "state": {},
+   "bars": [
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "decode"
+    },
+    {
+     "row": "R12",
+     "kind": "decode"
+    }
+   ],
+   "narration": "本 tick 花掉 3 / 32 个 token 预算。"
+  },
+  {
+   "id": "t25",
+   "title": "tick 25 · 3 个 decode，1 个完成",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "排空",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "25",
+     "num": "25"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{25}|",
+     "num": "3"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{25}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{25}",
+     "num": "3"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "done_q",
+    "running_q"
+   ],
+   "state": {
+    "running_q": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ],
+    "done_q": [
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     0,
+     1,
+     1,
+     1,
+     1,
+     0
+    ]
+   },
+   "bars": [
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "decode"
+    },
+    {
+     "row": "R12",
+     "kind": "decode"
+    }
+   ],
+   "narration": "本 tick 花掉 3 / 32 个 token 预算。退出的请求立刻让出槽位。",
+   "regions": {
+    "EXIT": "本步有 R2 生成了最后一个 token，KV block 立刻归还空闲池。腾出的槽位下一步就能被新请求补上，这就是「随退随补」。"
+   }
+  },
+  {
+   "id": "t26",
+   "title": "tick 26 · 2 个 decode，2 个完成",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "排空",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "26",
+     "num": "26"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{26}|",
+     "num": "2"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{26}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{26}",
+     "num": "2"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens",
+    "done_q",
+    "running_q"
+   ],
+   "state": {
+    "running_q": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "done_q": [
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1
+    ],
+    "batch_tokens": 2
+   },
+   "bars": [
+    {
+     "row": "R7",
+     "kind": "decode"
+    },
+    {
+     "row": "R12",
+     "kind": "decode"
+    }
+   ],
+   "narration": "本 tick 花掉 2 / 32 个 token 预算。退出的请求立刻让出槽位。",
+   "regions": {
+    "EXIT": "本步有 R7、R12 生成了最后一个 token，KV block 立刻归还空闲池。腾出的槽位下一步就能被新请求补上，这就是「随退随补」。"
+   }
+  }
+ ]
+}
