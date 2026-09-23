@@ -411,15 +411,28 @@
       }
     });
 
-    // ---- progress axis: k is a real HBM read count and can only grow.
+    /* ---- progress axis: k is a real HBM read count and can only grow.
+     *
+     * REQUIRED ONLY WHEN THERE IS A `compare` BLOCK. `k` exists so the
+     * comparison panel can align its three methods on one shared axis; a lab
+     * with no comparison panel (L01's tiling replay, L05's KV cache) has no
+     * axis to align and legitimately has no `k`. Requiring it unconditionally
+     * was a drift from the Python contract, which only checks `k` where it
+     * matters — and it made every non-L00 trace fail to lint. */
     var n = cfgN === undefined ? null : cfgN;
+    /* Does this trace carry a shared progress axis at all? Declared by `k`
+     * itself, so the rule does not become circular (it cannot consult
+     * `compare`, since `compare`'s own presence check depends on this). */
+    var wantsAxis = trace.steps.some(function (s) { return typeof s.k === 'number'; });
     var lastK = 0;
     trace.steps.forEach(function (s) {
       if (typeof s.k !== 'number') {
-        gaps.push({
-          what: '步骤 "' + s.id + '" 没有 k（截至本步已从 HBM 读取的元素数）',
-          why: '对照面板无法把它对齐到共同的时间轴。'
-        });
+        if (wantsAxis) {
+          gaps.push({
+            what: '步骤 "' + s.id + '" 没有 k（截至本步已从 HBM 读取的元素数）',
+            why: 'trace 有 compare 块，对照面板需要把它对齐到共同的时间轴。'
+          });
+        }
         return;
       }
       if (n !== null && (s.k < 0 || s.k > n || s.k !== Math.floor(s.k))) {
@@ -435,7 +448,7 @@
       }
       lastK = Math.max(lastK, s.k);
     });
-    if (n !== null && trace.steps.length &&
+    if (wantsAxis && n !== null && trace.steps.length &&
         trace.steps[trace.steps.length - 1].k !== n) {
       gaps.push({
         what: '最后一步的 k = ' + trace.steps[trace.steps.length - 1].k +
@@ -444,12 +457,21 @@
       });
     }
 
-    // ---- the trace-level correction summary
+    /* ---- the trace-level correction summary.
+     *
+     * Only meaningful when the trace actually carries correction factors —
+     * i.e. some step has a `corr` block. A lab whose algorithm has no
+     * rescaling step (L01's tiling, L05's KV cache) legitimately has neither,
+     * and demanding it made every non-L00 trace fail to lint. The step-level
+     * `corr` rules above are gated the same way (`if (corr)`). */
+    var hasCorr = trace.steps.some(function (s) { return s && s.corr; });
     var metaCorr = (trace.meta || {}).correction;
-    if (!metaCorr || typeof metaCorr !== 'object') {
+    if (!hasCorr && metaCorr === undefined) {
+      // nothing to say: no correction semantics anywhere in this trace
+    } else if (!metaCorr || typeof metaCorr !== 'object') {
       gaps.push({
         what: 'meta.correction 缺失',
-        why: '放大器面板报不出整条 trace 的最终偏差。'
+        why: 'trace 里有步骤带 corr，但放大器报不出整条 trace 的最终偏差。'
       });
     } else {
       ['final_o_correct', 'final_o_uncorrected', 'final_bias_abs', 'final_bias_rel',
@@ -493,10 +515,19 @@
       }
     }
 
-    // ---- the comparison block: three real runs on one shared axis
+    /* ---- the comparison block: three real runs on one shared axis.
+     *
+     * Required exactly when the trace has a shared progress axis (`k`): that
+     * axis exists to align the comparison's methods, so `k` without `compare`
+     * is a half-built panel. A lab with neither (L01, L05) needs neither. */
     var cmp = trace.compare;
-    if (!cmp || typeof cmp !== 'object') {
-      gaps.push({ what: 'compare 缺失', why: '对照模式没有数据。' });
+    if (cmp === undefined && !wantsAxis) {
+      // no comparison panel in this trace
+    } else if (!cmp || typeof cmp !== 'object') {
+      gaps.push({
+        what: 'compare 缺失',
+        why: 'trace 有共用的时间轴 k，却没有对照模式的数据。'
+      });
     } else {
       var methods = cmp.methods || [];
       var ids = methods.map(function (m) { return m.id; });

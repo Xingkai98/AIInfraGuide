@@ -177,12 +177,25 @@
    * Each mutation breaks one rule. The lint must catch every one, or the clean
    * verdict it gives the real trace means nothing.
    */
-  /* The last two mutate a step that carries a `corr` block, so they are found
-   * by role rather than by a hard-coded index — how many blocks a trace has is
-   * a property of its input and block size, and the fixture's could change. */
+  /* A sabotage written against L00's fixture stops applying the moment another
+   * lab's trace is loaded: `tensors.x` does not exist in L01's trace, `MOLD` is
+   * not one of L05's binding names, and there is no `compare` block outside
+   * L00. Running those anyway reports a false "the lint missed it" and paints a
+   * red verdict for a trace that is perfectly fine — which is what happened on
+   * the ledger page before this. So a sabotage that cannot apply must SAY so.
+   *
+   * Two ways in: throw this sentinel from a precondition helper, or simply
+   * leave the trace unchanged (checked by the caller) — deleting a field that
+   * is not there is a no-op, and a no-op proves nothing. */
+  var NOT_APPLICABLE = { notApplicable: true };
+  function na() { throw NOT_APPLICABLE; }
+
+  /* The corr mutations address a step that carries a `corr` block, found by
+   * role rather than a hard-coded index — how many blocks a trace has is a
+   * property of its input and block size, and the fixture's could change. */
   function anyCorrStep(t) {
     for (var i = 0; i < t.steps.length; i++) if (t.steps[i].corr) return i;
-    throw new Error('no step carries a corr block');
+    na();
   }
 
   var SABOTAGES = {
@@ -253,26 +266,42 @@
     var clean = TM.lint(trace);
     var caught = [];
     var missed = [];
+    var skipped = [];
+    var before = JSON.stringify(trace);
     Object.keys(SABOTAGES).forEach(function (name) {
       var copy = clone(trace);
       try {
         SABOTAGES[name](copy);
       } catch (err) {
-        missed.push(name + '（破坏本身失败：' + err.message + '）');
+        /* Every sabotage reaches for a field that only exists on the trace it
+         * was written for: `compare`, `meta.correction`, L00's `MOLD` binding.
+         * On a trace without them the mutation does not merely no-op, it
+         * throws on the missing path (`undefined.per_block`) — same cause, so
+         * same bucket. Neither can prove anything about this trace. */
+        skipped.push(name);
         return;
       }
+      /* No-op means the fields this sabotage targets are absent here. */
+      if (JSON.stringify(copy) === before) { skipped.push(name); return; }
       var result = TM.lint(copy);
       if (result.gaps.length > 0) caught.push(name);
       else missed.push(name);
     });
+    var applied = caught.length + missed.length;
     return {
       cleanGaps: clean.gaps.length,
       cleanWarns: clean.warns.length,
       caught: caught,
       missed: missed,
+      skipped: skipped,
+      applied: applied,
+      /* A sabotage that never applied proves nothing, so a trace unlike L00's
+       * must report inconclusive rather than green — the same rule the jump
+       * control group follows. */
+      conclusive: applied > 0,
       /* A clean trace plus a live lint is the only combination that means
        * anything. */
-      passed: clean.gaps.length === 0 && missed.length === 0
+      passed: clean.gaps.length === 0 && missed.length === 0 && applied > 0
     };
   }
 
@@ -325,10 +354,14 @@
 
     html += '<div class="lab-verdict ' + (lint.passed ? 'lab-ok' : 'lab-bad') + '">' +
             '<b>契约 lint：</b>干净的 trace 报 <b>' + lint.cleanGaps + '</b> 个 gap / ' +
-            lint.cleanWarns + ' 个 warn；对照组 ' + lint.caught.length + ' 种破坏全部被抓到' +
+            lint.cleanWarns + ' 个 warn；对照组 ' + lint.caught.length + ' 种破坏被抓到' +
+            (lint.skipped.length ? '（另有 ' + lint.skipped.length +
+              ' 种不适用于本份 trace，已跳过）' : '') +
             (lint.missed.length ? '，<b>漏掉 ' + lint.missed.length + ' 种：' +
               NS.formula.escapeText(lint.missed.join('、')) + '</b>' : '') +
-            (lint.passed ? '。lint 是活的，所以上面的 0 有意义。' : '。') +
+            (!lint.conclusive
+              ? '。<b>⚠️ 没有一种破坏适用于本份 trace —— 这组对照没有区分力，上面的 0 不能当作证据。</b>'
+              : lint.passed ? '。lint 是活的，所以上面的 0 有意义。' : '。') +
             '</div>';
 
     html += '<details class="lab-vdetails"><summary>lint 明细</summary><table class="lab-vtable">' +
@@ -347,7 +380,10 @@
                controlFailures: jumps.controlFailures, passed: jumps.passed,
                conclusive: jumps.conclusive },
       lint: { gaps: lint.cleanGaps, warns: lint.cleanWarns,
-              caught: lint.caught.length, missed: lint.missed, passed: lint.passed }
+              caught: lint.caught.length, missed: lint.missed,
+              skipped: lint.skipped,
+              applied: lint.applied, conclusive: lint.conclusive,
+              passed: lint.passed }
     };
     global.__labVerify = global.__labVerify || {};
     global.__labVerify[trace.meta && trace.meta.lab || 'lab'] = result;
