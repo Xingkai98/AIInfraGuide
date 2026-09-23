@@ -1,0 +1,357 @@
+---
+/**
+ * The lab index: where readers enter the interactive labs, and the only lab
+ * content that site search indexes (lab pages carry `data-pagefind-ignore`).
+ *
+ * The diagram below is generated server-side from `labRoadmap.ts` and inlined
+ * as static SVG — no client JS, no layout measurement. Node positions come from
+ * a deterministic column-per-phase / row-within-phase grid, so the page renders
+ * identically on every build.
+ */
+import { getCollection } from 'astro:content';
+import Layout from '../../layouts/Layout.astro';
+import { getPath } from '../../utils/paths';
+import {
+  labsByPhase,
+  LAB_PHASES,
+  LAB_ROADMAP,
+  danglingRequires,
+  tutorialPath,
+} from '../../utils/labRoadmap';
+import { LAB_REGISTRY } from '../../utils/labRegistry';
+
+const phases = labsByPhase();
+
+// Fail the build rather than publish a roadmap with a dead edge or a missing
+// tutorial link. Guide ids are slugified by the content loader (see the KEY
+// FORMAT note in labRegistry.ts), so a hand-written id that looks plausible can
+// still resolve to nothing — these assertions are the only thing that catches it.
+const dangling = danglingRequires();
+if (dangling.length > 0) {
+  throw new Error(`labRoadmap: requires refers to unknown labs: ${dangling.join(', ')}`);
+}
+
+const guideIds = new Set((await getCollection('guides')).map((guide) => guide.id));
+const unknownGuideLabs = LAB_ROADMAP.filter(
+  (lab) => lab.guideId && !guideIds.has(lab.guideId)
+).map((lab) => `${lab.labId} → ${lab.guideId}`);
+if (unknownGuideLabs.length > 0) {
+  throw new Error(`labRoadmap: guideId does not match any guide: ${unknownGuideLabs.join(', ')}`);
+}
+
+const unlinkedGuides = LAB_ROADMAP.filter((lab) => lab.guideId && !tutorialPath(lab)).map(
+  (lab) => lab.labId
+);
+if (unlinkedGuides.length > 0) {
+  throw new Error(`labRoadmap: missing/unknown guideCategory for: ${unlinkedGuides.join(', ')}`);
+}
+
+const badRegistryKeys = Object.keys(LAB_REGISTRY).filter((id) => !guideIds.has(id));
+if (badRegistryKeys.length > 0) {
+  throw new Error(
+    `labRegistry: keys do not match any guide id (cards would silently never render): ` +
+      badRegistryKeys.join(', ')
+  );
+}
+
+/**
+ * Per-lab facts sourced from the registry, so the roadmap stays free of page
+ * paths and URLs. A lab is "live" only once a registry entry marks it
+ * published; until then the diagram and cards link to nothing.
+ */
+const labPages = new Map<string, string>();
+const publishedLabIds = new Set<string>();
+
+for (const entry of Object.values(LAB_REGISTRY)) {
+  if (entry.published !== false) {
+    publishedLabIds.add(entry.labId);
+    labPages.set(entry.labId, getPath(entry.page));
+  }
+}
+
+/** Site-root-relative URL of a lab's tutorial, from the roadmap's category. */
+const guideUrlByLabId = new Map(
+  LAB_ROADMAP.flatMap((lab) => {
+    const path = tutorialPath(lab);
+    return path ? [[lab.labId, getPath(path)] as const] : [];
+  })
+);
+
+// --- Static DAG layout -------------------------------------------------------
+// Columns are phases, rows are position within a phase. Single-letter node
+// labels (the id) fit comfortably; the full title lives in the list below.
+const NODE_W = 176;
+const NODE_H = 54;
+const COL_GAP = 56;
+const ROW_GAP = 18;
+const HEADER_H = 34;
+const ROUTE_CHANNEL_Y =
+  HEADER_H + Math.max(...phases.map((p) => p.labs.length)) * (NODE_H + ROW_GAP) + 16;
+const DIAGRAM_W = LAB_PHASES.length * NODE_W + (LAB_PHASES.length - 1) * COL_GAP;
+const DIAGRAM_H = ROUTE_CHANNEL_Y + 26;
+
+interface Placed {
+  labId: string;
+  title: string;
+  phase: string;
+  col: number;
+  row: number;
+  x: number;
+  y: number;
+}
+
+const placed: Placed[] = [];
+const byLabId = new Map<string, Placed>();
+
+phases.forEach(({ meta, labs }, col) => {
+  labs.forEach((lab, row) => {
+    const node: Placed = {
+      labId: lab.labId,
+      title: lab.title,
+      phase: meta.id,
+      col,
+      row,
+      x: col * (NODE_W + COL_GAP),
+      y: HEADER_H + row * (NODE_H + ROW_GAP),
+    };
+    placed.push(node);
+    byLabId.set(lab.labId, node);
+  });
+});
+
+interface Edge {
+  from: string;
+  to: string;
+  d: string;
+}
+
+/**
+ * Route a prerequisite edge. Nodes in the same phase stack vertically, so a
+ * short straight drop joins them. Anything else dips below the node grid,
+ * crosses in the routing channel, and rises in the gutter left of the target
+ * column — that keeps every segment clear of the node boxes.
+ */
+const edges: Edge[] = [];
+for (const lab of LAB_ROADMAP) {
+  const target = byLabId.get(lab.labId);
+  if (!target) continue;
+  for (const req of lab.requires ?? []) {
+    const source = byLabId.get(req);
+    if (!source) continue;
+
+    if (source.col === target.col) {
+      const x = source.x + NODE_W / 2;
+      edges.push({
+        from: req,
+        to: lab.labId,
+        d: `M ${x} ${source.y + NODE_H} L ${x} ${target.y}`,
+      });
+    } else {
+      const riserX = target.x - COL_GAP / 2;
+      const entryY = target.y + NODE_H / 2;
+      edges.push({
+        from: req,
+        to: lab.labId,
+        d: [
+          `M ${source.x + NODE_W / 2} ${source.y + NODE_H}`,
+          `L ${source.x + NODE_W / 2} ${ROUTE_CHANNEL_Y}`,
+          `L ${riserX} ${ROUTE_CHANNEL_Y}`,
+          `L ${riserX} ${entryY}`,
+          `L ${target.x} ${entryY}`,
+        ].join(' '),
+      });
+    }
+  }
+}
+
+const phaseColor: Record<string, string> = {
+  P0: '#007aff',
+  P1: '#34c759',
+  P2: '#ff9500',
+  P3: '#af52de',
+  P4: '#ff2d55',
+};
+---
+
+<Layout
+  title="交互实验室 - AIInfraGuide"
+  description="把 AIInfraGuide 的教程算法做成可逐步回放的交互实验室：执行 DAG、维度全景、公式逐帧绑定、回放控制。"
+>
+  <div class="max-w-[1500px] mx-auto px-6 py-12">
+    <header class="mb-10 max-w-3xl">
+      <h1 class="text-3xl md:text-4xl font-bold text-gray-900 dark:text-white mb-4 leading-tight">
+        交互实验室
+      </h1>
+      <p class="text-lg text-gray-600 dark:text-gray-300 leading-relaxed">
+        把教程里读得懂但想不清楚的算法，做成可一步步回放的学习页面：执行 DAG 随步高亮、张量形状全程标注、公式逐级代入数值、时间轴任意跳转。页面上每个数字都来自
+        <code class="text-[#007aff] dark:text-[#0a84ff]">traces/*.py</code>
+        真实跑出的 JSON，不是手编的演示数据。
+      </p>
+      <p class="mt-4 text-sm text-gray-500 dark:text-gray-400">
+        实验室页面不进站内搜索，入口在对应教程正文顶部的卡片。本页按路线图列出本轮全部
+        {LAB_ROADMAP.length} 个 lab；已上线的可以点进去，未上线的显示为「待发布」。
+      </p>
+    </header>
+
+    <!-- Dependency diagram -->
+    <section class="mb-12">
+      <h2 class="text-xl font-bold text-gray-900 dark:text-white mb-1">依赖关系图</h2>
+      <p class="text-sm text-gray-500 dark:text-gray-400 mb-5">
+        横轴是阶段，纵轴是阶段内的顺序。连线表示教程明确写出的硬前置；其余 lab 按阶段从左到右看即可。
+      </p>
+
+      <div class="overflow-x-auto rounded-2xl border border-gray-200 dark:border-white/[0.08] bg-white dark:bg-white/[0.02] p-4">
+        <svg
+          viewBox={`0 0 ${DIAGRAM_W} ${DIAGRAM_H}`}
+          width={DIAGRAM_W}
+          height={DIAGRAM_H}
+          class="block min-w-[720px]"
+          role="img"
+          aria-label="实验室依赖关系图"
+        >
+          <defs>
+            <marker id="lab-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor" class="text-gray-400 dark:text-gray-500" />
+            </marker>
+          </defs>
+
+          <!-- phase headers -->
+          {phases.map(({ meta }, col) => (
+            <g>
+              <text
+                x={col * (NODE_W + COL_GAP) + NODE_W / 2}
+                y={18}
+                text-anchor="middle"
+                class="fill-gray-500 dark:fill-gray-400"
+                style="font-size:13px;font-weight:600;letter-spacing:0.04em"
+              >
+                {meta.id} · {meta.label}
+              </text>
+            </g>
+          ))}
+
+          <!-- prerequisite edges, drawn under the nodes -->
+          <g class="text-gray-400 dark:text-gray-500">
+            {edges.map((edge) => (
+              <path
+                d={edge.d}
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-dasharray="4 3"
+                marker-end="url(#lab-arrow)"
+              />
+            ))}
+          </g>
+
+          <!-- nodes -->
+          {placed.map((node) => {
+            const href = labPages.get(node.labId);
+            const accent = phaseColor[node.phase];
+            const hasPage = publishedLabIds.has(node.labId);
+            const label = node.title.length > 18 ? `${node.title.slice(0, 17)}…` : node.title;
+            return (
+              <a href={href} class={hasPage ? 'cursor-pointer' : 'pointer-events-none'}>
+                <title>{hasPage ? `${node.labId} · ${node.title}（点击进入）` : `${node.labId} · ${node.title}（待发布）`}</title>
+                <rect
+                  x={node.x}
+                  y={node.y}
+                  width={NODE_W}
+                  height={NODE_H}
+                  rx="10"
+                  class="fill-gray-50 dark:fill-white/[0.04]"
+                  stroke={accent}
+                  stroke-width="1.5"
+                  stroke-opacity={hasPage ? '1' : '0.45'}
+                />
+                <text
+                  x={node.x + 14}
+                  y={node.y + 23}
+                  class="fill-gray-900 dark:fill-white"
+                  style="font-size:13px;font-weight:700"
+                >
+                  {node.labId}
+                </text>
+                <text
+                  x={node.x + 14}
+                  y={node.y + 41}
+                  class="fill-gray-500 dark:fill-gray-400"
+                  style="font-size:11.5px"
+                >
+                  {label}
+                </text>
+              </a>
+            );
+          })}
+        </svg>
+      </div>
+
+      <p class="mt-3 text-xs text-gray-500 dark:text-gray-400">
+        虚线箭头 = 硬前置（L00 → L06 → L07）。节点描边较淡的 lab 页面尚未上线。
+      </p>
+    </section>
+
+    <!-- Phase-by-phase list -->
+    <section>
+      <h2 class="text-xl font-bold text-gray-900 dark:text-white mb-5">全部 lab</h2>
+      <div class="space-y-8">
+        {phases.map(({ meta, labs }) => (
+          <div>
+            <div class="flex items-baseline gap-3 mb-3">
+              <span
+                class="rounded-md px-2 py-0.5 font-mono text-[11px] font-semibold text-white"
+                style={`background:${phaseColor[meta.id]}`}
+              >
+                {meta.id}
+              </span>
+              <h3 class="text-base font-bold text-gray-900 dark:text-white">{meta.label}</h3>
+              <span class="text-xs text-gray-400 dark:text-gray-500">{labs.length} 个</span>
+            </div>
+            <p class="text-sm text-gray-500 dark:text-gray-400 mb-4 max-w-3xl">{meta.blurb}</p>
+
+            <ul class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {labs.map((lab) => {
+                const hasPage = publishedLabIds.has(lab.labId);
+                const guideUrl = guideUrlByLabId.get(lab.labId);
+                return (
+                  <li class="rounded-xl border border-gray-200 dark:border-white/[0.08] p-4 bg-white dark:bg-white/[0.02]">
+                    <div class="flex items-center gap-2 mb-1.5">
+                      <span class="font-mono text-xs font-bold text-gray-900 dark:text-white">{lab.labId}</span>
+                      {hasPage ? (
+                        <span class="rounded bg-green-100 px-1.5 py-0.5 text-[10px] font-medium text-green-700 dark:bg-green-400/15 dark:text-green-300">
+                          已上线
+                        </span>
+                      ) : (
+                        <span class="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-500 dark:bg-white/[0.06] dark:text-gray-400">
+                          待发布
+                        </span>
+                      )}
+                    </div>
+                    <p class="text-sm font-semibold text-gray-900 dark:text-white">{lab.title}</p>
+                    <p class="mt-1.5 text-xs leading-relaxed text-gray-500 dark:text-gray-400">{lab.summary}</p>
+                    {lab.requires?.length ? (
+                      <p class="mt-2 text-[11px] text-gray-400 dark:text-gray-500">
+                        前置：{lab.requires.join('、')}
+                      </p>
+                    ) : null}
+                    {guideUrl ? (
+                      <a
+                        href={guideUrl}
+                        class="mt-3 inline-flex items-center gap-1 text-xs font-medium text-[#007aff] dark:text-[#0a84ff] hover:underline"
+                      >
+                        对应教程
+                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                          <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
+                        </svg>
+                      </a>
+                    ) : null}
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        ))}
+      </div>
+    </section>
+  </div>
+</Layout>
