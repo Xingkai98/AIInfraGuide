@@ -1,0 +1,183 @@
+/* Engine · view component: memory ledger — styles.
+ *
+ * A separate file from `lab.css` on purpose: the shared engine stylesheet was
+ * frozen when the engine landed (decision D02 — lab-side work only ever adds
+ * new files), and a view component that had to edit it would be the one thing
+ * every parallel lab touches. This file is loaded by the pages that use the
+ * ledger, alongside lab.css.
+ *
+ * The custom properties are read from the surrounding `.lab-root` and fall
+ * back to literal colours, so the component also renders correctly on a page
+ * that has not mounted the player.
+ */
+
+.lab-ledger {
+  --lg-line: var(--lab-line, #e3e6ec);
+  --lg-fg: var(--lab-fg, #1f2937);
+  --lg-dim: var(--lab-dim, #6b7280);
+  --lg-faint: var(--lab-faint, #9ca3af);
+  --lg-panel: var(--lab-panel-2, #f6f7f9);
+  --lg-accent: var(--lab-accent, #007aff);
+  font-size: 12.5px;
+  color: var(--lg-fg);
+}
+
+/* ------------------------------------------------------------------- the bar */
+.lab-ledger-bar {
+  display: flex;
+  height: 34px;
+  border-radius: 7px;
+  overflow: hidden;
+  border: 1px solid var(--lg-line);
+  background: var(--lg-panel);
+}
+.lab-ledger-bar-sm { height: 14px; border-radius: 4px; }
+.lab-ledger-bar > span {
+  display: block;
+  min-width: 0;
+  transition: filter 0.12s ease;
+}
+/* Growing is the animation the reader is meant to watch: KV Cache widens as
+ * the context grows. `flex-grow` carries the byte count, so the transition has
+ * to be on it — on `width` nothing would move. */
+.lab-ledger-bar > span { transition: flex-grow 0.25s ease, filter 0.12s ease; }
+.lab-ledger-blk:hover,
+.lab-ledger-blk-on { filter: brightness(1.18) saturate(1.1); }
+.lab-ledger-bar-empty {
+  align-items: center;
+  justify-content: center;
+  color: var(--lg-faint);
+  font-style: italic;
+}
+.lab-ledger-empty { padding: 0 10px; }
+
+.lab-ledger-ticks {
+  position: relative;
+  height: 15px;
+  margin-top: 2px;
+}
+.lab-ledger-tick {
+  position: absolute;
+  transform: translateX(-50%);
+  color: var(--lg-faint);
+  font: 9.5px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: nowrap;
+}
+.lab-ledger-tick:first-child { transform: none; }
+.lab-ledger-tick:last-child { transform: translateX(-100%); }
+
+/* ----------------------------------------------------------------- the table */
+.lab-ledger-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 8px;
+}
+.lab-ledger-table th {
+  text-align: left;
+  color: var(--lg-dim);
+  font-weight: 500;
+  font-size: 10.5px;
+  padding: 0 6px 4px 0;
+  border-bottom: 1px solid var(--lg-line);
+}
+.lab-ledger-th-num,
+.lab-ledger-th-pct { text-align: right; }
+.lab-ledger-table td {
+  padding: 3px 6px 3px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--lg-line) 55%, transparent);
+}
+.lab-ledger-row-on { background: color-mix(in srgb, var(--lg-accent) 8%, transparent); }
+.lab-ledger-seg { white-space: nowrap; }
+.lab-ledger-sw {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  margin-right: 6px;
+  vertical-align: -1px;
+}
+.lab-ledger-num {
+  text-align: right;
+  font: 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: nowrap;
+}
+.lab-ledger-pct {
+  text-align: right;
+  color: var(--lg-dim);
+  white-space: nowrap;
+}
+.lab-ledger-total td {
+  border-bottom: none;
+  border-top: 1px solid var(--lg-line);
+  font-weight: 650;
+  color: var(--lg-fg);
+}
+
+/* --------------------------------------------------------------- provenance
+ * The formula behind each segment. This is the answer to "where did that
+ * number come from", so it sits under the numbers rather than behind a
+ * tooltip. */
+.lab-ledger-formula { margin-top: 8px; }
+.lab-ledger-fml {
+  padding: 3px 0;
+  font-size: 12px;
+  color: var(--lg-dim);
+  transition: color 0.12s ease;
+}
+.lab-ledger-fml-on { color: var(--lg-fg); }
+.lab-ledger-fml .katex { font-size: 1em; color: var(--lg-fg); }
+
+.lab-ledger-caption {
+  margin-top: 8px;
+  padding: 7px 9px;
+  border-left: 3px solid var(--lg-accent);
+  background: var(--lg-panel);
+  border-radius: 0 7px 7px 0;
+  color: var(--lg-dim);
+  font-size: 12px;
+}
+
+/* ---------------------------------------------------------------- the matrix */
+.lab-ledger-mx {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 2px;
+}
+.lab-ledger-mx th {
+  font-weight: 500;
+  font-size: 11px;
+  color: var(--lg-dim);
+  text-align: center;
+  padding: 5px 6px;
+  vertical-align: bottom;
+}
+.lab-ledger-mx-corner { text-align: left !important; color: var(--lg-faint) !important; }
+.lab-ledger-mx-col { display: block; font-weight: 650; color: var(--lg-fg); font-size: 12px; }
+.lab-ledger-mx-note { display: block; font-size: 10px; color: var(--lg-faint); }
+.lab-ledger-mx-row {
+  text-align: left !important;
+  white-space: nowrap;
+  color: var(--lg-fg) !important;
+}
+.lab-ledger-mx-cell {
+  text-align: right;
+  padding: 7px 8px;
+  border-radius: 5px;
+  font: 12px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace;
+  border: 1px solid var(--lg-line);
+  white-space: nowrap;
+}
+.lab-ledger-mx-exact {
+  display: block;
+  font-size: 9.5px;
+  color: var(--lg-faint);
+}
+.lab-ledger-mx-bars td { vertical-align: top; padding-top: 8px; }
+.lab-ledger-mx-bar { border: none !important; }
+.lab-ledger-mx-total {
+  display: block;
+  margin-top: 4px;
+  text-align: right;
+  font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--lg-dim);
+}

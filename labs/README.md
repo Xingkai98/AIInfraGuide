@@ -8,6 +8,7 @@
 labs/
 ├── assets/            所有 lab 页面共享（方案 A：共享 assets 目录）
 │   ├── engine/        通用播放器（见下）
+│   │   └── views/     跨 lab 复用的专用视图：每类一个 .js + 一个同名 .css
 │   └── vendor/katex/  本地 KaTeX（由 scripts/vendor-katex.mjs 生成，勿手改）
 ├── traces/            每个 lab 一个 Python 轨迹生成器（**不会**被发布）
 └── pages/             每个 lab 一个自包含 HTML
@@ -34,6 +35,36 @@ labs/
 引擎负责容器，`render` 返回 HTML 字符串。面板只格式化 trace 里的字段，**不做任何算法计算** ——
 L00 的修正因子放大器与对照模式都挂在这一层。
 
+**有一个坑**：`render` 返回后，引擎会执行 `host.innerHTML = 返回值`。所以面板里要挂**有状态**的
+视图（例如显存账本，它的悬停高亮与宽度过渡都需要保留 DOM）时，不能把视图挂进 `[data-panel-body]`，
+要挂到引擎建好后不再触碰的 `[data-panel="<id>"]` 上（追加一个兄弟容器）——否则每次重绘都会
+把视图从文档里摘掉。L00 的 `render` 返回 HTML 字符串，没踩到这条；账本页是第一个有状态面板。
+
+## 专用视图
+
+`labs/assets/engine/views/` 放跨 lab 复用的视图（决策 #38：在引擎阶段一次性抽出，之后的 lab 只消费）。
+每个视图是「一个 .js + 一个同名 .css」，**不改 `lab.css`** —— 那份样式随引擎冻结，而视图组件正是
+所有 lab 都会碰的东西，让它去改共享样式表就等于让并行开发重新冲突。
+
+| 文件 | 职责 |
+|---|---|
+| `ledger.js` / `ledger.css` | 显存账本：一维堆叠条 + 二维矩阵（多策略 × 多分项） |
+
+**视图组件里不放显存公式。** 代价模型是 lab 内容：L05 算 KV Cache，L14 算 ZeRO 切分，
+组件不应该认识其中任何一个的键名。所以公式由页面作为 `{segments, predict(cfg), properties}`
+传入，`predict` 必须是**纯函数**（输入配置 → 输出字节数），滑杆联动才可能是重算而不是换图。
+
+组件自带自检（`LabEngine.ledger.panel(host, trace, model)`），它跑三件事并只在三件全过时报绿：
+逐步对拍（模型的预测 == trace 里 Python 从 `arr.size` 数出来的字节数）、缩放性质（公式的性质，
+自洽但错误的公式过不了）、以及**对照组**（故意写错的模型必须被抓到，否则这组对拍没有区分力）。
+和 `verify.js` 的任意跳转检查同一形状，理由也一样。
+
+**账本契约 lint 有两份**：`labs/traces/kv_cache.py` 的 `lint_ledger()`（权威，写在 trace 前跑）
+与 `ledger.js` 的 `lint()`（JS 移植，让页面内编辑 trace 也能立刻得到同样的判决）。**两边的规则
+必须同步改，且每边都要有对应的破坏用例** —— 只有一侧有规则的规则，那一侧等于没测。
+`trace-model.js` 是引擎的**基础**契约 lint（读写一致性、graph 覆盖、三档三元组、哨兵），
+与本票新增的账本规则是两套；在 `kv_cache.json` 上两者都必须报 0。
+
 **trace 由 `scripts/build-labs.mjs` 在构建期内联**：页面里写 `<!-- trace:NAME -->`，
 构建时替换成 `labs/traces/NAME.json` 的内容（包在 `window.LabTraces.NAME` 里）。
 这样页面与 JSON 不可能漂移 —— 它们就是同一份数据。JSON 缺失会直接构建失败。
@@ -45,10 +76,25 @@ trace 一起内联。清单由 trace 生成脚本自己写出，所以「有哪�
 （文件大小按 lab 数翻倍增长，但 [R02 实测](../docs/research/size-budget.md)：trace 相对 KaTeX
 字体的体积是零头，压缩后更小。）
 
-**引擎的验收脚本**：`npm run build:labs && python3 scripts/verify-labs.py`。
-它在真 Chromium 里跑完整条验收清单并出截图到 `labs/pages/shots/`（截图入库，
-审阅时不必自己跑一遍）。其中「任意跳转」同时跑纯函数重建与**故意做错的有状态对照组** ——
-只有对照组确实失败，纯函数的「0 次不一致」才算数；两者都过时脚本会报「无区分力」而不是通过。
+**验收脚本**（都在真 Chromium 里跑完整条清单并出截图到 `labs/pages/shots/`，截图入库，
+审阅时不必自己跑一遍）：
+
+```bash
+npm run build:labs && python3 scripts/verify-labs.py    # 引擎：L00 页面
+npm run build:labs && python3 scripts/verify-ledger.py  # 显存账本视图组件
+```
+
+`verify-labs.py` 覆盖引擎本身的契约。其中「任意跳转」同时跑纯函数重建与**故意做错的有状态
+对照组** —— 只有对照组确实失败，纯函数的「0 次不一致」才算数；两者都过时脚本会报「无区分力」
+而不是通过。`verify-ledger.py` 覆盖视图组件：以 L05 的真实 trace 驱动，逐步核对渲染出的字节数、
+检查二维矩阵的 ZeRO 切分、驱动滑杆验证重算的缩放关系，并读回页面自检的结论。
+
+**`verify-labs.py` 里的 lint 对照组是 L00 专属的**：它是一组写死在 `verify.js` 里、针对 L00 那份
+trace 的破坏（`delete tensors.x`、`delete steps[2].bindings.MOLD.idx` …）。换一份 trace 时其中
+几条会变成空操作，于是 `LabEngine.verify.panel` 会打出一个与当前 trace 无关的红 verdict。
+所以新 trace 的验收页应当直接调**通用的** `LabEngine.verify.runJumpCheck`，
+而不是整个 `verify.panel`（账本页就是这么做的）。`verify.js` 里那组破坏值得改成从 trace 派生，
+但那要动引擎文件，留给后续票。
 
 `labs/pages/*.html` 会被 `scripts/build-labs.mjs` **拍平**拷进 `public/labs/`，再由 Astro 原样复制到 `dist/`。所以：
 
