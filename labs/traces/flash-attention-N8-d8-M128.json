@@ -1,0 +1,7382 @@
+{
+ "meta": {
+  "lab": "L06",
+  "title": "FlashAttention V1（N=8，d_head=8，SRAM M=128 个元素）",
+  "source": "docs/guides/模块二-cuda编程与算子优化/6.1-FlashAttention V1详解.md",
+  "model": {
+   "N": 8,
+   "d_model": 64,
+   "H": 4,
+   "d_head": 8,
+   "note": "贯穿示例模型 N=8、d_model=64、H=4、d_head=8；本 lab 回放第 0 个头，所有形状里的 d 都是 d_head。"
+  },
+  "config": {
+   "N": 8,
+   "d": 8,
+   "M": 128,
+   "Bc": 4,
+   "Br": 4,
+   "Tr": 2,
+   "Tc": 2,
+   "n_blocks": 4,
+   "n_pairs": 4,
+   "n_steps": 32
+  },
+  "loop_order": "循环顺序是 V1 的：外循环遍历 K/V 块，内循环遍历 Q 块（教程 4.3 / 5.2）。代价是 O_i、m_i、ℓ_i 每进一个内层迭代都要读写一次 HBM —— 这正是 V2 要消掉的。",
+  "reference": "FA、numpy 标准实现、torch.softmax 三者输出两两一致，偏差均在设计推算的求和顺序上界 4.08e-15 之内（相对容差 1e-12，float64）；漏掉修正因子的影子递推被同一判据抓到（影子递推读取代价与正确版逐位相同）；HBM 访问 S/P：FA 0 次、标准实现 4 次；IO 标准 512 → FA 656 个元素",
+  "exposure": {
+   "claim": "S 和 P 在整趟回放里从不落到 HBM",
+   "forbidden": [
+    "P",
+    "S"
+   ],
+   "flash_hbm_tensors": [
+    "K",
+    "O",
+    "Q",
+    "V",
+    "l",
+    "m"
+   ],
+   "standard_hbm_tensors": [
+    "K",
+    "O",
+    "P",
+    "Q",
+    "S",
+    "V"
+   ],
+   "flash_forbidden_accesses": 0,
+   "standard_forbidden_accesses": 4,
+   "note": "两份数字出自同一个 Mem 记录对象：FlashAttention 与标准 Attention 是两段真实的 numpy 代码，只能通过它访问内存。标准实现那份是对照组 ——它必须出现 S、P，否则 FA 那边的 0 就没有区分力。"
+  },
+  "io": {
+   "model": "把 HBM 建模成一个只能按块读写的对象，每次读写记一条 (op, 张量, 元素数)。标准实现与 FlashAttention 都真的跑在上面，计数是数出来的，不是填公式。",
+   "standard": {
+    "reads": 320,
+    "writes": 192,
+    "elements": 512,
+    "accesses": 8,
+    "tensors": [
+     "K",
+     "O",
+     "P",
+     "Q",
+     "S",
+     "V"
+    ],
+    "by_tensor": {
+     "Q": {
+      "read": 64,
+      "write": 0
+     },
+     "K": {
+      "read": 64,
+      "write": 0
+     },
+     "S": {
+      "read": 64,
+      "write": 64
+     },
+     "P": {
+      "read": 64,
+      "write": 64
+     },
+     "V": {
+      "read": 64,
+      "write": 0
+     },
+     "O": {
+      "read": 0,
+      "write": 64
+     }
+    }
+   },
+   "flash": {
+    "reads": 416,
+    "writes": 240,
+    "elements": 656,
+    "accesses": 35,
+    "tensors": [
+     "K",
+     "O",
+     "Q",
+     "V",
+     "l",
+     "m"
+    ],
+    "by_tensor": {
+     "O": {
+      "read": 128,
+      "write": 192
+     },
+     "m": {
+      "read": 16,
+      "write": 24
+     },
+     "l": {
+      "read": 16,
+      "write": 24
+     },
+     "K": {
+      "read": 64,
+      "write": 0
+     },
+     "V": {
+      "read": 64,
+      "write": 0
+     },
+     "Q": {
+      "read": 128,
+      "write": 0
+     }
+    }
+   },
+   "predict": {
+    "standard": 512,
+    "flash": 656,
+    "standard_expr": "4Nd + 4N^2",
+    "flash_expr": "Nd + 2N + 2 B_c d T_c + (3 B_r d + 4 B_r) T_r T_c"
+   },
+   "asymptotics": {
+    "standard": "O(N^2)",
+    "flash": "O(N^2 d^2 / M)"
+   },
+   "ratio": 0.7804878048780488,
+   "curves": {
+    "ns": [
+     8,
+     16,
+     32,
+     64,
+     128
+    ],
+    "standard": [
+     {
+      "N": 8,
+      "elements": 512
+     },
+     {
+      "N": 16,
+      "elements": 1536
+     },
+     {
+      "N": 32,
+      "elements": 5120
+     },
+     {
+      "N": 64,
+      "elements": 18432
+     },
+     {
+      "N": 128,
+      "elements": 69632
+     }
+    ],
+    "flash": [
+     {
+      "Bc": 4,
+      "Br": 4,
+      "points": [
+       {
+        "N": 8,
+        "elements": 656
+       },
+       {
+        "N": 16,
+        "elements": 2208
+       },
+       {
+        "N": 32,
+        "elements": 8000
+       },
+       {
+        "N": 64,
+        "elements": 30336
+       },
+       {
+        "N": 128,
+        "elements": 118016
+       }
+      ]
+     },
+     {
+      "Bc": 8,
+      "Br": 8,
+      "points": [
+       {
+        "N": 8,
+        "elements": 432
+       },
+       {
+        "N": 16,
+        "elements": 1312
+       },
+       {
+        "N": 32,
+        "elements": 4416
+       },
+       {
+        "N": 64,
+        "elements": 16000
+       },
+       {
+        "N": 128,
+        "elements": 60672
+       }
+      ]
+     },
+     {
+      "Bc": 16,
+      "Br": 8,
+      "points": [
+       {
+        "N": 16,
+        "elements": 864
+       },
+       {
+        "N": 32,
+        "elements": 2624
+       },
+       {
+        "N": 64,
+        "elements": 8832
+       },
+       {
+        "N": 128,
+        "elements": 32000
+       }
+      ]
+     }
+    ],
+    "note": "同一份计数模型在 N = 8、16、32、64、128 上逐点跑出来的曲线：标准实现的读数与 B_c 无关，FA 的读数随 B_c 下降 —— 这就是 O(N²d²/M) 里那个 M 的来历。"
+   },
+   "law": {
+    "statement": "固定 d=8 与 N=128，实测 IO × B_c 近似恒定",
+    "rows": [
+     {
+      "Bc": 4,
+      "Br": 4,
+      "N": 128,
+      "elements": 118016,
+      "times_bc": 472064
+     },
+     {
+      "Bc": 8,
+      "Br": 8,
+      "N": 128,
+      "elements": 60672,
+      "times_bc": 485376
+     },
+     {
+      "Bc": 16,
+      "Br": 8,
+      "N": 128,
+      "elements": 32000,
+      "times_bc": 512000
+     }
+    ],
+    "spread": 0.08459869848156187,
+    "note": "把 O(N²d²/M) 落成一句可检验的话：M = 4 B_c d，所以 IO × B_c 应当与 B_c 无关。上表是数出来的，误差只在 ⌈·⌉ 的取整上。"
+   }
+  },
+  "sram": {
+   "M": 128,
+   "dominant": 128,
+   "used": 152,
+   "peak_step": "s00",
+   "parts": [
+    {
+     "name": "Q_i",
+     "label": "当前 Q 块",
+     "shape": [
+      4,
+      8
+     ],
+     "elements": 32
+    },
+    {
+     "name": "K_j",
+     "label": "当前 K 块",
+     "shape": [
+      4,
+      8
+     ],
+     "elements": 32
+    },
+    {
+     "name": "V_j",
+     "label": "当前 V 块",
+     "shape": [
+      4,
+      8
+     ],
+     "elements": 32
+    },
+    {
+     "name": "O_i",
+     "label": "累积输出块",
+     "shape": [
+      4,
+      8
+     ],
+     "elements": 32
+    },
+    {
+     "name": "S/P 共用缓冲",
+     "label": "S_ij / P_ij 共用一块缓冲",
+     "shape": [
+      4,
+      4
+     ],
+     "elements": 16,
+     "covers": [
+      "S"
+     ]
+    },
+    {
+     "name": "m_i",
+     "label": "行最大值",
+     "shape": [
+      4
+     ],
+     "elements": 4
+    },
+    {
+     "name": "l_i",
+     "label": "行指数和",
+     "shape": [
+      4
+     ],
+     "elements": 4
+    }
+   ],
+   "formula": "B_c = ceil(M / 4d)",
+   "exact": "(2B_r + 2B_c) d + B_r B_c + 2B_r",
+   "note": "教程的公式只约束主导项 4B_c·d = 128；完整的占用账还要算上S/P 共用的 4×4 缓冲与 m、ℓ，峰值 152 个元素（在 s00 步）。"
+  },
+  "correction": {
+   "rescales": 2,
+   "rows": 12,
+   "rows_total": 16,
+   "final_o_correct": 1.058523102939549,
+   "final_o_uncorrected": 1.0719450534694972,
+   "final_bias_abs": 0.08044184346509287,
+   "final_bias_rel": 0.2798434811590778,
+   "note": "「不修正」= 同一条递推里 α 恒为 1，其余一字不改。factor 取本块 min α、rows_scaled 数出本块有几行的 α 严格小于 1（α 是逐行的，kind 是整块的）；整条 trace 的偏差按输出矩阵的逐元素最大绝对差计；逐块的 o_correct / o_uncorrected 是各自 O_i 的 Frobenius 范数。",
+   "per_block": [
+    {
+     "n": 1,
+     "kind": "init",
+     "factor": 0.0,
+     "rows_scaled": 4,
+     "o_correct": 1.566803025333886,
+     "o_uncorrected": 1.566803025333886,
+     "bias_abs": 0.0,
+     "bias_rel": 0.0
+    },
+    {
+     "n": 2,
+     "kind": "init",
+     "factor": 0.0,
+     "rows_scaled": 4,
+     "o_correct": 1.5735570104848686,
+     "o_uncorrected": 1.5735570104848686,
+     "bias_abs": 0.0,
+     "bias_rel": 0.0
+    },
+    {
+     "n": 3,
+     "kind": "rescale",
+     "factor": 0.6547138808375151,
+     "rows_scaled": 2,
+     "o_correct": 0.7431970216022584,
+     "o_uncorrected": 0.756668769857065,
+     "bias_abs": 0.01347174825480657,
+     "bias_rel": 0.018126752211362243
+    },
+    {
+     "n": 4,
+     "kind": "rescale",
+     "factor": 0.904435290657585,
+     "rows_scaled": 2,
+     "o_correct": 0.7537435548900587,
+     "o_uncorrected": 0.7592881998165908,
+     "bias_abs": 0.005544644926532061,
+     "bias_rel": 0.007356142404880403
+    }
+   ]
+  }
+ },
+ "tensors": {
+  "Q": {
+   "shape": [
+    8,
+    8
+   ],
+   "dtype": "fp32",
+   "at": "HBM",
+   "role": "input",
+   "init": [
+    [
+     -0.39,
+     0.62,
+     -0.33,
+     0.64,
+     0.08,
+     0.62,
+     -0.34,
+     0.44
+    ],
+    [
+     -0.31,
+     0.57,
+     0.21,
+     -0.23,
+     -0.21,
+     -0.46,
+     0.37,
+     -0.39
+    ],
+    [
+     0.07,
+     -0.4,
+     0.57,
+     -0.62,
+     0.52,
+     -0.22,
+     -0.53,
+     0.37
+    ],
+    [
+     -0.42,
+     -0.45,
+     -0.06,
+     -0.51,
+     0.03,
+     0.69,
+     -0.16,
+     0.46
+    ],
+    [
+     -0.48,
+     0.6,
+     -0.45,
+     0.64,
+     0.61,
+     -0.54,
+     0.17,
+     0.28
+    ],
+    [
+     0.28,
+     0.68,
+     -0.18,
+     -0.43,
+     -0.38,
+     -0.07,
+     -0.63,
+     0.35
+    ],
+    [
+     0.25,
+     -0.52,
+     0.19,
+     0.25,
+     0.08,
+     -0.42,
+     0.47,
+     0.52
+    ],
+    [
+     0.59,
+     0.15,
+     -0.51,
+     0.28,
+     -0.49,
+     0.58,
+     0.17,
+     -0.21
+    ]
+   ],
+   "note": "Query，本 lab 取第 0 个头，整趟驻留 HBM"
+  },
+  "K": {
+   "shape": [
+    8,
+    8
+   ],
+   "dtype": "fp32",
+   "at": "HBM",
+   "role": "input",
+   "init": [
+    [
+     -0.59,
+     -0.62,
+     -0.17,
+     0.16,
+     -0.55,
+     -0.08,
+     0.3,
+     -0.02
+    ],
+    [
+     0.07,
+     0.6,
+     -0.28,
+     0.55,
+     -0.03,
+     -0.33,
+     0.11,
+     -0.66
+    ],
+    [
+     0.24,
+     -0.11,
+     -0.66,
+     0.29,
+     -0.35,
+     0.63,
+     -0.68,
+     0.21
+    ],
+    [
+     0.23,
+     0.46,
+     -0.54,
+     0.44,
+     -0.7,
+     0.43,
+     0.69,
+     0.19
+    ],
+    [
+     0.62,
+     0.23,
+     -0.14,
+     0.66,
+     -0.66,
+     0.03,
+     -0.45,
+     -0.23
+    ],
+    [
+     -0.32,
+     -0.16,
+     0.44,
+     0.17,
+     0.61,
+     -0.69,
+     0.42,
+     -0.54
+    ],
+    [
+     -0.15,
+     0.39,
+     -0.65,
+     -0.41,
+     0.56,
+     -0.26,
+     -0.03,
+     -0.28
+    ],
+    [
+     0.6,
+     0.2,
+     0.24,
+     -0.62,
+     -0.05,
+     -0.29,
+     -0.09,
+     0.68
+    ]
+   ],
+   "note": "Key，外层每个块只读一次"
+  },
+  "V": {
+   "shape": [
+    8,
+    8
+   ],
+   "dtype": "fp32",
+   "at": "HBM",
+   "role": "input",
+   "init": [
+    [
+     0.23,
+     -0.39,
+     -0.33,
+     -0.24,
+     -0.36,
+     0.69,
+     -0.27,
+     -0.15
+    ],
+    [
+     0.46,
+     0.7,
+     -0.46,
+     -0.55,
+     -0.07,
+     0.13,
+     -0.35,
+     0.55
+    ],
+    [
+     0.36,
+     -0.15,
+     -0.61,
+     0.21,
+     -0.4,
+     0.45,
+     -0.12,
+     0.16
+    ],
+    [
+     0.42,
+     0.69,
+     -0.53,
+     0.57,
+     0.04,
+     -0.1,
+     -0.09,
+     0.11
+    ],
+    [
+     -0.56,
+     -0.25,
+     0.15,
+     -0.04,
+     0.69,
+     0.07,
+     0.08,
+     -0.27
+    ],
+    [
+     -0.31,
+     0.51,
+     0.48,
+     -0.52,
+     -0.05,
+     -0.36,
+     0.15,
+     0.29
+    ],
+    [
+     -0.12,
+     -0.01,
+     -0.14,
+     -0.66,
+     0.27,
+     0.32,
+     -0.45,
+     0.57
+    ],
+    [
+     -0.61,
+     0.45,
+     -0.55,
+     0.36,
+     0.08,
+     -0.69,
+     0.29,
+     -0.6
+    ]
+   ],
+   "note": "Value，与 K 同步载入"
+  },
+  "O": {
+   "shape": [
+    8,
+    8
+   ],
+   "dtype": "fp32",
+   "at": "HBM",
+   "role": "output",
+   "note": "输出。V1 每轮内层迭代都要写回、下一个外循环再读回来"
+  },
+  "m": {
+   "shape": [
+    8
+   ],
+   "dtype": "fp32",
+   "at": "HBM",
+   "role": "state",
+   "note": "行最大值，逐行维护，随 O 一起往返 HBM"
+  },
+  "l": {
+   "shape": [
+    8
+   ],
+   "dtype": "fp32",
+   "at": "HBM",
+   "role": "state",
+   "note": "行指数和，随 O 一起往返 HBM"
+  },
+  "Q_i": {
+   "shape": [
+    4,
+    8
+   ],
+   "dtype": "fp32",
+   "at": "SRAM",
+   "role": "staging",
+   "note": "当前 Q 块，每个外层迭代重新读一次"
+  },
+  "K_j": {
+   "shape": [
+    4,
+    8
+   ],
+   "dtype": "fp32",
+   "at": "SRAM",
+   "role": "staging",
+   "note": "当前 K 块"
+  },
+  "V_j": {
+   "shape": [
+    4,
+    8
+   ],
+   "dtype": "fp32",
+   "at": "SRAM",
+   "role": "staging",
+   "note": "当前 V 块"
+  },
+  "O_i": {
+   "shape": [
+    4,
+    8
+   ],
+   "dtype": "fp32",
+   "at": "SRAM",
+   "role": "staging",
+   "note": "累积输出块，算完立刻写回 HBM"
+  },
+  "S": {
+   "shape": [
+    4,
+    4
+   ],
+   "dtype": "fp32",
+   "at": "SRAM",
+   "role": "staging",
+   "note": "分数块 S_ij = Q_i K_jᵀ/√d；与 P 共用缓冲，全程不落 HBM"
+  },
+  "P": {
+   "shape": [
+    4,
+    4
+   ],
+   "dtype": "fp32",
+   "at": "SRAM",
+   "role": "staging",
+   "note": "概率块 P_ij = exp(S_ij − m_new)，就地覆盖 S；全程不落 HBM"
+  },
+  "m_i": {
+   "shape": [
+    4
+   ],
+   "dtype": "fp32",
+   "at": "SRAM",
+   "role": "state",
+   "note": "当前块的行最大值"
+  },
+  "l_i": {
+   "shape": [
+    4
+   ],
+   "dtype": "fp32",
+   "at": "SRAM",
+   "role": "state",
+   "note": "当前块的行指数和"
+  }
+ },
+ "graph": {
+  "nodes": [
+   {
+    "id": "init",
+    "title": "初始化：分块参数与 SRAM 预算",
+    "kind": "state",
+    "op": "init",
+    "phase": "准备"
+   },
+   {
+    "id": "kv0",
+    "title": "外循环 j=0：载入 K_0、V_0 到 SRAM",
+    "kind": "comm",
+    "op": "load",
+    "phase": "外循环"
+   },
+   {
+    "id": "ld00",
+    "title": "(i=0, j=0)：载入 Q_0、O_0、m_0、ℓ_0",
+    "kind": "comm",
+    "op": "load",
+    "phase": "内循环"
+   },
+   {
+    "id": "s00",
+    "title": "(i=0, j=0)：S_ij = Q_i K_jᵀ / √d —— 只落在 SRAM",
+    "kind": "op",
+    "op": "matmul",
+    "phase": "内循环"
+   },
+   {
+    "id": "mx00",
+    "title": "(i=0, j=0)：行最大值 m_i 抬到 m_new",
+    "kind": "op",
+    "op": "max",
+    "phase": "内循环"
+   },
+   {
+    "id": "p00",
+    "title": "(i=0, j=0)：P_ij = exp(S_ij − m_new) —— 就地覆盖 S",
+    "kind": "op",
+    "op": "exp",
+    "phase": "内循环"
+   },
+   {
+    "id": "l00",
+    "title": "(i=0, j=0)：ℓ_i 用修正因子重缩放后并入本块",
+    "kind": "op",
+    "op": "sum-exp",
+    "phase": "内循环"
+   },
+   {
+    "id": "o00",
+    "title": "(i=0, j=0)：O_i 用同一个 α 重缩放后累加 P_ij V_j",
+    "kind": "op",
+    "op": "matmul",
+    "phase": "内循环"
+   },
+   {
+    "id": "wb00",
+    "title": "(i=0, j=0)：把 O_i、m_i、ℓ_i 写回 HBM",
+    "kind": "comm",
+    "op": "store",
+    "phase": "内循环"
+   },
+   {
+    "id": "ld10",
+    "title": "(i=1, j=0)：载入 Q_1、O_1、m_1、ℓ_1",
+    "kind": "comm",
+    "op": "load",
+    "phase": "内循环"
+   },
+   {
+    "id": "s10",
+    "title": "(i=1, j=0)：S_ij = Q_i K_jᵀ / √d —— 只落在 SRAM",
+    "kind": "op",
+    "op": "matmul",
+    "phase": "内循环"
+   },
+   {
+    "id": "mx10",
+    "title": "(i=1, j=0)：行最大值 m_i 抬到 m_new",
+    "kind": "op",
+    "op": "max",
+    "phase": "内循环"
+   },
+   {
+    "id": "p10",
+    "title": "(i=1, j=0)：P_ij = exp(S_ij − m_new) —— 就地覆盖 S",
+    "kind": "op",
+    "op": "exp",
+    "phase": "内循环"
+   },
+   {
+    "id": "l10",
+    "title": "(i=1, j=0)：ℓ_i 用修正因子重缩放后并入本块",
+    "kind": "op",
+    "op": "sum-exp",
+    "phase": "内循环"
+   },
+   {
+    "id": "o10",
+    "title": "(i=1, j=0)：O_i 用同一个 α 重缩放后累加 P_ij V_j",
+    "kind": "op",
+    "op": "matmul",
+    "phase": "内循环"
+   },
+   {
+    "id": "wb10",
+    "title": "(i=1, j=0)：把 O_i、m_i、ℓ_i 写回 HBM",
+    "kind": "comm",
+    "op": "store",
+    "phase": "内循环"
+   },
+   {
+    "id": "kv1",
+    "title": "外循环 j=1：载入 K_1、V_1 到 SRAM",
+    "kind": "comm",
+    "op": "load",
+    "phase": "外循环"
+   },
+   {
+    "id": "ld01",
+    "title": "(i=0, j=1)：载入 Q_0、O_0、m_0、ℓ_0",
+    "kind": "comm",
+    "op": "load",
+    "phase": "内循环"
+   },
+   {
+    "id": "s01",
+    "title": "(i=0, j=1)：S_ij = Q_i K_jᵀ / √d —— 只落在 SRAM",
+    "kind": "op",
+    "op": "matmul",
+    "phase": "内循环"
+   },
+   {
+    "id": "mx01",
+    "title": "(i=0, j=1)：行最大值 m_i 抬到 m_new",
+    "kind": "op",
+    "op": "max",
+    "phase": "内循环"
+   },
+   {
+    "id": "p01",
+    "title": "(i=0, j=1)：P_ij = exp(S_ij − m_new) —— 就地覆盖 S",
+    "kind": "op",
+    "op": "exp",
+    "phase": "内循环"
+   },
+   {
+    "id": "l01",
+    "title": "(i=0, j=1)：ℓ_i 用修正因子重缩放后并入本块",
+    "kind": "op",
+    "op": "sum-exp",
+    "phase": "内循环"
+   },
+   {
+    "id": "o01",
+    "title": "(i=0, j=1)：O_i 用同一个 α 重缩放后累加 P_ij V_j",
+    "kind": "op",
+    "op": "matmul",
+    "phase": "内循环"
+   },
+   {
+    "id": "wb01",
+    "title": "(i=0, j=1)：把 O_i、m_i、ℓ_i 写回 HBM",
+    "kind": "comm",
+    "op": "store",
+    "phase": "内循环"
+   },
+   {
+    "id": "ld11",
+    "title": "(i=1, j=1)：载入 Q_1、O_1、m_1、ℓ_1",
+    "kind": "comm",
+    "op": "load",
+    "phase": "内循环"
+   },
+   {
+    "id": "s11",
+    "title": "(i=1, j=1)：S_ij = Q_i K_jᵀ / √d —— 只落在 SRAM",
+    "kind": "op",
+    "op": "matmul",
+    "phase": "内循环"
+   },
+   {
+    "id": "mx11",
+    "title": "(i=1, j=1)：行最大值 m_i 抬到 m_new",
+    "kind": "op",
+    "op": "max",
+    "phase": "内循环"
+   },
+   {
+    "id": "p11",
+    "title": "(i=1, j=1)：P_ij = exp(S_ij − m_new) —— 就地覆盖 S",
+    "kind": "op",
+    "op": "exp",
+    "phase": "内循环"
+   },
+   {
+    "id": "l11",
+    "title": "(i=1, j=1)：ℓ_i 用修正因子重缩放后并入本块",
+    "kind": "op",
+    "op": "sum-exp",
+    "phase": "内循环"
+   },
+   {
+    "id": "o11",
+    "title": "(i=1, j=1)：O_i 用同一个 α 重缩放后累加 P_ij V_j",
+    "kind": "op",
+    "op": "matmul",
+    "phase": "内循环"
+   },
+   {
+    "id": "wb11",
+    "title": "(i=1, j=1)：把 O_i、m_i、ℓ_i 写回 HBM",
+    "kind": "comm",
+    "op": "store",
+    "phase": "内循环"
+   },
+   {
+    "id": "sum",
+    "title": "收尾：S、P 没去过 HBM，IO 差在这里",
+    "kind": "op",
+    "op": "summary",
+    "phase": "收尾"
+   }
+  ],
+  "edges": [
+   {
+    "from": "init",
+    "to": "kv0",
+    "tensor": "K"
+   },
+   {
+    "from": "kv0",
+    "to": "s00",
+    "tensor": "K_j"
+   },
+   {
+    "from": "ld00",
+    "to": "s00",
+    "tensor": "Q_i"
+   },
+   {
+    "from": "s00",
+    "to": "mx00",
+    "tensor": "S"
+   },
+   {
+    "from": "mx00",
+    "to": "p00",
+    "tensor": "m_i"
+   },
+   {
+    "from": "p00",
+    "to": "l00",
+    "tensor": "P"
+   },
+   {
+    "from": "l00",
+    "to": "o00",
+    "tensor": "l_i"
+   },
+   {
+    "from": "o00",
+    "to": "wb00",
+    "tensor": "O_i"
+   },
+   {
+    "from": "wb00",
+    "to": "ld10",
+    "tensor": "O"
+   },
+   {
+    "from": "kv0",
+    "to": "s10",
+    "tensor": "K_j"
+   },
+   {
+    "from": "ld10",
+    "to": "s10",
+    "tensor": "Q_i"
+   },
+   {
+    "from": "s10",
+    "to": "mx10",
+    "tensor": "S"
+   },
+   {
+    "from": "mx10",
+    "to": "p10",
+    "tensor": "m_i"
+   },
+   {
+    "from": "p10",
+    "to": "l10",
+    "tensor": "P"
+   },
+   {
+    "from": "l10",
+    "to": "o10",
+    "tensor": "l_i"
+   },
+   {
+    "from": "o10",
+    "to": "wb10",
+    "tensor": "O_i"
+   },
+   {
+    "from": "wb10",
+    "to": "ld01",
+    "tensor": "O"
+   },
+   {
+    "from": "kv0",
+    "to": "kv1",
+    "tensor": "K"
+   },
+   {
+    "from": "kv1",
+    "to": "s01",
+    "tensor": "K_j"
+   },
+   {
+    "from": "ld01",
+    "to": "s01",
+    "tensor": "Q_i"
+   },
+   {
+    "from": "s01",
+    "to": "mx01",
+    "tensor": "S"
+   },
+   {
+    "from": "mx01",
+    "to": "p01",
+    "tensor": "m_i"
+   },
+   {
+    "from": "p01",
+    "to": "l01",
+    "tensor": "P"
+   },
+   {
+    "from": "l01",
+    "to": "o01",
+    "tensor": "l_i"
+   },
+   {
+    "from": "o01",
+    "to": "wb01",
+    "tensor": "O_i"
+   },
+   {
+    "from": "wb01",
+    "to": "ld11",
+    "tensor": "O"
+   },
+   {
+    "from": "kv1",
+    "to": "s11",
+    "tensor": "K_j"
+   },
+   {
+    "from": "ld11",
+    "to": "s11",
+    "tensor": "Q_i"
+   },
+   {
+    "from": "s11",
+    "to": "mx11",
+    "tensor": "S"
+   },
+   {
+    "from": "mx11",
+    "to": "p11",
+    "tensor": "m_i"
+   },
+   {
+    "from": "p11",
+    "to": "l11",
+    "tensor": "P"
+   },
+   {
+    "from": "l11",
+    "to": "o11",
+    "tensor": "l_i"
+   },
+   {
+    "from": "o11",
+    "to": "wb11",
+    "tensor": "O_i"
+   },
+   {
+    "from": "wb11",
+    "to": "sum",
+    "tensor": "O"
+   }
+  ]
+ },
+ "steps": [
+  {
+   "id": "init",
+   "title": "初始化：分块参数与 SRAM 预算",
+   "kind": "state",
+   "op": "init",
+   "phase": "准备",
+   "formula": {
+    "sym": "B_c = \\left\\lceil \\frac{M}{4d} \\right\\rceil,\\qquad B_r = \\min(B_c,\\, d),\\qquad T_r = \\frac{N}{B_r},\\qquad T_c = \\frac{N}{B_c}",
+    "idx": "N = \\slot{N},\\qquad B_c = \\left\\lceil \\frac{\\slot{M}}{4 \\times \\slot{D}} \\right\\rceil = \\slot{BC},\\qquad B_r = \\min(\\slot{BC}, \\slot{D}) = \\slot{BR},\\qquad T_r = \\slot{TR},\\qquad T_c = \\slot{TC}",
+    "num": "N = \\slot{N},\\qquad B_c = \\left\\lceil \\frac{\\region{BC}{\\slot{M}}}{\\region{BC}{4 \\times \\slot{D}}} \\right\\rceil = \\slot{BC},\\qquad T_r \\times T_c = \\slot{NP} \\text{ 个 tile 对},\\qquad \\mathrm{IO}_{\\mathrm{std}} = \\slot{IOSTD}"
+   },
+   "bindings": {
+    "N": {
+     "sym": "N",
+     "idx": "8",
+     "num": "8"
+    },
+    "D": {
+     "sym": "d",
+     "idx": "8",
+     "num": "8"
+    },
+    "M": {
+     "sym": "M",
+     "idx": "128",
+     "num": "128"
+    },
+    "BC": {
+     "sym": "\\lceil M/4d \\rceil",
+     "idx": "\\lceil 128/\\left(4 \\times 8\\right) \\rceil",
+     "num": "4"
+    },
+    "BR": {
+     "sym": "\\min(B_c,d)",
+     "idx": "\\min(4,8)",
+     "num": "4"
+    },
+    "TR": {
+     "sym": "T_r",
+     "idx": "2",
+     "num": "2"
+    },
+    "TC": {
+     "sym": "T_c",
+     "idx": "2",
+     "num": "2"
+    },
+    "NP": {
+     "sym": "T_r T_c",
+     "idx": "2 \\times 2",
+     "num": "4"
+    },
+    "IOSTD": {
+     "sym": "4Nd + 4N^2",
+     "idx": "4\\cdot8\\cdot8 + 4\\cdot8^2",
+     "num": "512"
+    }
+   },
+   "reads": [
+    "Q",
+    "K",
+    "V"
+   ],
+   "writes": [
+    "O",
+    "m",
+    "l"
+   ],
+   "state": {
+    "O": [
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ]
+    ],
+    "m": [
+     "-\\infty",
+     "-\\infty",
+     "-\\infty",
+     "-\\infty",
+     "-\\infty",
+     "-\\infty",
+     "-\\infty",
+     "-\\infty"
+    ],
+    "l": [
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "narration": "Q、K、V 已经躺在 HBM 里（形状 [8, 8] —— 共享模型 N=8、d_model=64、H=4、d_head=8，本 lab 只回放第 0 个头）。SRAM 容量 M = 128 个元素，按教程的公式 B_c = ⌈M/4d⌉ = ⌈128/32⌉ = 4，B_r = min(B_c, d) = 4。于是 Q 有 2 个块、K/V 有 2 个块，内层外层一共 4 个 tile 对。O、m、ℓ 先在 HBM 里清成 0 / −∞ / 0，这一步花掉 80 个元素的 HBM 写入。",
+   "regions": {
+    "BC": "分母的 4 来自「SRAM 要同时放 Q_i、K_j、V_j、O_i 四块，每块 B×d」——教程 4.1 节的推导。它只约束这一项，S 与 m、ℓ 是它省略的零头；旁边的占用账会把零头也摆出来。"
+   },
+   "occ": {
+    "elements": 0,
+    "parts": []
+   },
+   "io": {
+    "step": 80,
+    "cum": 80
+   }
+  },
+  {
+   "id": "kv0",
+   "title": "外循环 j=0：载入 K_0、V_0 到 SRAM",
+   "kind": "comm",
+   "op": "load",
+   "phase": "外循环",
+   "formula": {
+    "sym": "K_j \\leftarrow \\mathrm{HBM}[K]\\left[\\slot{R0}:\\slot{R1},\\ :\\right],\\qquad V_j \\leftarrow \\mathrm{HBM}[V]\\left[\\slot{R0}:\\slot{R1},\\ :\\right]",
+    "idx": "K_{\\slot{J}} \\leftarrow \\mathrm{HBM}[K]\\left[\\slot{R0}:\\slot{R1},\\ :\\right],\\qquad V_{\\slot{J}} \\leftarrow \\mathrm{HBM}[V]\\left[\\slot{R0}:\\slot{R1},\\ :\\right]",
+    "num": "K_{\\slot{J}},\\ V_{\\slot{J}} \\leftarrow \\slot{ELEMS} \\text{ 个元素}\\quad (\\mathrm{IO} + \\slot{COST})"
+   },
+   "bindings": {
+    "J": {
+     "sym": "j",
+     "idx": "0",
+     "num": "0"
+    },
+    "R0": {
+     "sym": "j B_c",
+     "idx": "0",
+     "num": "0"
+    },
+    "R1": {
+     "sym": "(j+1) B_c",
+     "idx": "4",
+     "num": "4"
+    },
+    "ELEMS": {
+     "sym": "2 B_c d",
+     "idx": "2\\cdot4\\cdot8",
+     "num": "64"
+    },
+    "COST": {
+     "sym": "\\mathrm{IO}",
+     "idx": "64",
+     "num": "64"
+    }
+   },
+   "reads": [
+    "K",
+    "V"
+   ],
+   "writes": [
+    "K_j",
+    "V_j"
+   ],
+   "state": {
+    "K_j": [
+     [
+      -0.59,
+      -0.62,
+      -0.17,
+      0.16,
+      -0.55,
+      -0.08,
+      0.3,
+      -0.02
+     ],
+     [
+      0.07,
+      0.6,
+      -0.28,
+      0.55,
+      -0.03,
+      -0.33,
+      0.11,
+      -0.66
+     ],
+     [
+      0.24,
+      -0.11,
+      -0.66,
+      0.29,
+      -0.35,
+      0.63,
+      -0.68,
+      0.21
+     ],
+     [
+      0.23,
+      0.46,
+      -0.54,
+      0.44,
+      -0.7,
+      0.43,
+      0.69,
+      0.19
+     ]
+    ],
+    "V_j": [
+     [
+      0.23,
+      -0.39,
+      -0.33,
+      -0.24,
+      -0.36,
+      0.69,
+      -0.27,
+      -0.15
+     ],
+     [
+      0.46,
+      0.7,
+      -0.46,
+      -0.55,
+      -0.07,
+      0.13,
+      -0.35,
+      0.55
+     ],
+     [
+      0.36,
+      -0.15,
+      -0.61,
+      0.21,
+      -0.4,
+      0.45,
+      -0.12,
+      0.16
+     ],
+     [
+      0.42,
+      0.69,
+      -0.53,
+      0.57,
+      0.04,
+      -0.1,
+      -0.09,
+      0.11
+     ]
+    ]
+   },
+   "narration": "外层的第 1 个块：K 的第 0..3 行和 V 的同一段从 HBM 搬进 SRAM，各 4×8，合计 64 个元素。这一对 K/V 块会被内层的全部 2 个 Q 块复用，所以整趟回放 K、V 各自只从 HBM 读一次 —— 代价全在 Q 和 O 那边。",
+   "spans": {
+    "K": [
+     [
+      0,
+      4
+     ],
+     [
+      0,
+      8
+     ]
+    ],
+    "V": [
+     [
+      0,
+      4
+     ],
+     [
+      0,
+      8
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "SRAM",
+     "elements": 64,
+     "note": "K、V 各一个 4×8 的块，64 个 float；整个外循环只付一次",
+     "bytes": 256
+    }
+   ],
+   "occ": {
+    "elements": 64,
+    "parts": [
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     }
+    ]
+   },
+   "io": {
+    "step": 64,
+    "cum": 144
+   }
+  },
+  {
+   "id": "ld00",
+   "title": "(i=0, j=0)：载入 Q_0、O_0、m_0、ℓ_0",
+   "kind": "comm",
+   "op": "load",
+   "phase": "内循环",
+   "formula": {
+    "sym": "Q_i, O_i \\leftarrow \\mathrm{HBM}\\left[\\slot{R0}:\\slot{R1},\\ :\\right],\\qquad m_i, \\ell_i \\leftarrow \\mathrm{HBM}\\left[\\slot{R0}:\\slot{R1}\\right]",
+    "idx": "Q_{\\slot{I}}, O_{\\slot{I}} \\leftarrow \\mathrm{HBM}\\left[\\slot{R0}:\\slot{R1},\\ :\\right],\\qquad m_{\\slot{I}}, \\ell_{\\slot{I}} \\leftarrow \\mathrm{HBM}\\left[\\slot{R0}:\\slot{R1}\\right]",
+    "num": "\\mathrm{IO} + \\slot{COST},\\qquad 2B_rd + 2B_r = 2\\cdot\\slot{BR}\\cdot\\slot{D} + 2\\cdot\\slot{BR} = \\slot{COST}"
+   },
+   "bindings": {
+    "I": {
+     "sym": "i",
+     "idx": "0",
+     "num": "0"
+    },
+    "R0": {
+     "sym": "i B_r",
+     "idx": "0",
+     "num": "0"
+    },
+    "R1": {
+     "sym": "(i+1) B_r",
+     "idx": "4",
+     "num": "4"
+    },
+    "BR": {
+     "sym": "B_r",
+     "idx": "4",
+     "num": "4"
+    },
+    "D": {
+     "sym": "d",
+     "idx": "8",
+     "num": "8"
+    },
+    "COST": {
+     "sym": "2B_rd + 2B_r",
+     "idx": "2\\cdot4\\cdot8 + 2\\cdot4",
+     "num": "72"
+    }
+   },
+   "reads": [
+    "Q",
+    "O",
+    "m",
+    "l"
+   ],
+   "writes": [
+    "Q_i",
+    "O_i",
+    "m_i",
+    "l_i"
+   ],
+   "state": {
+    "Q_i": [
+     [
+      -0.39,
+      0.62,
+      -0.33,
+      0.64,
+      0.08,
+      0.62,
+      -0.34,
+      0.44
+     ],
+     [
+      -0.31,
+      0.57,
+      0.21,
+      -0.23,
+      -0.21,
+      -0.46,
+      0.37,
+      -0.39
+     ],
+     [
+      0.07,
+      -0.4,
+      0.57,
+      -0.62,
+      0.52,
+      -0.22,
+      -0.53,
+      0.37
+     ],
+     [
+      -0.42,
+      -0.45,
+      -0.06,
+      -0.51,
+      0.03,
+      0.69,
+      -0.16,
+      0.46
+     ]
+    ],
+    "O_i": [
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ]
+    ],
+    "m_i": [
+     "-\\infty",
+     "-\\infty",
+     "-\\infty",
+     "-\\infty"
+    ],
+    "l_i": [
+     0.0,
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "narration": "内层第 0 个 Q 块：Q 的第 0..3 行读进 SRAM，O_i、m_i、ℓ_i 此刻还是 init 时的初值（0 / −∞ / 0）。这 72 个元素里只有 Q_i 是真需要读的。",
+   "spans": {
+    "Q": [
+     [
+      0,
+      4
+     ],
+     [
+      0,
+      8
+     ]
+    ],
+    "O": [
+     [
+      0,
+      4
+     ],
+     [
+      0,
+      8
+     ]
+    ],
+    "m": [
+     [
+      0,
+      4
+     ]
+    ],
+    "l": [
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "SRAM",
+     "elements": 72,
+     "note": "Q_i 与 O_i 各 4×8，m_i、ℓ_i 各 4 个标量",
+     "bytes": 288
+    }
+   ],
+   "occ": {
+    "elements": 136,
+    "parts": [
+     {
+      "name": "Q_i",
+      "label": "当前 Q 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "O_i",
+      "label": "累积输出块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "m_i",
+      "label": "行最大值",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     },
+     {
+      "name": "l_i",
+      "label": "行指数和",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     }
+    ]
+   },
+   "io": {
+    "step": 72,
+    "cum": 216
+   }
+  },
+  {
+   "id": "s00",
+   "title": "(i=0, j=0)：S_ij = Q_i K_jᵀ / √d —— 只落在 SRAM",
+   "kind": "op",
+   "op": "matmul",
+   "phase": "内循环",
+   "formula": {
+    "sym": "S_{ij} = \\frac{\\region{SP}{\\slot{QL} \\; K_j^\\top}}{\\sqrt{d}}\\ \\in \\mathbb{R}^{B_r \\times B_c}",
+    "idx": "S_{\\slot{II}\\slot{JJ}} = \\frac{Q_{\\slot{II}} K_{\\slot{JJ}}^\\top}}{\\sqrt{\\slot{D}}} \\in \\mathbb{R}^{\\slot{BR} \\times \\slot{BC}}",
+    "num": "S_{\\slot{II}\\slot{JJ}}[0,0] = \\frac{\\slot{S00}}{\\sqrt{\\slot{D}}} = \\slot{SNUM}"
+   },
+   "bindings": {
+    "II": {
+     "sym": "i",
+     "idx": "0",
+     "num": "0"
+    },
+    "JJ": {
+     "sym": "j",
+     "idx": "0",
+     "num": "0"
+    },
+    "D": {
+     "sym": "d",
+     "idx": "8",
+     "num": "8"
+    },
+    "BR": {
+     "sym": "B_r",
+     "idx": "4",
+     "num": "4"
+    },
+    "BC": {
+     "sym": "B_c",
+     "idx": "4",
+     "num": "4"
+    },
+    "QL": {
+     "sym": "Q_i[0]",
+     "idx": "Q_{i}[0,:]",
+     "num": "\\left[-0.39,\\; 0.62,\\; \\ldots,\\; 0.44\\right]"
+    },
+    "S00": {
+     "sym": "(Q_i K_j^\\top)[0,0]",
+     "idx": "(Q_{i} K_{j}^\\top)[0,0]",
+     "num": "-0.2002"
+    },
+    "SNUM": {
+     "sym": "S_{ij}[0,0]",
+     "idx": "S_{ij}[0,0]",
+     "num": "-0.07078"
+    }
+   },
+   "reads": [
+    "Q_i",
+    "K_j"
+   ],
+   "writes": [
+    "S"
+   ],
+   "state": {
+    "S": [
+     [
+      -0.07078138879677341,
+      0.08990862722786958,
+      0.3280268357924394,
+      0.25275531893513137
+     ],
+     [
+      0.009934850275670992,
+      0.2090207645187434,
+      -0.31544033508731883,
+      0.03772414677630229
+     ],
+     [
+      -0.14997734828966675,
+      -0.34690658685012016,
+      -0.1335371156270795,
+      -0.5312139693663936
+     ],
+     [
+      0.11543518202870386,
+      -0.39346956839125435,
+      0.16617009357883863,
+      -0.08587811857510622
+     ]
+    ]
+   },
+   "narration": "内积：Q_i（4×8）乘 K_jᵀ（8×4）得到 4×4 的分数块 S_ij，再除以 √d = 2.828 缩放。这一步的读全部来自 SRAM —— Q_i 和 K_j 都已经在里面了。产生的 S_ij 也<b>只写在 SRAM</b>：4×4 = 16 个元素，一个都没碰 HBM（访问日志里的增量是 0）。标准实现在这一步会把 8×8 = 64 个元素写回 HBM。",
+   "regions": {
+    "SP": "S_ij 是 FlashAttention 藏起来的第一个中间矩阵。整趟回放结束，HBM 的访问日志里都不会出现它的名字 —— 这不是「我们没画」，是访问日志里真的没有。"
+   },
+   "flows": [
+    {
+     "from": "SRAM",
+     "to": "SRAM",
+     "elements": 16,
+     "note": "S_ij 的 4×4 个元素在 SRAM 内产生，不跨层",
+     "bytes": 64
+    }
+   ],
+   "occ": {
+    "elements": 152,
+    "parts": [
+     {
+      "name": "Q_i",
+      "label": "当前 Q 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "O_i",
+      "label": "累积输出块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "S/P 共用缓冲",
+      "label": "S_ij / P_ij 共用一块缓冲",
+      "shape": [
+       4,
+       4
+      ],
+      "elements": 16,
+      "covers": [
+       "S"
+      ]
+     },
+     {
+      "name": "m_i",
+      "label": "行最大值",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     },
+     {
+      "name": "l_i",
+      "label": "行指数和",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     }
+    ]
+   },
+   "io": {
+    "step": 0,
+    "cum": 216
+   }
+  },
+  {
+   "id": "mx00",
+   "title": "(i=0, j=0)：行最大值 m_i 抬到 m_new",
+   "kind": "op",
+   "op": "max",
+   "phase": "内循环",
+   "formula": {
+    "sym": "\\tilde{m}_{ij} = \\mathrm{rowmax}(S_{ij}),\\qquad m_i^{\\mathrm{new}} = \\max\\left(\\slot{MOLD},\\ \\tilde{m}_{ij}\\right)",
+    "idx": "\\tilde{m}_{\\slot{II}\\slot{JJ}} = \\mathrm{rowmax}(S_{\\slot{II}\\slot{JJ}}),\\qquad m_{\\slot{II}}^{\\mathrm{new}} = \\max\\left(\\slot{MOLD},\\ \\tilde{m}_{\\slot{II}\\slot{JJ}}\\right)",
+    "num": "m_{\\slot{II}}^{\\mathrm{new}} = \\max\\left(\\slot{MOLD},\\ \\slot{MT}\\right) = \\slot{MNEW}"
+   },
+   "bindings": {
+    "II": {
+     "sym": "i",
+     "idx": "0",
+     "num": "0"
+    },
+    "JJ": {
+     "sym": "j",
+     "idx": "0",
+     "num": "0"
+    },
+    "MOLD": {
+     "sym": "m_i",
+     "idx": "m_{i}",
+     "num": "\\left[-\\infty,\\; -\\infty,\\; -\\infty,\\; -\\infty\\right]"
+    },
+    "MT": {
+     "sym": "\\tilde{m}_{ij}",
+     "idx": "\\tilde{m}_{ij}",
+     "num": "\\left[0.328,\\; 0.209,\\; -0.1335,\\; 0.1662\\right]"
+    },
+    "MNEW": {
+     "sym": "m_i^{\\mathrm{new}}",
+     "idx": "m_{i}^{\\mathrm{new}}",
+     "num": "\\left[0.328,\\; 0.209,\\; -0.1335,\\; 0.1662\\right]"
+    }
+   },
+   "reads": [
+    "S",
+    "m_i"
+   ],
+   "writes": [
+    "m_i"
+   ],
+   "state": {
+    "m_i": [
+     0.3280268357924394,
+     0.2090207645187434,
+     -0.1335371156270795,
+     0.16617009357883863
+    ]
+   },
+   "narration": "第一块：m_i 还是 −∞，所以直接取本块的行最大值 0.328。这正是 init 用 −∞ 而不是 0 的原因 ——0 是个合法的最大值，会把所有指数整体压偏。",
+   "flows": [
+    {
+     "from": "SRAM",
+     "to": "SRAM",
+     "elements": 4,
+     "note": "4 行各一个最大值，全程在 SRAM",
+     "bytes": 16
+    }
+   ],
+   "occ": {
+    "elements": 152,
+    "parts": [
+     {
+      "name": "Q_i",
+      "label": "当前 Q 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "O_i",
+      "label": "累积输出块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "S/P 共用缓冲",
+      "label": "S_ij / P_ij 共用一块缓冲",
+      "shape": [
+       4,
+       4
+      ],
+      "elements": 16,
+      "covers": [
+       "S"
+      ]
+     },
+     {
+      "name": "m_i",
+      "label": "行最大值",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     },
+     {
+      "name": "l_i",
+      "label": "行指数和",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     }
+    ]
+   },
+   "io": {
+    "step": 0,
+    "cum": 216
+   }
+  },
+  {
+   "id": "p00",
+   "title": "(i=0, j=0)：P_ij = exp(S_ij − m_new) —— 就地覆盖 S",
+   "kind": "op",
+   "op": "exp",
+   "phase": "内循环",
+   "formula": {
+    "sym": "P_{ij} = \\region{SP}{\\exp\\left(S_{ij} - m_i^{\\mathrm{new}}\\right)}\\ \\in \\mathbb{R}^{B_r \\times B_c}",
+    "idx": "P_{\\slot{II}\\slot{JJ}} = \\exp\\left(S_{\\slot{II}\\slot{JJ}} - m_{\\slot{II}}^{\\mathrm{new}}\\right)",
+    "num": "P_{\\slot{II}\\slot{JJ}}[0,0] = \\exp\\left(\\slot{S00} - \\slot{M0}\\right) = \\slot{P00}"
+   },
+   "bindings": {
+    "II": {
+     "sym": "i",
+     "idx": "0",
+     "num": "0"
+    },
+    "JJ": {
+     "sym": "j",
+     "idx": "0",
+     "num": "0"
+    },
+    "S00": {
+     "sym": "S_{ij}[0,0]",
+     "idx": "S_{ij}[0,0]",
+     "num": "-0.07078"
+    },
+    "M0": {
+     "sym": "m_i^{\\mathrm{new}}[0]",
+     "idx": "m_{i}^{\\mathrm{new}}[0]",
+     "num": "0.328"
+    },
+    "P00": {
+     "sym": "P_{ij}[0,0]",
+     "idx": "P_{ij}[0,0]",
+     "num": "0.6711"
+    }
+   },
+   "reads": [
+    "S",
+    "m_i"
+   ],
+   "writes": [
+    "P"
+   ],
+   "state": {
+    "P": [
+     [
+      0.6711193932104048,
+      0.7881095242917316,
+      1.0,
+      0.9274916225269382
+     ],
+     [
+      0.8194794853487475,
+      1.0,
+      0.5918742396990123,
+      0.8425716147121503
+     ],
+     [
+      0.9836941704151576,
+      0.8078576019335573,
+      1.0,
+      0.671879107807123
+     ],
+     [
+      0.9505306118240262,
+      0.5714149292858927,
+      1.0,
+      0.7772072663292855
+     ]
+    ]
+   },
+   "narration": "逐元素减掉本行的新最大值再取指数 —— 因为减过最大值，所有指数都落在 (0, 1]，不会溢出。真实 kernel 让 P 就地覆盖 S 的缓冲：两个名字，一块 4×4 的 SRAM，所以下面的占用账里它们算一份。HBM 访问量依然是 0。",
+   "regions": {
+    "SP": "P_ij 是 FlashAttention 藏起来的第二个中间矩阵。它和 S_ij 一样，整趟回放不会在 HBM 的访问日志里出现。"
+   },
+   "flows": [
+    {
+     "from": "SRAM",
+     "to": "SRAM",
+     "elements": 16,
+     "note": "P_ij 就地覆盖 S_ij 的 4×4 缓冲",
+     "bytes": 64
+    }
+   ],
+   "occ": {
+    "elements": 152,
+    "parts": [
+     {
+      "name": "Q_i",
+      "label": "当前 Q 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "O_i",
+      "label": "累积输出块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "S/P 共用缓冲",
+      "label": "S_ij / P_ij 共用一块缓冲",
+      "shape": [
+       4,
+       4
+      ],
+      "elements": 16,
+      "covers": [
+       "P",
+       "S"
+      ]
+     },
+     {
+      "name": "m_i",
+      "label": "行最大值",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     },
+     {
+      "name": "l_i",
+      "label": "行指数和",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     }
+    ]
+   },
+   "io": {
+    "step": 0,
+    "cum": 216
+   }
+  },
+  {
+   "id": "l00",
+   "title": "(i=0, j=0)：ℓ_i 用修正因子重缩放后并入本块",
+   "kind": "op",
+   "op": "sum-exp",
+   "phase": "内循环",
+   "formula": {
+    "sym": "\\ell_i^{\\mathrm{new}} = \\slot{LOLD}\\cdot \\region{CORR}{\\exp\\left(m_i - m_i^{\\mathrm{new}}\\right)} + \\mathrm{rowsum}\\left(P_{ij}\\right)",
+    "idx": "\\ell_{\\slot{II}}^{\\mathrm{new}} = \\slot{LOLD}\\cdot \\region{CORR}{\\exp\\left(\\slot{MOLD} - \\slot{MNEW}\\right)} + \\slot{SUM}",
+    "num": "\\ell_{\\slot{II}}^{\\mathrm{new}} = \\slot{LOLD}\\cdot \\region{CORR}{\\exp\\left(\\slot{MOLD} - \\slot{MNEW}\\right)} + \\slot{SUM} = \\slot{LNEW}"
+   },
+   "bindings": {
+    "II": {
+     "sym": "i",
+     "idx": "0",
+     "num": "0"
+    },
+    "LOLD": {
+     "sym": "\\ell_i",
+     "idx": "\\ell_{i}",
+     "num": "\\left[0,\\; 0,\\; 0,\\; 0\\right]"
+    },
+    "MOLD": {
+     "sym": "m_i",
+     "idx": "m_{i}",
+     "num": "\\left[-\\infty,\\; -\\infty,\\; -\\infty,\\; -\\infty\\right]"
+    },
+    "MNEW": {
+     "sym": "m_i^{\\mathrm{new}}",
+     "idx": "m_{i}^{\\mathrm{new}}",
+     "num": "\\left[0.328,\\; 0.209,\\; -0.1335,\\; 0.1662\\right]"
+    },
+    "SUM": {
+     "sym": "\\mathrm{rowsum}(P_{ij})",
+     "idx": "\\mathrm{rowsum}(P_{ij})",
+     "num": "\\left[3.387,\\; 3.254,\\; 3.463,\\; 3.299\\right]"
+    },
+    "LNEW": {
+     "sym": "\\ell_i^{\\mathrm{new}}",
+     "idx": "\\ell_{i}^{\\mathrm{new}}",
+     "num": "\\left[3.387,\\; 3.254,\\; 3.463,\\; 3.299\\right]"
+    }
+   },
+   "reads": [
+    "P",
+    "m_i",
+    "l_i"
+   ],
+   "writes": [
+    "l_i"
+   ],
+   "state": {
+    "l_i": [
+     3.3867205400290747,
+     3.2539253397599097,
+     3.4634308801558378,
+     3.2991528074392042
+    ]
+   },
+   "narration": "第一块：ℓ_i 旧值是 0，α 按定义为 0（e^(−∞ − m) = 0），更新化简成直接取本块的指数和 3.463。",
+   "regions": {
+    "CORR": "INIT · 第一块没有历史，α 按定义为 0（e^(−∞ − m) = 0），更新化简成直接求和。"
+   },
+   "flows": [
+    {
+     "from": "SRAM",
+     "to": "SRAM",
+     "elements": 4,
+     "note": "4 行的指数和在 SRAM 内累加，不跨层",
+     "bytes": 16
+    }
+   ],
+   "occ": {
+    "elements": 152,
+    "parts": [
+     {
+      "name": "Q_i",
+      "label": "当前 Q 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "O_i",
+      "label": "累积输出块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "S/P 共用缓冲",
+      "label": "S_ij / P_ij 共用一块缓冲",
+      "shape": [
+       4,
+       4
+      ],
+      "elements": 16,
+      "covers": [
+       "P",
+       "S"
+      ]
+     },
+     {
+      "name": "m_i",
+      "label": "行最大值",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     },
+     {
+      "name": "l_i",
+      "label": "行指数和",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     }
+    ]
+   },
+   "io": {
+    "step": 0,
+    "cum": 216
+   },
+   "corr": {
+    "kind": "init",
+    "factor": 0.0,
+    "m_old": "-\\infty",
+    "m_new": 0.3280268357924394,
+    "o_correct": 1.566803025333886,
+    "o_uncorrected": 1.566803025333886,
+    "bias_abs": 0.0,
+    "bias_rel": 0.0
+   }
+  },
+  {
+   "id": "o00",
+   "title": "(i=0, j=0)：O_i 用同一个 α 重缩放后累加 P_ij V_j",
+   "kind": "op",
+   "op": "matmul",
+   "phase": "内循环",
+   "formula": {
+    "sym": "O_i^{\\mathrm{new}} = \\frac{\\region{CORR}{\\alpha}\\,\\ell_i}{\\ell_i^{\\mathrm{new}}}\\, O_i + \\frac{P_{ij} V_j}{\\ell_i^{\\mathrm{new}}}",
+    "idx": "O_{\\slot{II}}^{\\mathrm{new}} = \\frac{\\region{CORR}{\\alpha}\\,\\slot{LOLD}}{\\slot{LNEW}}\\, \\slot{OOLD} + \\frac{P_{\\slot{II}\\slot{JJ}} V_{\\slot{JJ}}}{\\slot{LNEW}}",
+    "num": "O_{\\slot{II}}^{\\mathrm{new}}[0,0] = \\slot{O00}"
+   },
+   "bindings": {
+    "II": {
+     "sym": "i",
+     "idx": "0",
+     "num": "0"
+    },
+    "JJ": {
+     "sym": "j",
+     "idx": "0",
+     "num": "0"
+    },
+    "LOLD": {
+     "sym": "\\ell_i",
+     "idx": "\\ell_{i}",
+     "num": "\\left[0,\\; 0,\\; 0,\\; 0\\right]"
+    },
+    "LNEW": {
+     "sym": "\\ell_i^{\\mathrm{new}}",
+     "idx": "\\ell_{i}^{\\mathrm{new}}",
+     "num": "\\left[3.387,\\; 3.254,\\; 3.463,\\; 3.299\\right]"
+    },
+    "OOLD": {
+     "sym": "O_i[0]",
+     "idx": "O_{i}[0,:]",
+     "num": "\\left[0,\\; 0,\\; \\ldots,\\; 0\\right]"
+    },
+    "O00": {
+     "sym": "O_i^{\\mathrm{new}}[0,0]",
+     "idx": "O_{i}^{\\mathrm{new}}[0,0]",
+     "num": "0.3739"
+    }
+   },
+   "reads": [
+    "P",
+    "V_j",
+    "O_i",
+    "l_i"
+   ],
+   "writes": [
+    "O_i"
+   ],
+   "state": {
+    "O_i": [
+     [
+      0.3739411941745366,
+      0.23028452273450528,
+      -0.49769986066179434,
+      0.042560739926940566,
+      -0.19478164069286516,
+      0.27246932432532167,
+      -0.19503079982225793,
+      0.1756319722358162
+     ],
+     [
+      0.3735288794888699,
+      0.26829019960701805,
+      -0.472670486131193,
+      -0.04367514645295065,
+      -0.17457666870088118,
+      0.2696826139682493,
+      -0.22069216105158787,
+      0.18883679525763314
+     ],
+     [
+      0.3580419024583271,
+      0.1430535779181481,
+      -0.47996612543612155,
+      -0.02524583095161989,
+      -0.22630876616115791,
+      0.3368285943690085,
+      -0.21043200560673103,
+      0.15322213022945866
+     ],
+     [
+      0.3539999594489405,
+      0.12595855660851177,
+      -0.48450190513263036,
+      0.033524541092273596,
+      -0.2276650456928954,
+      0.3341552818793256,
+      -0.1959858127681163,
+      0.12645410594172557
+     ]
+    ]
+   },
+   "narration": "第一块：O_i 从 0 出发，直接取 P_ij V_j / ℓ_i^new。",
+   "regions": {
+    "CORR": "INIT · 第一块没有历史，α 按定义为 0（e^(−∞ − m) = 0），更新化简成直接求和。"
+   },
+   "flows": [
+    {
+     "from": "SRAM",
+     "to": "SRAM",
+     "elements": 48,
+     "note": "P_ij V_j 是 SRAM 内的 4×8 次乘加，不跨层",
+     "bytes": 192
+    }
+   ],
+   "occ": {
+    "elements": 152,
+    "parts": [
+     {
+      "name": "Q_i",
+      "label": "当前 Q 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "O_i",
+      "label": "累积输出块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "S/P 共用缓冲",
+      "label": "S_ij / P_ij 共用一块缓冲",
+      "shape": [
+       4,
+       4
+      ],
+      "elements": 16,
+      "covers": [
+       "P",
+       "S"
+      ]
+     },
+     {
+      "name": "m_i",
+      "label": "行最大值",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     },
+     {
+      "name": "l_i",
+      "label": "行指数和",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     }
+    ]
+   },
+   "io": {
+    "step": 0,
+    "cum": 216
+   },
+   "corr": {
+    "kind": "init",
+    "factor": 0.0,
+    "m_old": "-\\infty",
+    "m_new": 0.3280268357924394,
+    "o_correct": 1.566803025333886,
+    "o_uncorrected": 1.566803025333886,
+    "bias_abs": 0.0,
+    "bias_rel": 0.0
+   }
+  },
+  {
+   "id": "wb00",
+   "title": "(i=0, j=0)：把 O_i、m_i、ℓ_i 写回 HBM",
+   "kind": "comm",
+   "op": "store",
+   "phase": "内循环",
+   "formula": {
+    "sym": "\\mathrm{HBM}[O]\\left[\\slot{R0}:\\slot{R1}\\right] \\leftarrow O_i,\\qquad \\mathrm{HBM}[m],\\,\\mathrm{HBM}[\\ell] \\leftarrow m_i,\\, \\ell_i",
+    "idx": "\\mathrm{HBM}[O]\\left[\\slot{R0}:\\slot{R1}\\right] \\leftarrow O_{\\slot{I}}^{\\mathrm{new}},\\qquad \\mathrm{HBM}[m], \\mathrm{HBM}[\\ell] \\leftarrow m_{\\slot{I}}^{\\mathrm{new}}, \\ell_{\\slot{I}}^{\\mathrm{new}}",
+    "num": "\\mathrm{IO} + \\slot{COST},\\qquad B_rd + 2B_r = \\slot{BR}\\cdot\\slot{D} + 2\\cdot\\slot{BR} = \\slot{COST}"
+   },
+   "bindings": {
+    "I": {
+     "sym": "i",
+     "idx": "0",
+     "num": "0"
+    },
+    "R0": {
+     "sym": "i B_r",
+     "idx": "0",
+     "num": "0"
+    },
+    "R1": {
+     "sym": "(i+1) B_r",
+     "idx": "4",
+     "num": "4"
+    },
+    "BR": {
+     "sym": "B_r",
+     "idx": "4",
+     "num": "4"
+    },
+    "D": {
+     "sym": "d",
+     "idx": "8",
+     "num": "8"
+    },
+    "COST": {
+     "sym": "B_rd + 2B_r",
+     "idx": "4\\cdot8 + 2\\cdot4",
+     "num": "40"
+    }
+   },
+   "reads": [
+    "O_i",
+    "m_i",
+    "l_i"
+   ],
+   "writes": [
+    "O",
+    "m",
+    "l"
+   ],
+   "state": {
+    "O": [
+     [
+      0.3739411941745366,
+      0.23028452273450528,
+      -0.49769986066179434,
+      0.042560739926940566,
+      -0.19478164069286516,
+      0.27246932432532167,
+      -0.19503079982225793,
+      0.1756319722358162
+     ],
+     [
+      0.3735288794888699,
+      0.26829019960701805,
+      -0.472670486131193,
+      -0.04367514645295065,
+      -0.17457666870088118,
+      0.2696826139682493,
+      -0.22069216105158787,
+      0.18883679525763314
+     ],
+     [
+      0.3580419024583271,
+      0.1430535779181481,
+      -0.47996612543612155,
+      -0.02524583095161989,
+      -0.22630876616115791,
+      0.3368285943690085,
+      -0.21043200560673103,
+      0.15322213022945866
+     ],
+     [
+      0.3539999594489405,
+      0.12595855660851177,
+      -0.48450190513263036,
+      0.033524541092273596,
+      -0.2276650456928954,
+      0.3341552818793256,
+      -0.1959858127681163,
+      0.12645410594172557
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ]
+    ],
+    "m": [
+     0.3280268357924394,
+     0.2090207645187434,
+     -0.1335371156270795,
+     0.16617009357883863,
+     0.0,
+     0.0,
+     0.0,
+     0.0
+    ],
+    "l": [
+     3.3867205400290747,
+     3.2539253397599097,
+     3.4634308801558378,
+     3.2991528074392042,
+     0.0,
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "narration": "这一轮算完的东西立刻写回 HBM：O 的第 0..3 行（4×8）、m 和 ℓ 的同一段（各 4 个标量），共 40 个元素。下一个外循环（j=1）一开始，它们又会被原样读回来 —— 这就是 V1 低效的地方，也是 V2 把循环顺序调过来之后消失的那部分流量。",
+   "spans": {
+    "O": [
+     [
+      0,
+      4
+     ],
+     [
+      0,
+      8
+     ]
+    ],
+    "m": [
+     [
+      0,
+      4
+     ]
+    ],
+    "l": [
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "SRAM",
+     "to": "HBM",
+     "elements": 40,
+     "note": "O_i 的 4×8 加上 m、ℓ 各 4 个，全部写回 HBM",
+     "bytes": 160
+    }
+   ],
+   "occ": {
+    "elements": 152,
+    "parts": [
+     {
+      "name": "Q_i",
+      "label": "当前 Q 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "O_i",
+      "label": "累积输出块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "S/P 共用缓冲",
+      "label": "S_ij / P_ij 共用一块缓冲",
+      "shape": [
+       4,
+       4
+      ],
+      "elements": 16,
+      "covers": [
+       "P",
+       "S"
+      ]
+     },
+     {
+      "name": "m_i",
+      "label": "行最大值",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     },
+     {
+      "name": "l_i",
+      "label": "行指数和",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     }
+    ]
+   },
+   "io": {
+    "step": 40,
+    "cum": 256
+   }
+  },
+  {
+   "id": "ld10",
+   "title": "(i=1, j=0)：载入 Q_1、O_1、m_1、ℓ_1",
+   "kind": "comm",
+   "op": "load",
+   "phase": "内循环",
+   "formula": {
+    "sym": "Q_i, O_i \\leftarrow \\mathrm{HBM}\\left[\\slot{R0}:\\slot{R1},\\ :\\right],\\qquad m_i, \\ell_i \\leftarrow \\mathrm{HBM}\\left[\\slot{R0}:\\slot{R1}\\right]",
+    "idx": "Q_{\\slot{I}}, O_{\\slot{I}} \\leftarrow \\mathrm{HBM}\\left[\\slot{R0}:\\slot{R1},\\ :\\right],\\qquad m_{\\slot{I}}, \\ell_{\\slot{I}} \\leftarrow \\mathrm{HBM}\\left[\\slot{R0}:\\slot{R1}\\right]",
+    "num": "\\mathrm{IO} + \\slot{COST},\\qquad 2B_rd + 2B_r = 2\\cdot\\slot{BR}\\cdot\\slot{D} + 2\\cdot\\slot{BR} = \\slot{COST}"
+   },
+   "bindings": {
+    "I": {
+     "sym": "i",
+     "idx": "1",
+     "num": "1"
+    },
+    "R0": {
+     "sym": "i B_r",
+     "idx": "4",
+     "num": "4"
+    },
+    "R1": {
+     "sym": "(i+1) B_r",
+     "idx": "8",
+     "num": "8"
+    },
+    "BR": {
+     "sym": "B_r",
+     "idx": "4",
+     "num": "4"
+    },
+    "D": {
+     "sym": "d",
+     "idx": "8",
+     "num": "8"
+    },
+    "COST": {
+     "sym": "2B_rd + 2B_r",
+     "idx": "2\\cdot4\\cdot8 + 2\\cdot4",
+     "num": "72"
+    }
+   },
+   "reads": [
+    "Q",
+    "O",
+    "m",
+    "l"
+   ],
+   "writes": [
+    "Q_i",
+    "O_i",
+    "m_i",
+    "l_i"
+   ],
+   "state": {
+    "Q_i": [
+     [
+      -0.48,
+      0.6,
+      -0.45,
+      0.64,
+      0.61,
+      -0.54,
+      0.17,
+      0.28
+     ],
+     [
+      0.28,
+      0.68,
+      -0.18,
+      -0.43,
+      -0.38,
+      -0.07,
+      -0.63,
+      0.35
+     ],
+     [
+      0.25,
+      -0.52,
+      0.19,
+      0.25,
+      0.08,
+      -0.42,
+      0.47,
+      0.52
+     ],
+     [
+      0.59,
+      0.15,
+      -0.51,
+      0.28,
+      -0.49,
+      0.58,
+      0.17,
+      -0.21
+     ]
+    ],
+    "O_i": [
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ]
+    ],
+    "m_i": [
+     "-\\infty",
+     "-\\infty",
+     "-\\infty",
+     "-\\infty"
+    ],
+    "l_i": [
+     0.0,
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "narration": "内层第 1 个 Q 块：Q 的第 4..7 行读进 SRAM，O_i、m_i、ℓ_i 此刻还是 init 时的初值（0 / −∞ / 0）。这 72 个元素里只有 Q_i 是真需要读的。",
+   "spans": {
+    "Q": [
+     [
+      4,
+      8
+     ],
+     [
+      0,
+      8
+     ]
+    ],
+    "O": [
+     [
+      4,
+      8
+     ],
+     [
+      0,
+      8
+     ]
+    ],
+    "m": [
+     [
+      4,
+      8
+     ]
+    ],
+    "l": [
+     [
+      4,
+      8
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "SRAM",
+     "elements": 72,
+     "note": "Q_i 与 O_i 各 4×8，m_i、ℓ_i 各 4 个标量",
+     "bytes": 288
+    }
+   ],
+   "occ": {
+    "elements": 152,
+    "parts": [
+     {
+      "name": "Q_i",
+      "label": "当前 Q 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "O_i",
+      "label": "累积输出块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "S/P 共用缓冲",
+      "label": "S_ij / P_ij 共用一块缓冲",
+      "shape": [
+       4,
+       4
+      ],
+      "elements": 16,
+      "covers": [
+       "P",
+       "S"
+      ]
+     },
+     {
+      "name": "m_i",
+      "label": "行最大值",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     },
+     {
+      "name": "l_i",
+      "label": "行指数和",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     }
+    ]
+   },
+   "io": {
+    "step": 72,
+    "cum": 328
+   }
+  },
+  {
+   "id": "s10",
+   "title": "(i=1, j=0)：S_ij = Q_i K_jᵀ / √d —— 只落在 SRAM",
+   "kind": "op",
+   "op": "matmul",
+   "phase": "内循环",
+   "formula": {
+    "sym": "S_{ij} = \\frac{\\region{SP}{\\slot{QL} \\; K_j^\\top}}{\\sqrt{d}}\\ \\in \\mathbb{R}^{B_r \\times B_c}",
+    "idx": "S_{\\slot{II}\\slot{JJ}} = \\frac{Q_{\\slot{II}} K_{\\slot{JJ}}^\\top}}{\\sqrt{\\slot{D}}} \\in \\mathbb{R}^{\\slot{BR} \\times \\slot{BC}}",
+    "num": "S_{\\slot{II}\\slot{JJ}}[0,0] = \\frac{\\slot{S00}}{\\sqrt{\\slot{D}}} = \\slot{SNUM}"
+   },
+   "bindings": {
+    "II": {
+     "sym": "i",
+     "idx": "1",
+     "num": "1"
+    },
+    "JJ": {
+     "sym": "j",
+     "idx": "0",
+     "num": "0"
+    },
+    "D": {
+     "sym": "d",
+     "idx": "8",
+     "num": "8"
+    },
+    "BR": {
+     "sym": "B_r",
+     "idx": "4",
+     "num": "4"
+    },
+    "BC": {
+     "sym": "B_c",
+     "idx": "4",
+     "num": "4"
+    },
+    "QL": {
+     "sym": "Q_i[0]",
+     "idx": "Q_{i}[0,:]",
+     "num": "\\left[-0.48,\\; 0.6,\\; \\ldots,\\; 0.28\\right]"
+    },
+    "S00": {
+     "sym": "(Q_i K_j^\\top)[0,0]",
+     "idx": "(Q_{i} K_{j}^\\top)[0,0]",
+     "num": "-0.1568"
+    },
+    "SNUM": {
+     "sym": "S_{ij}[0,0]",
+     "idx": "S_{ij}[0,0]",
+     "num": "-0.05544"
+    }
+   },
+   "reads": [
+    "Q_i",
+    "K_j"
+   ],
+   "writes": [
+    "S"
+   ],
+   "state": {
+    "S": [
+     [
+      -0.05543717164502534,
+      0.2822063163715511,
+      -0.1092833530323809,
+      0.07124100820454471
+     ],
+     [
+      -0.21439477605576118,
+      -0.008591347391416537,
+      0.20410637238949694,
+      0.054058313421711524
+     ],
+     [
+      0.10705596667164329,
+      -0.12922376426184157,
+      -0.1551038724532692,
+      0.004313351365237916
+     ],
+     [
+      -0.011066221125569434,
+      0.144497270735471,
+      0.32530447468487117,
+      0.45010882156429677
+     ]
+    ]
+   },
+   "narration": "内积：Q_i（4×8）乘 K_jᵀ（8×4）得到 4×4 的分数块 S_ij，再除以 √d = 2.828 缩放。这一步的读全部来自 SRAM —— Q_i 和 K_j 都已经在里面了。产生的 S_ij 也<b>只写在 SRAM</b>：4×4 = 16 个元素，一个都没碰 HBM（访问日志里的增量是 0）。标准实现在这一步会把 8×8 = 64 个元素写回 HBM。",
+   "regions": {
+    "SP": "S_ij 是 FlashAttention 藏起来的第一个中间矩阵。整趟回放结束，HBM 的访问日志里都不会出现它的名字 —— 这不是「我们没画」，是访问日志里真的没有。"
+   },
+   "flows": [
+    {
+     "from": "SRAM",
+     "to": "SRAM",
+     "elements": 16,
+     "note": "S_ij 的 4×4 个元素在 SRAM 内产生，不跨层",
+     "bytes": 64
+    }
+   ],
+   "occ": {
+    "elements": 152,
+    "parts": [
+     {
+      "name": "Q_i",
+      "label": "当前 Q 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "O_i",
+      "label": "累积输出块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "S/P 共用缓冲",
+      "label": "S_ij / P_ij 共用一块缓冲",
+      "shape": [
+       4,
+       4
+      ],
+      "elements": 16,
+      "covers": [
+       "P",
+       "S"
+      ]
+     },
+     {
+      "name": "m_i",
+      "label": "行最大值",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     },
+     {
+      "name": "l_i",
+      "label": "行指数和",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     }
+    ]
+   },
+   "io": {
+    "step": 0,
+    "cum": 328
+   }
+  },
+  {
+   "id": "mx10",
+   "title": "(i=1, j=0)：行最大值 m_i 抬到 m_new",
+   "kind": "op",
+   "op": "max",
+   "phase": "内循环",
+   "formula": {
+    "sym": "\\tilde{m}_{ij} = \\mathrm{rowmax}(S_{ij}),\\qquad m_i^{\\mathrm{new}} = \\max\\left(\\slot{MOLD},\\ \\tilde{m}_{ij}\\right)",
+    "idx": "\\tilde{m}_{\\slot{II}\\slot{JJ}} = \\mathrm{rowmax}(S_{\\slot{II}\\slot{JJ}}),\\qquad m_{\\slot{II}}^{\\mathrm{new}} = \\max\\left(\\slot{MOLD},\\ \\tilde{m}_{\\slot{II}\\slot{JJ}}\\right)",
+    "num": "m_{\\slot{II}}^{\\mathrm{new}} = \\max\\left(\\slot{MOLD},\\ \\slot{MT}\\right) = \\slot{MNEW}"
+   },
+   "bindings": {
+    "II": {
+     "sym": "i",
+     "idx": "1",
+     "num": "1"
+    },
+    "JJ": {
+     "sym": "j",
+     "idx": "0",
+     "num": "0"
+    },
+    "MOLD": {
+     "sym": "m_i",
+     "idx": "m_{i}",
+     "num": "\\left[-\\infty,\\; -\\infty,\\; -\\infty,\\; -\\infty\\right]"
+    },
+    "MT": {
+     "sym": "\\tilde{m}_{ij}",
+     "idx": "\\tilde{m}_{ij}",
+     "num": "\\left[0.2822,\\; 0.2041,\\; 0.1071,\\; 0.4501\\right]"
+    },
+    "MNEW": {
+     "sym": "m_i^{\\mathrm{new}}",
+     "idx": "m_{i}^{\\mathrm{new}}",
+     "num": "\\left[0.2822,\\; 0.2041,\\; 0.1071,\\; 0.4501\\right]"
+    }
+   },
+   "reads": [
+    "S",
+    "m_i"
+   ],
+   "writes": [
+    "m_i"
+   ],
+   "state": {
+    "m_i": [
+     0.2822063163715511,
+     0.20410637238949694,
+     0.10705596667164329,
+     0.45010882156429677
+    ]
+   },
+   "narration": "第一块：m_i 还是 −∞，所以直接取本块的行最大值 0.4501。这正是 init 用 −∞ 而不是 0 的原因 ——0 是个合法的最大值，会把所有指数整体压偏。",
+   "flows": [
+    {
+     "from": "SRAM",
+     "to": "SRAM",
+     "elements": 4,
+     "note": "4 行各一个最大值，全程在 SRAM",
+     "bytes": 16
+    }
+   ],
+   "occ": {
+    "elements": 152,
+    "parts": [
+     {
+      "name": "Q_i",
+      "label": "当前 Q 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "O_i",
+      "label": "累积输出块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "S/P 共用缓冲",
+      "label": "S_ij / P_ij 共用一块缓冲",
+      "shape": [
+       4,
+       4
+      ],
+      "elements": 16,
+      "covers": [
+       "P",
+       "S"
+      ]
+     },
+     {
+      "name": "m_i",
+      "label": "行最大值",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     },
+     {
+      "name": "l_i",
+      "label": "行指数和",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     }
+    ]
+   },
+   "io": {
+    "step": 0,
+    "cum": 328
+   }
+  },
+  {
+   "id": "p10",
+   "title": "(i=1, j=0)：P_ij = exp(S_ij − m_new) —— 就地覆盖 S",
+   "kind": "op",
+   "op": "exp",
+   "phase": "内循环",
+   "formula": {
+    "sym": "P_{ij} = \\region{SP}{\\exp\\left(S_{ij} - m_i^{\\mathrm{new}}\\right)}\\ \\in \\mathbb{R}^{B_r \\times B_c}",
+    "idx": "P_{\\slot{II}\\slot{JJ}} = \\exp\\left(S_{\\slot{II}\\slot{JJ}} - m_{\\slot{II}}^{\\mathrm{new}}\\right)",
+    "num": "P_{\\slot{II}\\slot{JJ}}[0,0] = \\exp\\left(\\slot{S00} - \\slot{M0}\\right) = \\slot{P00}"
+   },
+   "bindings": {
+    "II": {
+     "sym": "i",
+     "idx": "1",
+     "num": "1"
+    },
+    "JJ": {
+     "sym": "j",
+     "idx": "0",
+     "num": "0"
+    },
+    "S00": {
+     "sym": "S_{ij}[0,0]",
+     "idx": "S_{ij}[0,0]",
+     "num": "-0.05544"
+    },
+    "M0": {
+     "sym": "m_i^{\\mathrm{new}}[0]",
+     "idx": "m_{i}^{\\mathrm{new}}[0]",
+     "num": "0.2822"
+    },
+    "P00": {
+     "sym": "P_{ij}[0,0]",
+     "idx": "P_{ij}[0,0]",
+     "num": "0.7134"
+    }
+   },
+   "reads": [
+    "S",
+    "m_i"
+   ],
+   "writes": [
+    "P"
+   ],
+   "state": {
+    "P": [
+     [
+      0.7134495958941697,
+      1.0,
+      0.6760490344481224,
+      0.8098021599152637
+     ],
+     [
+      0.6580323738775857,
+      0.8084004637563819,
+      1.0,
+      0.8606666126821035
+     ],
+     [
+      1.0,
+      0.7895597787446842,
+      0.769388035568356,
+      0.9023591970402822
+     ],
+     [
+      0.6305422959180486,
+      0.7366727237929903,
+      0.882669582749639,
+      1.0
+     ]
+    ]
+   },
+   "narration": "逐元素减掉本行的新最大值再取指数 —— 因为减过最大值，所有指数都落在 (0, 1]，不会溢出。真实 kernel 让 P 就地覆盖 S 的缓冲：两个名字，一块 4×4 的 SRAM，所以下面的占用账里它们算一份。HBM 访问量依然是 0。",
+   "regions": {
+    "SP": "P_ij 是 FlashAttention 藏起来的第二个中间矩阵。它和 S_ij 一样，整趟回放不会在 HBM 的访问日志里出现。"
+   },
+   "flows": [
+    {
+     "from": "SRAM",
+     "to": "SRAM",
+     "elements": 16,
+     "note": "P_ij 就地覆盖 S_ij 的 4×4 缓冲",
+     "bytes": 64
+    }
+   ],
+   "occ": {
+    "elements": 152,
+    "parts": [
+     {
+      "name": "Q_i",
+      "label": "当前 Q 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "O_i",
+      "label": "累积输出块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "S/P 共用缓冲",
+      "label": "S_ij / P_ij 共用一块缓冲",
+      "shape": [
+       4,
+       4
+      ],
+      "elements": 16,
+      "covers": [
+       "P",
+       "S"
+      ]
+     },
+     {
+      "name": "m_i",
+      "label": "行最大值",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     },
+     {
+      "name": "l_i",
+      "label": "行指数和",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     }
+    ]
+   },
+   "io": {
+    "step": 0,
+    "cum": 328
+   }
+  },
+  {
+   "id": "l10",
+   "title": "(i=1, j=0)：ℓ_i 用修正因子重缩放后并入本块",
+   "kind": "op",
+   "op": "sum-exp",
+   "phase": "内循环",
+   "formula": {
+    "sym": "\\ell_i^{\\mathrm{new}} = \\slot{LOLD}\\cdot \\region{CORR}{\\exp\\left(m_i - m_i^{\\mathrm{new}}\\right)} + \\mathrm{rowsum}\\left(P_{ij}\\right)",
+    "idx": "\\ell_{\\slot{II}}^{\\mathrm{new}} = \\slot{LOLD}\\cdot \\region{CORR}{\\exp\\left(\\slot{MOLD} - \\slot{MNEW}\\right)} + \\slot{SUM}",
+    "num": "\\ell_{\\slot{II}}^{\\mathrm{new}} = \\slot{LOLD}\\cdot \\region{CORR}{\\exp\\left(\\slot{MOLD} - \\slot{MNEW}\\right)} + \\slot{SUM} = \\slot{LNEW}"
+   },
+   "bindings": {
+    "II": {
+     "sym": "i",
+     "idx": "1",
+     "num": "1"
+    },
+    "LOLD": {
+     "sym": "\\ell_i",
+     "idx": "\\ell_{i}",
+     "num": "\\left[0,\\; 0,\\; 0,\\; 0\\right]"
+    },
+    "MOLD": {
+     "sym": "m_i",
+     "idx": "m_{i}",
+     "num": "\\left[-\\infty,\\; -\\infty,\\; -\\infty,\\; -\\infty\\right]"
+    },
+    "MNEW": {
+     "sym": "m_i^{\\mathrm{new}}",
+     "idx": "m_{i}^{\\mathrm{new}}",
+     "num": "\\left[0.2822,\\; 0.2041,\\; 0.1071,\\; 0.4501\\right]"
+    },
+    "SUM": {
+     "sym": "\\mathrm{rowsum}(P_{ij})",
+     "idx": "\\mathrm{rowsum}(P_{ij})",
+     "num": "\\left[3.199,\\; 3.327,\\; 3.461,\\; 3.25\\right]"
+    },
+    "LNEW": {
+     "sym": "\\ell_i^{\\mathrm{new}}",
+     "idx": "\\ell_{i}^{\\mathrm{new}}",
+     "num": "\\left[3.199,\\; 3.327,\\; 3.461,\\; 3.25\\right]"
+    }
+   },
+   "reads": [
+    "P",
+    "m_i",
+    "l_i"
+   ],
+   "writes": [
+    "l_i"
+   ],
+   "state": {
+    "l_i": [
+     3.199300790257556,
+     3.327099450316071,
+     3.4613070113533224,
+     3.249884602460678
+    ]
+   },
+   "narration": "第一块：ℓ_i 旧值是 0，α 按定义为 0（e^(−∞ − m) = 0），更新化简成直接取本块的指数和 3.461。",
+   "regions": {
+    "CORR": "INIT · 第一块没有历史，α 按定义为 0（e^(−∞ − m) = 0），更新化简成直接求和。"
+   },
+   "flows": [
+    {
+     "from": "SRAM",
+     "to": "SRAM",
+     "elements": 4,
+     "note": "4 行的指数和在 SRAM 内累加，不跨层",
+     "bytes": 16
+    }
+   ],
+   "occ": {
+    "elements": 152,
+    "parts": [
+     {
+      "name": "Q_i",
+      "label": "当前 Q 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "O_i",
+      "label": "累积输出块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "S/P 共用缓冲",
+      "label": "S_ij / P_ij 共用一块缓冲",
+      "shape": [
+       4,
+       4
+      ],
+      "elements": 16,
+      "covers": [
+       "P",
+       "S"
+      ]
+     },
+     {
+      "name": "m_i",
+      "label": "行最大值",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     },
+     {
+      "name": "l_i",
+      "label": "行指数和",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     }
+    ]
+   },
+   "io": {
+    "step": 0,
+    "cum": 328
+   },
+   "corr": {
+    "kind": "init",
+    "factor": 0.0,
+    "m_old": "-\\infty",
+    "m_new": 0.2822063163715511,
+    "o_correct": 1.5735570104848686,
+    "o_uncorrected": 1.5735570104848686,
+    "bias_abs": 0.0,
+    "bias_rel": 0.0
+   }
+  },
+  {
+   "id": "o10",
+   "title": "(i=1, j=0)：O_i 用同一个 α 重缩放后累加 P_ij V_j",
+   "kind": "op",
+   "op": "matmul",
+   "phase": "内循环",
+   "formula": {
+    "sym": "O_i^{\\mathrm{new}} = \\frac{\\region{CORR}{\\alpha}\\,\\ell_i}{\\ell_i^{\\mathrm{new}}}\\, O_i + \\frac{P_{ij} V_j}{\\ell_i^{\\mathrm{new}}}",
+    "idx": "O_{\\slot{II}}^{\\mathrm{new}} = \\frac{\\region{CORR}{\\alpha}\\,\\slot{LOLD}}{\\slot{LNEW}}\\, \\slot{OOLD} + \\frac{P_{\\slot{II}\\slot{JJ}} V_{\\slot{JJ}}}{\\slot{LNEW}}",
+    "num": "O_{\\slot{II}}^{\\mathrm{new}}[0,0] = \\slot{O00}"
+   },
+   "bindings": {
+    "II": {
+     "sym": "i",
+     "idx": "1",
+     "num": "1"
+    },
+    "JJ": {
+     "sym": "j",
+     "idx": "0",
+     "num": "0"
+    },
+    "LOLD": {
+     "sym": "\\ell_i",
+     "idx": "\\ell_{i}",
+     "num": "\\left[0,\\; 0,\\; 0,\\; 0\\right]"
+    },
+    "LNEW": {
+     "sym": "\\ell_i^{\\mathrm{new}}",
+     "idx": "\\ell_{i}^{\\mathrm{new}}",
+     "num": "\\left[3.199,\\; 3.327,\\; 3.461,\\; 3.25\\right]"
+    },
+    "OOLD": {
+     "sym": "O_i[0]",
+     "idx": "O_{i}[0,:]",
+     "num": "\\left[0,\\; 0,\\; \\ldots,\\; 0\\right]"
+    },
+    "O00": {
+     "sym": "O_i^{\\mathrm{new}}[0,0]",
+     "idx": "O_{i}^{\\mathrm{new}}[0,0]",
+     "num": "0.3775"
+    }
+   },
+   "reads": [
+    "P",
+    "V_j",
+    "O_i",
+    "l_i"
+   ],
+   "writes": [
+    "O_i"
+   ],
+   "state": {
+    "O_i": [
+     [
+      0.37745371435493513,
+      0.27478216348166984,
+      -0.4804247937843269,
+      -0.036780028619729066,
+      -0.17656026079969345,
+      0.26428339381275806,
+      -0.21774741266559436,
+      0.20011517693736833
+     ],
+     [
+      0.3741071330248392,
+      0.22635562080848404,
+      -0.49748083162101286,
+      0.029464687153507058,
+      -0.19808636092587617,
+      0.27743917811292446,
+      -0.19779057050445406,
+      0.18051420925285186
+     ],
+     [
+      0.36089490174859534,
+      0.1935429257059443,
+      -0.47403323916912005,
+      0.00047911134935438304,
+      -0.198459723048167,
+      0.30295823632487917,
+      -0.20798063049628263,
+      0.14636652397871613
+     ],
+     [
+      0.37590726448280964,
+      0.2545810313412871,
+      -0.49705668159783734,
+      0.061190007522229806,
+      -0.18204651015851595,
+      0.2547914931769946,
+      -0.1920075016457224,
+      0.17287253415490386
+     ]
+    ]
+   },
+   "narration": "第一块：O_i 从 0 出发，直接取 P_ij V_j / ℓ_i^new。",
+   "regions": {
+    "CORR": "INIT · 第一块没有历史，α 按定义为 0（e^(−∞ − m) = 0），更新化简成直接求和。"
+   },
+   "flows": [
+    {
+     "from": "SRAM",
+     "to": "SRAM",
+     "elements": 48,
+     "note": "P_ij V_j 是 SRAM 内的 4×8 次乘加，不跨层",
+     "bytes": 192
+    }
+   ],
+   "occ": {
+    "elements": 152,
+    "parts": [
+     {
+      "name": "Q_i",
+      "label": "当前 Q 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "O_i",
+      "label": "累积输出块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "S/P 共用缓冲",
+      "label": "S_ij / P_ij 共用一块缓冲",
+      "shape": [
+       4,
+       4
+      ],
+      "elements": 16,
+      "covers": [
+       "P",
+       "S"
+      ]
+     },
+     {
+      "name": "m_i",
+      "label": "行最大值",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     },
+     {
+      "name": "l_i",
+      "label": "行指数和",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     }
+    ]
+   },
+   "io": {
+    "step": 0,
+    "cum": 328
+   },
+   "corr": {
+    "kind": "init",
+    "factor": 0.0,
+    "m_old": "-\\infty",
+    "m_new": 0.2822063163715511,
+    "o_correct": 1.5735570104848686,
+    "o_uncorrected": 1.5735570104848686,
+    "bias_abs": 0.0,
+    "bias_rel": 0.0
+   }
+  },
+  {
+   "id": "wb10",
+   "title": "(i=1, j=0)：把 O_i、m_i、ℓ_i 写回 HBM",
+   "kind": "comm",
+   "op": "store",
+   "phase": "内循环",
+   "formula": {
+    "sym": "\\mathrm{HBM}[O]\\left[\\slot{R0}:\\slot{R1}\\right] \\leftarrow O_i,\\qquad \\mathrm{HBM}[m],\\,\\mathrm{HBM}[\\ell] \\leftarrow m_i,\\, \\ell_i",
+    "idx": "\\mathrm{HBM}[O]\\left[\\slot{R0}:\\slot{R1}\\right] \\leftarrow O_{\\slot{I}}^{\\mathrm{new}},\\qquad \\mathrm{HBM}[m], \\mathrm{HBM}[\\ell] \\leftarrow m_{\\slot{I}}^{\\mathrm{new}}, \\ell_{\\slot{I}}^{\\mathrm{new}}",
+    "num": "\\mathrm{IO} + \\slot{COST},\\qquad B_rd + 2B_r = \\slot{BR}\\cdot\\slot{D} + 2\\cdot\\slot{BR} = \\slot{COST}"
+   },
+   "bindings": {
+    "I": {
+     "sym": "i",
+     "idx": "1",
+     "num": "1"
+    },
+    "R0": {
+     "sym": "i B_r",
+     "idx": "4",
+     "num": "4"
+    },
+    "R1": {
+     "sym": "(i+1) B_r",
+     "idx": "8",
+     "num": "8"
+    },
+    "BR": {
+     "sym": "B_r",
+     "idx": "4",
+     "num": "4"
+    },
+    "D": {
+     "sym": "d",
+     "idx": "8",
+     "num": "8"
+    },
+    "COST": {
+     "sym": "B_rd + 2B_r",
+     "idx": "4\\cdot8 + 2\\cdot4",
+     "num": "40"
+    }
+   },
+   "reads": [
+    "O_i",
+    "m_i",
+    "l_i"
+   ],
+   "writes": [
+    "O",
+    "m",
+    "l"
+   ],
+   "state": {
+    "O": [
+     [
+      0.3739411941745366,
+      0.23028452273450528,
+      -0.49769986066179434,
+      0.042560739926940566,
+      -0.19478164069286516,
+      0.27246932432532167,
+      -0.19503079982225793,
+      0.1756319722358162
+     ],
+     [
+      0.3735288794888699,
+      0.26829019960701805,
+      -0.472670486131193,
+      -0.04367514645295065,
+      -0.17457666870088118,
+      0.2696826139682493,
+      -0.22069216105158787,
+      0.18883679525763314
+     ],
+     [
+      0.3580419024583271,
+      0.1430535779181481,
+      -0.47996612543612155,
+      -0.02524583095161989,
+      -0.22630876616115791,
+      0.3368285943690085,
+      -0.21043200560673103,
+      0.15322213022945866
+     ],
+     [
+      0.3539999594489405,
+      0.12595855660851177,
+      -0.48450190513263036,
+      0.033524541092273596,
+      -0.2276650456928954,
+      0.3341552818793256,
+      -0.1959858127681163,
+      0.12645410594172557
+     ],
+     [
+      0.37745371435493513,
+      0.27478216348166984,
+      -0.4804247937843269,
+      -0.036780028619729066,
+      -0.17656026079969345,
+      0.26428339381275806,
+      -0.21774741266559436,
+      0.20011517693736833
+     ],
+     [
+      0.3741071330248392,
+      0.22635562080848404,
+      -0.49748083162101286,
+      0.029464687153507058,
+      -0.19808636092587617,
+      0.27743917811292446,
+      -0.19779057050445406,
+      0.18051420925285186
+     ],
+     [
+      0.36089490174859534,
+      0.1935429257059443,
+      -0.47403323916912005,
+      0.00047911134935438304,
+      -0.198459723048167,
+      0.30295823632487917,
+      -0.20798063049628263,
+      0.14636652397871613
+     ],
+     [
+      0.37590726448280964,
+      0.2545810313412871,
+      -0.49705668159783734,
+      0.061190007522229806,
+      -0.18204651015851595,
+      0.2547914931769946,
+      -0.1920075016457224,
+      0.17287253415490386
+     ]
+    ],
+    "m": [
+     0.3280268357924394,
+     0.2090207645187434,
+     -0.1335371156270795,
+     0.16617009357883863,
+     0.2822063163715511,
+     0.20410637238949694,
+     0.10705596667164329,
+     0.45010882156429677
+    ],
+    "l": [
+     3.3867205400290747,
+     3.2539253397599097,
+     3.4634308801558378,
+     3.2991528074392042,
+     3.199300790257556,
+     3.327099450316071,
+     3.4613070113533224,
+     3.249884602460678
+    ]
+   },
+   "narration": "这一轮算完的东西立刻写回 HBM：O 的第 4..7 行（4×8）、m 和 ℓ 的同一段（各 4 个标量），共 40 个元素。下一个外循环（j=1）一开始，它们又会被原样读回来 —— 这就是 V1 低效的地方，也是 V2 把循环顺序调过来之后消失的那部分流量。",
+   "spans": {
+    "O": [
+     [
+      4,
+      8
+     ],
+     [
+      0,
+      8
+     ]
+    ],
+    "m": [
+     [
+      4,
+      8
+     ]
+    ],
+    "l": [
+     [
+      4,
+      8
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "SRAM",
+     "to": "HBM",
+     "elements": 40,
+     "note": "O_i 的 4×8 加上 m、ℓ 各 4 个，全部写回 HBM",
+     "bytes": 160
+    }
+   ],
+   "occ": {
+    "elements": 152,
+    "parts": [
+     {
+      "name": "Q_i",
+      "label": "当前 Q 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "O_i",
+      "label": "累积输出块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "S/P 共用缓冲",
+      "label": "S_ij / P_ij 共用一块缓冲",
+      "shape": [
+       4,
+       4
+      ],
+      "elements": 16,
+      "covers": [
+       "P",
+       "S"
+      ]
+     },
+     {
+      "name": "m_i",
+      "label": "行最大值",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     },
+     {
+      "name": "l_i",
+      "label": "行指数和",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     }
+    ]
+   },
+   "io": {
+    "step": 40,
+    "cum": 368
+   }
+  },
+  {
+   "id": "kv1",
+   "title": "外循环 j=1：载入 K_1、V_1 到 SRAM",
+   "kind": "comm",
+   "op": "load",
+   "phase": "外循环",
+   "formula": {
+    "sym": "K_j \\leftarrow \\mathrm{HBM}[K]\\left[\\slot{R0}:\\slot{R1},\\ :\\right],\\qquad V_j \\leftarrow \\mathrm{HBM}[V]\\left[\\slot{R0}:\\slot{R1},\\ :\\right]",
+    "idx": "K_{\\slot{J}} \\leftarrow \\mathrm{HBM}[K]\\left[\\slot{R0}:\\slot{R1},\\ :\\right],\\qquad V_{\\slot{J}} \\leftarrow \\mathrm{HBM}[V]\\left[\\slot{R0}:\\slot{R1},\\ :\\right]",
+    "num": "K_{\\slot{J}},\\ V_{\\slot{J}} \\leftarrow \\slot{ELEMS} \\text{ 个元素}\\quad (\\mathrm{IO} + \\slot{COST})"
+   },
+   "bindings": {
+    "J": {
+     "sym": "j",
+     "idx": "1",
+     "num": "1"
+    },
+    "R0": {
+     "sym": "j B_c",
+     "idx": "4",
+     "num": "4"
+    },
+    "R1": {
+     "sym": "(j+1) B_c",
+     "idx": "8",
+     "num": "8"
+    },
+    "ELEMS": {
+     "sym": "2 B_c d",
+     "idx": "2\\cdot4\\cdot8",
+     "num": "64"
+    },
+    "COST": {
+     "sym": "\\mathrm{IO}",
+     "idx": "64",
+     "num": "64"
+    }
+   },
+   "reads": [
+    "K",
+    "V"
+   ],
+   "writes": [
+    "K_j",
+    "V_j"
+   ],
+   "state": {
+    "K_j": [
+     [
+      0.62,
+      0.23,
+      -0.14,
+      0.66,
+      -0.66,
+      0.03,
+      -0.45,
+      -0.23
+     ],
+     [
+      -0.32,
+      -0.16,
+      0.44,
+      0.17,
+      0.61,
+      -0.69,
+      0.42,
+      -0.54
+     ],
+     [
+      -0.15,
+      0.39,
+      -0.65,
+      -0.41,
+      0.56,
+      -0.26,
+      -0.03,
+      -0.28
+     ],
+     [
+      0.6,
+      0.2,
+      0.24,
+      -0.62,
+      -0.05,
+      -0.29,
+      -0.09,
+      0.68
+     ]
+    ],
+    "V_j": [
+     [
+      -0.56,
+      -0.25,
+      0.15,
+      -0.04,
+      0.69,
+      0.07,
+      0.08,
+      -0.27
+     ],
+     [
+      -0.31,
+      0.51,
+      0.48,
+      -0.52,
+      -0.05,
+      -0.36,
+      0.15,
+      0.29
+     ],
+     [
+      -0.12,
+      -0.01,
+      -0.14,
+      -0.66,
+      0.27,
+      0.32,
+      -0.45,
+      0.57
+     ],
+     [
+      -0.61,
+      0.45,
+      -0.55,
+      0.36,
+      0.08,
+      -0.69,
+      0.29,
+      -0.6
+     ]
+    ]
+   },
+   "narration": "外层的第 2 个块：K 的第 4..7 行和 V 的同一段从 HBM 搬进 SRAM，各 4×8，合计 64 个元素。这一对 K/V 块会被内层的全部 2 个 Q 块复用，所以整趟回放 K、V 各自只从 HBM 读一次 —— 代价全在 Q 和 O 那边。",
+   "spans": {
+    "K": [
+     [
+      4,
+      8
+     ],
+     [
+      0,
+      8
+     ]
+    ],
+    "V": [
+     [
+      4,
+      8
+     ],
+     [
+      0,
+      8
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "SRAM",
+     "elements": 64,
+     "note": "K、V 各一个 4×8 的块，64 个 float；整个外循环只付一次",
+     "bytes": 256
+    }
+   ],
+   "occ": {
+    "elements": 152,
+    "parts": [
+     {
+      "name": "Q_i",
+      "label": "当前 Q 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "O_i",
+      "label": "累积输出块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "S/P 共用缓冲",
+      "label": "S_ij / P_ij 共用一块缓冲",
+      "shape": [
+       4,
+       4
+      ],
+      "elements": 16,
+      "covers": [
+       "P",
+       "S"
+      ]
+     },
+     {
+      "name": "m_i",
+      "label": "行最大值",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     },
+     {
+      "name": "l_i",
+      "label": "行指数和",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     }
+    ]
+   },
+   "io": {
+    "step": 64,
+    "cum": 432
+   }
+  },
+  {
+   "id": "ld01",
+   "title": "(i=0, j=1)：载入 Q_0、O_0、m_0、ℓ_0",
+   "kind": "comm",
+   "op": "load",
+   "phase": "内循环",
+   "formula": {
+    "sym": "Q_i, O_i \\leftarrow \\mathrm{HBM}\\left[\\slot{R0}:\\slot{R1},\\ :\\right],\\qquad m_i, \\ell_i \\leftarrow \\mathrm{HBM}\\left[\\slot{R0}:\\slot{R1}\\right]",
+    "idx": "Q_{\\slot{I}}, O_{\\slot{I}} \\leftarrow \\mathrm{HBM}\\left[\\slot{R0}:\\slot{R1},\\ :\\right],\\qquad m_{\\slot{I}}, \\ell_{\\slot{I}} \\leftarrow \\mathrm{HBM}\\left[\\slot{R0}:\\slot{R1}\\right]",
+    "num": "\\mathrm{IO} + \\slot{COST},\\qquad 2B_rd + 2B_r = 2\\cdot\\slot{BR}\\cdot\\slot{D} + 2\\cdot\\slot{BR} = \\slot{COST}"
+   },
+   "bindings": {
+    "I": {
+     "sym": "i",
+     "idx": "0",
+     "num": "0"
+    },
+    "R0": {
+     "sym": "i B_r",
+     "idx": "0",
+     "num": "0"
+    },
+    "R1": {
+     "sym": "(i+1) B_r",
+     "idx": "4",
+     "num": "4"
+    },
+    "BR": {
+     "sym": "B_r",
+     "idx": "4",
+     "num": "4"
+    },
+    "D": {
+     "sym": "d",
+     "idx": "8",
+     "num": "8"
+    },
+    "COST": {
+     "sym": "2B_rd + 2B_r",
+     "idx": "2\\cdot4\\cdot8 + 2\\cdot4",
+     "num": "72"
+    }
+   },
+   "reads": [
+    "Q",
+    "O",
+    "m",
+    "l"
+   ],
+   "writes": [
+    "Q_i",
+    "O_i",
+    "m_i",
+    "l_i"
+   ],
+   "state": {
+    "Q_i": [
+     [
+      -0.39,
+      0.62,
+      -0.33,
+      0.64,
+      0.08,
+      0.62,
+      -0.34,
+      0.44
+     ],
+     [
+      -0.31,
+      0.57,
+      0.21,
+      -0.23,
+      -0.21,
+      -0.46,
+      0.37,
+      -0.39
+     ],
+     [
+      0.07,
+      -0.4,
+      0.57,
+      -0.62,
+      0.52,
+      -0.22,
+      -0.53,
+      0.37
+     ],
+     [
+      -0.42,
+      -0.45,
+      -0.06,
+      -0.51,
+      0.03,
+      0.69,
+      -0.16,
+      0.46
+     ]
+    ],
+    "O_i": [
+     [
+      0.3739411941745366,
+      0.23028452273450528,
+      -0.49769986066179434,
+      0.042560739926940566,
+      -0.19478164069286516,
+      0.27246932432532167,
+      -0.19503079982225793,
+      0.1756319722358162
+     ],
+     [
+      0.3735288794888699,
+      0.26829019960701805,
+      -0.472670486131193,
+      -0.04367514645295065,
+      -0.17457666870088118,
+      0.2696826139682493,
+      -0.22069216105158787,
+      0.18883679525763314
+     ],
+     [
+      0.3580419024583271,
+      0.1430535779181481,
+      -0.47996612543612155,
+      -0.02524583095161989,
+      -0.22630876616115791,
+      0.3368285943690085,
+      -0.21043200560673103,
+      0.15322213022945866
+     ],
+     [
+      0.3539999594489405,
+      0.12595855660851177,
+      -0.48450190513263036,
+      0.033524541092273596,
+      -0.2276650456928954,
+      0.3341552818793256,
+      -0.1959858127681163,
+      0.12645410594172557
+     ]
+    ],
+    "m_i": [
+     0.3280268357924394,
+     0.2090207645187434,
+     -0.1335371156270795,
+     0.16617009357883863
+    ],
+    "l_i": [
+     3.3867205400290747,
+     3.2539253397599097,
+     3.4634308801558378,
+     3.2991528074392042
+    ]
+   },
+   "narration": "内层第 0 个 Q 块。这里搬的不只是 Q_i：V1 的循环顺序是 K/V 在外、Q 在内，所以每个内层迭代开始时，上一轮外循环留下的 O_i、m_i、ℓ_i 都要重新从 HBM 读回来。这 72 个元素是 V1 为「内层循环」付的过路费 —— V2 把顺序调过来，就是为了省掉它。",
+   "spans": {
+    "Q": [
+     [
+      0,
+      4
+     ],
+     [
+      0,
+      8
+     ]
+    ],
+    "O": [
+     [
+      0,
+      4
+     ],
+     [
+      0,
+      8
+     ]
+    ],
+    "m": [
+     [
+      0,
+      4
+     ]
+    ],
+    "l": [
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "SRAM",
+     "elements": 72,
+     "note": "Q_i 与 O_i 各 4×8，m_i、ℓ_i 各 4 个标量",
+     "bytes": 288
+    }
+   ],
+   "occ": {
+    "elements": 152,
+    "parts": [
+     {
+      "name": "Q_i",
+      "label": "当前 Q 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "O_i",
+      "label": "累积输出块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "S/P 共用缓冲",
+      "label": "S_ij / P_ij 共用一块缓冲",
+      "shape": [
+       4,
+       4
+      ],
+      "elements": 16,
+      "covers": [
+       "P",
+       "S"
+      ]
+     },
+     {
+      "name": "m_i",
+      "label": "行最大值",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     },
+     {
+      "name": "l_i",
+      "label": "行指数和",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     }
+    ]
+   },
+   "io": {
+    "step": 72,
+    "cum": 504
+   }
+  },
+  {
+   "id": "s01",
+   "title": "(i=0, j=1)：S_ij = Q_i K_jᵀ / √d —— 只落在 SRAM",
+   "kind": "op",
+   "op": "matmul",
+   "phase": "内循环",
+   "formula": {
+    "sym": "S_{ij} = \\frac{\\region{SP}{\\slot{QL} \\; K_j^\\top}}{\\sqrt{d}}\\ \\in \\mathbb{R}^{B_r \\times B_c}",
+    "idx": "S_{\\slot{II}\\slot{JJ}} = \\frac{Q_{\\slot{II}} K_{\\slot{JJ}}^\\top}}{\\sqrt{\\slot{D}}} \\in \\mathbb{R}^{\\slot{BR} \\times \\slot{BC}}",
+    "num": "S_{\\slot{II}\\slot{JJ}}[0,0] = \\frac{\\slot{S00}}{\\sqrt{\\slot{D}}} = \\slot{SNUM}"
+   },
+   "bindings": {
+    "II": {
+     "sym": "i",
+     "idx": "0",
+     "num": "0"
+    },
+    "JJ": {
+     "sym": "j",
+     "idx": "1",
+     "num": "1"
+    },
+    "D": {
+     "sym": "d",
+     "idx": "8",
+     "num": "8"
+    },
+    "BR": {
+     "sym": "B_r",
+     "idx": "4",
+     "num": "4"
+    },
+    "BC": {
+     "sym": "B_c",
+     "idx": "4",
+     "num": "4"
+    },
+    "QL": {
+     "sym": "Q_i[0]",
+     "idx": "Q_{i}[0,:]",
+     "num": "\\left[-0.39,\\; 0.62,\\; \\ldots,\\; 0.44\\right]"
+    },
+    "S00": {
+     "sym": "(Q_i K_j^\\top)[0,0]",
+     "idx": "(Q_{i} K_{j}^\\top)[0,0]",
+     "num": "0.387"
+    },
+    "SNUM": {
+     "sym": "S_{ij}[0,0]",
+     "idx": "S_{ij}[0,0]",
+     "num": "0.1368"
+    }
+   },
+   "reads": [
+    "Q_i",
+    "K_j"
+   ],
+   "writes": [
+    "S"
+   ],
+   "state": {
+    "S": [
+     [
+      0.13682516215959695,
+      -0.27230682143493945,
+      0.008131727983645308,
+      -0.15556349186104043
+     ],
+     [
+      -0.0686954237922731,
+      0.2180010206398126,
+      0.11550589270682253,
+      -0.011879393923934004
+     ],
+     [
+      -0.25950818869546294,
+      0.08259007204258871,
+      -0.007813529932111367,
+      0.2900198463036624
+     ],
+     [
+      -0.25632620818012347,
+      -0.24045166094248543,
+      -0.05338656197958435,
+      0.030193459556665567
+     ]
+    ]
+   },
+   "narration": "内积：Q_i（4×8）乘 K_jᵀ（8×4）得到 4×4 的分数块 S_ij，再除以 √d = 2.828 缩放。这一步的读全部来自 SRAM —— Q_i 和 K_j 都已经在里面了。产生的 S_ij 也<b>只写在 SRAM</b>：4×4 = 16 个元素，一个都没碰 HBM（访问日志里的增量是 0）。标准实现在这一步会把 8×8 = 64 个元素写回 HBM。",
+   "regions": {
+    "SP": "S_ij 是 FlashAttention 藏起来的第一个中间矩阵。整趟回放结束，HBM 的访问日志里都不会出现它的名字 —— 这不是「我们没画」，是访问日志里真的没有。"
+   },
+   "flows": [
+    {
+     "from": "SRAM",
+     "to": "SRAM",
+     "elements": 16,
+     "note": "S_ij 的 4×4 个元素在 SRAM 内产生，不跨层",
+     "bytes": 64
+    }
+   ],
+   "occ": {
+    "elements": 152,
+    "parts": [
+     {
+      "name": "Q_i",
+      "label": "当前 Q 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "O_i",
+      "label": "累积输出块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "S/P 共用缓冲",
+      "label": "S_ij / P_ij 共用一块缓冲",
+      "shape": [
+       4,
+       4
+      ],
+      "elements": 16,
+      "covers": [
+       "P",
+       "S"
+      ]
+     },
+     {
+      "name": "m_i",
+      "label": "行最大值",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     },
+     {
+      "name": "l_i",
+      "label": "行指数和",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     }
+    ]
+   },
+   "io": {
+    "step": 0,
+    "cum": 504
+   }
+  },
+  {
+   "id": "mx01",
+   "title": "(i=0, j=1)：行最大值 m_i 抬到 m_new",
+   "kind": "op",
+   "op": "max",
+   "phase": "内循环",
+   "formula": {
+    "sym": "\\tilde{m}_{ij} = \\mathrm{rowmax}(S_{ij}),\\qquad m_i^{\\mathrm{new}} = \\max\\left(\\slot{MOLD},\\ \\tilde{m}_{ij}\\right)",
+    "idx": "\\tilde{m}_{\\slot{II}\\slot{JJ}} = \\mathrm{rowmax}(S_{\\slot{II}\\slot{JJ}}),\\qquad m_{\\slot{II}}^{\\mathrm{new}} = \\max\\left(\\slot{MOLD},\\ \\tilde{m}_{\\slot{II}\\slot{JJ}}\\right)",
+    "num": "m_{\\slot{II}}^{\\mathrm{new}} = \\max\\left(\\slot{MOLD},\\ \\slot{MT}\\right) = \\slot{MNEW}"
+   },
+   "bindings": {
+    "II": {
+     "sym": "i",
+     "idx": "0",
+     "num": "0"
+    },
+    "JJ": {
+     "sym": "j",
+     "idx": "1",
+     "num": "1"
+    },
+    "MOLD": {
+     "sym": "m_i",
+     "idx": "m_{i}",
+     "num": "\\left[0.328,\\; 0.209,\\; -0.1335,\\; 0.1662\\right]"
+    },
+    "MT": {
+     "sym": "\\tilde{m}_{ij}",
+     "idx": "\\tilde{m}_{ij}",
+     "num": "\\left[0.1368,\\; 0.218,\\; 0.29,\\; 0.03019\\right]"
+    },
+    "MNEW": {
+     "sym": "m_i^{\\mathrm{new}}",
+     "idx": "m_{i}^{\\mathrm{new}}",
+     "num": "\\left[0.328,\\; 0.218,\\; 0.29,\\; 0.1662\\right]"
+    }
+   },
+   "reads": [
+    "S",
+    "m_i"
+   ],
+   "writes": [
+    "m_i"
+   ],
+   "state": {
+    "m_i": [
+     0.3280268357924394,
+     0.2180010206398126,
+     0.2900198463036624,
+     0.16617009357883863
+    ]
+   },
+   "narration": "每行取最大值 0.29，与当前 m_i 比较后抬到 0.328。m 一动，前面按旧 m 累出来的 ℓ_i 和 O_i 就都失去参照了 —— 下一步的修正因子就是为这件事准备的。",
+   "flows": [
+    {
+     "from": "SRAM",
+     "to": "SRAM",
+     "elements": 4,
+     "note": "4 行各一个最大值，全程在 SRAM",
+     "bytes": 16
+    }
+   ],
+   "occ": {
+    "elements": 152,
+    "parts": [
+     {
+      "name": "Q_i",
+      "label": "当前 Q 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "O_i",
+      "label": "累积输出块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "S/P 共用缓冲",
+      "label": "S_ij / P_ij 共用一块缓冲",
+      "shape": [
+       4,
+       4
+      ],
+      "elements": 16,
+      "covers": [
+       "P",
+       "S"
+      ]
+     },
+     {
+      "name": "m_i",
+      "label": "行最大值",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     },
+     {
+      "name": "l_i",
+      "label": "行指数和",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     }
+    ]
+   },
+   "io": {
+    "step": 0,
+    "cum": 504
+   }
+  },
+  {
+   "id": "p01",
+   "title": "(i=0, j=1)：P_ij = exp(S_ij − m_new) —— 就地覆盖 S",
+   "kind": "op",
+   "op": "exp",
+   "phase": "内循环",
+   "formula": {
+    "sym": "P_{ij} = \\region{SP}{\\exp\\left(S_{ij} - m_i^{\\mathrm{new}}\\right)}\\ \\in \\mathbb{R}^{B_r \\times B_c}",
+    "idx": "P_{\\slot{II}\\slot{JJ}} = \\exp\\left(S_{\\slot{II}\\slot{JJ}} - m_{\\slot{II}}^{\\mathrm{new}}\\right)",
+    "num": "P_{\\slot{II}\\slot{JJ}}[0,0] = \\exp\\left(\\slot{S00} - \\slot{M0}\\right) = \\slot{P00}"
+   },
+   "bindings": {
+    "II": {
+     "sym": "i",
+     "idx": "0",
+     "num": "0"
+    },
+    "JJ": {
+     "sym": "j",
+     "idx": "1",
+     "num": "1"
+    },
+    "S00": {
+     "sym": "S_{ij}[0,0]",
+     "idx": "S_{ij}[0,0]",
+     "num": "0.1368"
+    },
+    "M0": {
+     "sym": "m_i^{\\mathrm{new}}[0]",
+     "idx": "m_{i}^{\\mathrm{new}}[0]",
+     "num": "0.328"
+    },
+    "P00": {
+     "sym": "P_{ij}[0,0]",
+     "idx": "P_{ij}[0,0]",
+     "num": "0.826"
+    }
+   },
+   "reads": [
+    "S",
+    "m_i"
+   ],
+   "writes": [
+    "P"
+   ],
+   "state": {
+    "P": [
+     [
+      0.8259659957901399,
+      0.5486285516705931,
+      0.7262252084321521,
+      0.6165657401133351
+     ],
+     [
+      0.7507395854329609,
+      1.0,
+      0.9025825471848652,
+      0.7946286228322178
+     ],
+     [
+      0.5772221747664206,
+      0.8126703101422732,
+      0.7424250350961994,
+      1.0
+     ],
+     [
+      0.6554086781816287,
+      0.6658960148296519,
+      0.8028746690917308,
+      0.8728630275485908
+     ]
+    ]
+   },
+   "narration": "逐元素减掉本行的新最大值再取指数 —— 因为减过最大值，所有指数都落在 (0, 1]，不会溢出。真实 kernel 让 P 就地覆盖 S 的缓冲：两个名字，一块 4×4 的 SRAM，所以下面的占用账里它们算一份。HBM 访问量依然是 0。",
+   "regions": {
+    "SP": "P_ij 是 FlashAttention 藏起来的第二个中间矩阵。它和 S_ij 一样，整趟回放不会在 HBM 的访问日志里出现。"
+   },
+   "flows": [
+    {
+     "from": "SRAM",
+     "to": "SRAM",
+     "elements": 16,
+     "note": "P_ij 就地覆盖 S_ij 的 4×4 缓冲",
+     "bytes": 64
+    }
+   ],
+   "occ": {
+    "elements": 152,
+    "parts": [
+     {
+      "name": "Q_i",
+      "label": "当前 Q 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "O_i",
+      "label": "累积输出块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "S/P 共用缓冲",
+      "label": "S_ij / P_ij 共用一块缓冲",
+      "shape": [
+       4,
+       4
+      ],
+      "elements": 16,
+      "covers": [
+       "P",
+       "S"
+      ]
+     },
+     {
+      "name": "m_i",
+      "label": "行最大值",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     },
+     {
+      "name": "l_i",
+      "label": "行指数和",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     }
+    ]
+   },
+   "io": {
+    "step": 0,
+    "cum": 504
+   }
+  },
+  {
+   "id": "l01",
+   "title": "(i=0, j=1)：ℓ_i 用修正因子重缩放后并入本块",
+   "kind": "op",
+   "op": "sum-exp",
+   "phase": "内循环",
+   "formula": {
+    "sym": "\\ell_i^{\\mathrm{new}} = \\slot{LOLD}\\cdot \\region{CORR}{\\exp\\left(m_i - m_i^{\\mathrm{new}}\\right)} + \\mathrm{rowsum}\\left(P_{ij}\\right)",
+    "idx": "\\ell_{\\slot{II}}^{\\mathrm{new}} = \\slot{LOLD}\\cdot \\region{CORR}{\\exp\\left(\\slot{MOLD} - \\slot{MNEW}\\right)} + \\slot{SUM}",
+    "num": "\\ell_{\\slot{II}}^{\\mathrm{new}} = \\slot{LOLD}\\cdot \\region{CORR}{\\exp\\left(\\slot{MOLD} - \\slot{MNEW}\\right)} + \\slot{SUM} = \\slot{LNEW}"
+   },
+   "bindings": {
+    "II": {
+     "sym": "i",
+     "idx": "0",
+     "num": "0"
+    },
+    "LOLD": {
+     "sym": "\\ell_i",
+     "idx": "\\ell_{i}",
+     "num": "\\left[3.387,\\; 3.254,\\; 3.463,\\; 3.299\\right]"
+    },
+    "MOLD": {
+     "sym": "m_i",
+     "idx": "m_{i}",
+     "num": "\\left[0.328,\\; 0.209,\\; -0.1335,\\; 0.1662\\right]"
+    },
+    "MNEW": {
+     "sym": "m_i^{\\mathrm{new}}",
+     "idx": "m_{i}^{\\mathrm{new}}",
+     "num": "\\left[0.328,\\; 0.218,\\; 0.29,\\; 0.1662\\right]"
+    },
+    "SUM": {
+     "sym": "\\mathrm{rowsum}(P_{ij})",
+     "idx": "\\mathrm{rowsum}(P_{ij})",
+     "num": "\\left[2.717,\\; 3.448,\\; 3.132,\\; 2.997\\right]"
+    },
+    "LNEW": {
+     "sym": "\\ell_i^{\\mathrm{new}}",
+     "idx": "\\ell_{i}^{\\mathrm{new}}",
+     "num": "\\left[6.104,\\; 6.673,\\; 5.4,\\; 6.296\\right]"
+    }
+   },
+   "reads": [
+    "P",
+    "m_i",
+    "l_i"
+   ],
+   "writes": [
+    "l_i"
+   ],
+   "state": {
+    "l_i": [
+     6.104106036035295,
+     6.67278582678906,
+     5.399873792564213,
+     6.296195197090807
+    ]
+   },
+   "narration": "本块有 2/4 行的 m 被抬高，这些行之前累加的 ℓ_i 是按旧 m 算的，所以先乘修正因子 α = e^(m_old − m_new)（本块最小 0.6547）把它们拉回来，再加上本块的指数和 3.448。",
+   "regions": {
+    "CORR": "RESCALE · 2/4 行的 α < 1，最小 0.6547。抬高了 m 的那几行，历史 ℓ_i 与 O_i 必须乘上 α 才等价于「一开始就用新 m 归一」。"
+   },
+   "flows": [
+    {
+     "from": "SRAM",
+     "to": "SRAM",
+     "elements": 4,
+     "note": "4 行的指数和在 SRAM 内累加，不跨层",
+     "bytes": 16
+    }
+   ],
+   "occ": {
+    "elements": 152,
+    "parts": [
+     {
+      "name": "Q_i",
+      "label": "当前 Q 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "O_i",
+      "label": "累积输出块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "S/P 共用缓冲",
+      "label": "S_ij / P_ij 共用一块缓冲",
+      "shape": [
+       4,
+       4
+      ],
+      "elements": 16,
+      "covers": [
+       "P",
+       "S"
+      ]
+     },
+     {
+      "name": "m_i",
+      "label": "行最大值",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     },
+     {
+      "name": "l_i",
+      "label": "行指数和",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     }
+    ]
+   },
+   "io": {
+    "step": 0,
+    "cum": 504
+   },
+   "corr": {
+    "kind": "rescale",
+    "factor": 0.6547138808375151,
+    "m_old": -0.1335371156270795,
+    "m_new": 0.2900198463036624,
+    "o_correct": 0.7431970216022584,
+    "o_uncorrected": 0.756668769857065,
+    "bias_abs": 0.01347174825480657,
+    "bias_rel": 0.018126752211362243
+   }
+  },
+  {
+   "id": "o01",
+   "title": "(i=0, j=1)：O_i 用同一个 α 重缩放后累加 P_ij V_j",
+   "kind": "op",
+   "op": "matmul",
+   "phase": "内循环",
+   "formula": {
+    "sym": "O_i^{\\mathrm{new}} = \\frac{\\region{CORR}{\\alpha}\\,\\ell_i}{\\ell_i^{\\mathrm{new}}}\\, O_i + \\frac{P_{ij} V_j}{\\ell_i^{\\mathrm{new}}}",
+    "idx": "O_{\\slot{II}}^{\\mathrm{new}} = \\frac{\\region{CORR}{\\alpha}\\,\\slot{LOLD}}{\\slot{LNEW}}\\, \\slot{OOLD} + \\frac{P_{\\slot{II}\\slot{JJ}} V_{\\slot{JJ}}}{\\slot{LNEW}}",
+    "num": "O_{\\slot{II}}^{\\mathrm{new}}[0,0] = \\slot{O00}"
+   },
+   "bindings": {
+    "II": {
+     "sym": "i",
+     "idx": "0",
+     "num": "0"
+    },
+    "JJ": {
+     "sym": "j",
+     "idx": "1",
+     "num": "1"
+    },
+    "LOLD": {
+     "sym": "\\ell_i",
+     "idx": "\\ell_{i}",
+     "num": "\\left[3.387,\\; 3.254,\\; 3.463,\\; 3.299\\right]"
+    },
+    "LNEW": {
+     "sym": "\\ell_i^{\\mathrm{new}}",
+     "idx": "\\ell_{i}^{\\mathrm{new}}",
+     "num": "\\left[6.104,\\; 6.673,\\; 5.4,\\; 6.296\\right]"
+    },
+    "OOLD": {
+     "sym": "O_i[0]",
+     "idx": "O_{i}[0,:]",
+     "num": "\\left[0.3739,\\; 0.2303,\\; \\ldots,\\; 0.1756\\right]"
+    },
+    "O00": {
+     "sym": "O_i^{\\mathrm{new}}[0,0]",
+     "idx": "O_{i}^{\\mathrm{new}}[0,0]",
+     "num": "0.02794"
+    }
+   },
+   "reads": [
+    "P",
+    "V_j",
+    "O_i",
+    "l_i"
+   ],
+   "writes": [
+    "O_i"
+   ],
+   "state": {
+    "O_i": [
+     [
+      0.027942894000467622,
+      0.18404180889632119,
+      -0.2849092746224505,
+      -0.07069489343203039,
+      0.02100556426860599,
+      0.09666452398779768,
+      -0.10814696346148531,
+      0.09418525666532024
+     ],
+     [
+      -0.017815423090812216,
+      0.23019827749706434,
+      -0.22405645273509728,
+      -0.1499393102578448,
+      0.03181533667674413,
+      0.045373311213573936,
+      -0.10151030128774743,
+      0.10999344640863526
+     ],
+     [
+      -0.08562849322573202,
+      0.1920626558862319,
+      -0.23438040902394555,
+      -0.11721094567617563,
+      0.02313696340196654,
+      0.010962856915936875,
+      -0.06540511373390884,
+      0.04638006088230087
+     ],
+     [
+      -0.00545536952874115,
+      0.1550255207828729,
+      -0.28159570899680286,
+      -0.07584680393639978,
+      -0.007236018446830528,
+      0.08945557847824111,
+      -0.09568213058479388,
+      0.058330730413860915
+     ]
+    ]
+   },
+   "narration": "输出块用同一组逐行的 α 重缩放：第 0 行历史那部分的系数是 α·ℓ_i/ℓ_i^new = 0.5548，本块的贡献是 P_ij V_j / ℓ_i^new。整趟回放里只有这一步和上一步用到 α —— 它和 L00 的修正因子放大器是同一个量。",
+   "regions": {
+    "CORR": "RESCALE · 2/4 行的 α < 1，最小 0.6547。抬高了 m 的那几行，历史 ℓ_i 与 O_i 必须乘上 α 才等价于「一开始就用新 m 归一」。"
+   },
+   "flows": [
+    {
+     "from": "SRAM",
+     "to": "SRAM",
+     "elements": 48,
+     "note": "P_ij V_j 是 SRAM 内的 4×8 次乘加，不跨层",
+     "bytes": 192
+    }
+   ],
+   "occ": {
+    "elements": 152,
+    "parts": [
+     {
+      "name": "Q_i",
+      "label": "当前 Q 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "O_i",
+      "label": "累积输出块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "S/P 共用缓冲",
+      "label": "S_ij / P_ij 共用一块缓冲",
+      "shape": [
+       4,
+       4
+      ],
+      "elements": 16,
+      "covers": [
+       "P",
+       "S"
+      ]
+     },
+     {
+      "name": "m_i",
+      "label": "行最大值",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     },
+     {
+      "name": "l_i",
+      "label": "行指数和",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     }
+    ]
+   },
+   "io": {
+    "step": 0,
+    "cum": 504
+   },
+   "corr": {
+    "kind": "rescale",
+    "factor": 0.6547138808375151,
+    "m_old": -0.1335371156270795,
+    "m_new": 0.2900198463036624,
+    "o_correct": 0.7431970216022584,
+    "o_uncorrected": 0.756668769857065,
+    "bias_abs": 0.01347174825480657,
+    "bias_rel": 0.018126752211362243
+   }
+  },
+  {
+   "id": "wb01",
+   "title": "(i=0, j=1)：把 O_i、m_i、ℓ_i 写回 HBM",
+   "kind": "comm",
+   "op": "store",
+   "phase": "内循环",
+   "formula": {
+    "sym": "\\mathrm{HBM}[O]\\left[\\slot{R0}:\\slot{R1}\\right] \\leftarrow O_i,\\qquad \\mathrm{HBM}[m],\\,\\mathrm{HBM}[\\ell] \\leftarrow m_i,\\, \\ell_i",
+    "idx": "\\mathrm{HBM}[O]\\left[\\slot{R0}:\\slot{R1}\\right] \\leftarrow O_{\\slot{I}}^{\\mathrm{new}},\\qquad \\mathrm{HBM}[m], \\mathrm{HBM}[\\ell] \\leftarrow m_{\\slot{I}}^{\\mathrm{new}}, \\ell_{\\slot{I}}^{\\mathrm{new}}",
+    "num": "\\mathrm{IO} + \\slot{COST},\\qquad B_rd + 2B_r = \\slot{BR}\\cdot\\slot{D} + 2\\cdot\\slot{BR} = \\slot{COST}"
+   },
+   "bindings": {
+    "I": {
+     "sym": "i",
+     "idx": "0",
+     "num": "0"
+    },
+    "R0": {
+     "sym": "i B_r",
+     "idx": "0",
+     "num": "0"
+    },
+    "R1": {
+     "sym": "(i+1) B_r",
+     "idx": "4",
+     "num": "4"
+    },
+    "BR": {
+     "sym": "B_r",
+     "idx": "4",
+     "num": "4"
+    },
+    "D": {
+     "sym": "d",
+     "idx": "8",
+     "num": "8"
+    },
+    "COST": {
+     "sym": "B_rd + 2B_r",
+     "idx": "4\\cdot8 + 2\\cdot4",
+     "num": "40"
+    }
+   },
+   "reads": [
+    "O_i",
+    "m_i",
+    "l_i"
+   ],
+   "writes": [
+    "O",
+    "m",
+    "l"
+   ],
+   "state": {
+    "O": [
+     [
+      0.027942894000467622,
+      0.18404180889632119,
+      -0.2849092746224505,
+      -0.07069489343203039,
+      0.02100556426860599,
+      0.09666452398779768,
+      -0.10814696346148531,
+      0.09418525666532024
+     ],
+     [
+      -0.017815423090812216,
+      0.23019827749706434,
+      -0.22405645273509728,
+      -0.1499393102578448,
+      0.03181533667674413,
+      0.045373311213573936,
+      -0.10151030128774743,
+      0.10999344640863526
+     ],
+     [
+      -0.08562849322573202,
+      0.1920626558862319,
+      -0.23438040902394555,
+      -0.11721094567617563,
+      0.02313696340196654,
+      0.010962856915936875,
+      -0.06540511373390884,
+      0.04638006088230087
+     ],
+     [
+      -0.00545536952874115,
+      0.1550255207828729,
+      -0.28159570899680286,
+      -0.07584680393639978,
+      -0.007236018446830528,
+      0.08945557847824111,
+      -0.09568213058479388,
+      0.058330730413860915
+     ],
+     [
+      0.37745371435493513,
+      0.27478216348166984,
+      -0.4804247937843269,
+      -0.036780028619729066,
+      -0.17656026079969345,
+      0.26428339381275806,
+      -0.21774741266559436,
+      0.20011517693736833
+     ],
+     [
+      0.3741071330248392,
+      0.22635562080848404,
+      -0.49748083162101286,
+      0.029464687153507058,
+      -0.19808636092587617,
+      0.27743917811292446,
+      -0.19779057050445406,
+      0.18051420925285186
+     ],
+     [
+      0.36089490174859534,
+      0.1935429257059443,
+      -0.47403323916912005,
+      0.00047911134935438304,
+      -0.198459723048167,
+      0.30295823632487917,
+      -0.20798063049628263,
+      0.14636652397871613
+     ],
+     [
+      0.37590726448280964,
+      0.2545810313412871,
+      -0.49705668159783734,
+      0.061190007522229806,
+      -0.18204651015851595,
+      0.2547914931769946,
+      -0.1920075016457224,
+      0.17287253415490386
+     ]
+    ],
+    "m": [
+     0.3280268357924394,
+     0.2180010206398126,
+     0.2900198463036624,
+     0.16617009357883863,
+     0.2822063163715511,
+     0.20410637238949694,
+     0.10705596667164329,
+     0.45010882156429677
+    ],
+    "l": [
+     6.104106036035295,
+     6.67278582678906,
+     5.399873792564213,
+     6.296195197090807,
+     3.199300790257556,
+     3.327099450316071,
+     3.4613070113533224,
+     3.249884602460678
+    ]
+   },
+   "narration": "这一轮算完的东西立刻写回 HBM：O 的第 0..3 行（4×8）、m 和 ℓ 的同一段（各 4 个标量），共 40 个元素。这是最后一个外循环，O 就留在 HBM 里等着收尾。",
+   "spans": {
+    "O": [
+     [
+      0,
+      4
+     ],
+     [
+      0,
+      8
+     ]
+    ],
+    "m": [
+     [
+      0,
+      4
+     ]
+    ],
+    "l": [
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "SRAM",
+     "to": "HBM",
+     "elements": 40,
+     "note": "O_i 的 4×8 加上 m、ℓ 各 4 个，全部写回 HBM",
+     "bytes": 160
+    }
+   ],
+   "occ": {
+    "elements": 152,
+    "parts": [
+     {
+      "name": "Q_i",
+      "label": "当前 Q 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "O_i",
+      "label": "累积输出块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "S/P 共用缓冲",
+      "label": "S_ij / P_ij 共用一块缓冲",
+      "shape": [
+       4,
+       4
+      ],
+      "elements": 16,
+      "covers": [
+       "P",
+       "S"
+      ]
+     },
+     {
+      "name": "m_i",
+      "label": "行最大值",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     },
+     {
+      "name": "l_i",
+      "label": "行指数和",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     }
+    ]
+   },
+   "io": {
+    "step": 40,
+    "cum": 544
+   }
+  },
+  {
+   "id": "ld11",
+   "title": "(i=1, j=1)：载入 Q_1、O_1、m_1、ℓ_1",
+   "kind": "comm",
+   "op": "load",
+   "phase": "内循环",
+   "formula": {
+    "sym": "Q_i, O_i \\leftarrow \\mathrm{HBM}\\left[\\slot{R0}:\\slot{R1},\\ :\\right],\\qquad m_i, \\ell_i \\leftarrow \\mathrm{HBM}\\left[\\slot{R0}:\\slot{R1}\\right]",
+    "idx": "Q_{\\slot{I}}, O_{\\slot{I}} \\leftarrow \\mathrm{HBM}\\left[\\slot{R0}:\\slot{R1},\\ :\\right],\\qquad m_{\\slot{I}}, \\ell_{\\slot{I}} \\leftarrow \\mathrm{HBM}\\left[\\slot{R0}:\\slot{R1}\\right]",
+    "num": "\\mathrm{IO} + \\slot{COST},\\qquad 2B_rd + 2B_r = 2\\cdot\\slot{BR}\\cdot\\slot{D} + 2\\cdot\\slot{BR} = \\slot{COST}"
+   },
+   "bindings": {
+    "I": {
+     "sym": "i",
+     "idx": "1",
+     "num": "1"
+    },
+    "R0": {
+     "sym": "i B_r",
+     "idx": "4",
+     "num": "4"
+    },
+    "R1": {
+     "sym": "(i+1) B_r",
+     "idx": "8",
+     "num": "8"
+    },
+    "BR": {
+     "sym": "B_r",
+     "idx": "4",
+     "num": "4"
+    },
+    "D": {
+     "sym": "d",
+     "idx": "8",
+     "num": "8"
+    },
+    "COST": {
+     "sym": "2B_rd + 2B_r",
+     "idx": "2\\cdot4\\cdot8 + 2\\cdot4",
+     "num": "72"
+    }
+   },
+   "reads": [
+    "Q",
+    "O",
+    "m",
+    "l"
+   ],
+   "writes": [
+    "Q_i",
+    "O_i",
+    "m_i",
+    "l_i"
+   ],
+   "state": {
+    "Q_i": [
+     [
+      -0.48,
+      0.6,
+      -0.45,
+      0.64,
+      0.61,
+      -0.54,
+      0.17,
+      0.28
+     ],
+     [
+      0.28,
+      0.68,
+      -0.18,
+      -0.43,
+      -0.38,
+      -0.07,
+      -0.63,
+      0.35
+     ],
+     [
+      0.25,
+      -0.52,
+      0.19,
+      0.25,
+      0.08,
+      -0.42,
+      0.47,
+      0.52
+     ],
+     [
+      0.59,
+      0.15,
+      -0.51,
+      0.28,
+      -0.49,
+      0.58,
+      0.17,
+      -0.21
+     ]
+    ],
+    "O_i": [
+     [
+      0.37745371435493513,
+      0.27478216348166984,
+      -0.4804247937843269,
+      -0.036780028619729066,
+      -0.17656026079969345,
+      0.26428339381275806,
+      -0.21774741266559436,
+      0.20011517693736833
+     ],
+     [
+      0.3741071330248392,
+      0.22635562080848404,
+      -0.49748083162101286,
+      0.029464687153507058,
+      -0.19808636092587617,
+      0.27743917811292446,
+      -0.19779057050445406,
+      0.18051420925285186
+     ],
+     [
+      0.36089490174859534,
+      0.1935429257059443,
+      -0.47403323916912005,
+      0.00047911134935438304,
+      -0.198459723048167,
+      0.30295823632487917,
+      -0.20798063049628263,
+      0.14636652397871613
+     ],
+     [
+      0.37590726448280964,
+      0.2545810313412871,
+      -0.49705668159783734,
+      0.061190007522229806,
+      -0.18204651015851595,
+      0.2547914931769946,
+      -0.1920075016457224,
+      0.17287253415490386
+     ]
+    ],
+    "m_i": [
+     0.2822063163715511,
+     0.20410637238949694,
+     0.10705596667164329,
+     0.45010882156429677
+    ],
+    "l_i": [
+     3.199300790257556,
+     3.327099450316071,
+     3.4613070113533224,
+     3.249884602460678
+    ]
+   },
+   "narration": "内层第 1 个 Q 块。这里搬的不只是 Q_i：V1 的循环顺序是 K/V 在外、Q 在内，所以每个内层迭代开始时，上一轮外循环留下的 O_i、m_i、ℓ_i 都要重新从 HBM 读回来。这 72 个元素是 V1 为「内层循环」付的过路费 —— V2 把顺序调过来，就是为了省掉它。",
+   "spans": {
+    "Q": [
+     [
+      4,
+      8
+     ],
+     [
+      0,
+      8
+     ]
+    ],
+    "O": [
+     [
+      4,
+      8
+     ],
+     [
+      0,
+      8
+     ]
+    ],
+    "m": [
+     [
+      4,
+      8
+     ]
+    ],
+    "l": [
+     [
+      4,
+      8
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "SRAM",
+     "elements": 72,
+     "note": "Q_i 与 O_i 各 4×8，m_i、ℓ_i 各 4 个标量",
+     "bytes": 288
+    }
+   ],
+   "occ": {
+    "elements": 152,
+    "parts": [
+     {
+      "name": "Q_i",
+      "label": "当前 Q 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "O_i",
+      "label": "累积输出块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "S/P 共用缓冲",
+      "label": "S_ij / P_ij 共用一块缓冲",
+      "shape": [
+       4,
+       4
+      ],
+      "elements": 16,
+      "covers": [
+       "P",
+       "S"
+      ]
+     },
+     {
+      "name": "m_i",
+      "label": "行最大值",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     },
+     {
+      "name": "l_i",
+      "label": "行指数和",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     }
+    ]
+   },
+   "io": {
+    "step": 72,
+    "cum": 616
+   }
+  },
+  {
+   "id": "s11",
+   "title": "(i=1, j=1)：S_ij = Q_i K_jᵀ / √d —— 只落在 SRAM",
+   "kind": "op",
+   "op": "matmul",
+   "phase": "内循环",
+   "formula": {
+    "sym": "S_{ij} = \\frac{\\region{SP}{\\slot{QL} \\; K_j^\\top}}{\\sqrt{d}}\\ \\in \\mathbb{R}^{B_r \\times B_c}",
+    "idx": "S_{\\slot{II}\\slot{JJ}} = \\frac{Q_{\\slot{II}} K_{\\slot{JJ}}^\\top}}{\\sqrt{\\slot{D}}} \\in \\mathbb{R}^{\\slot{BR} \\times \\slot{BC}}",
+    "num": "S_{\\slot{II}\\slot{JJ}}[0,0] = \\frac{\\slot{S00}}{\\sqrt{\\slot{D}}} = \\slot{SNUM}"
+   },
+   "bindings": {
+    "II": {
+     "sym": "i",
+     "idx": "1",
+     "num": "1"
+    },
+    "JJ": {
+     "sym": "j",
+     "idx": "1",
+     "num": "1"
+    },
+    "D": {
+     "sym": "d",
+     "idx": "8",
+     "num": "8"
+    },
+    "BR": {
+     "sym": "B_r",
+     "idx": "4",
+     "num": "4"
+    },
+    "BC": {
+     "sym": "B_c",
+     "idx": "4",
+     "num": "4"
+    },
+    "QL": {
+     "sym": "Q_i[0]",
+     "idx": "Q_{i}[0,:]",
+     "num": "\\left[-0.48,\\; 0.6,\\; \\ldots,\\; 0.28\\right]"
+    },
+    "S00": {
+     "sym": "(Q_i K_j^\\top)[0,0]",
+     "idx": "(Q_{i} K_{j}^\\top)[0,0]",
+     "num": "-0.2339"
+    },
+    "SNUM": {
+     "sym": "S_{ij}[0,0]",
+     "idx": "S_{ij}[0,0]",
+     "num": "-0.0827"
+    }
+   },
+   "reads": [
+    "Q_i",
+    "K_j"
+   ],
+   "writes": [
+    "S"
+   ],
+   "state": {
+    "S": [
+     [
+      -0.08269613805976671,
+      0.22390536226272023,
+      0.2597203207298189,
+      -0.1313804399444605
+     ],
+     [
+      0.18494377861934153,
+      -0.3492400392280358,
+      0.08584276323604689,
+      0.304550890657046
+     ],
+     [
+      -0.07873634008512208,
+      0.13594127868311373,
+      -0.16687720036002518,
+      0.1292944749399602
+     ],
+     [
+      0.3426285908239416,
+      -0.31957690975726016,
+      -0.06533666658163699,
+      -0.07558971490884193
+     ]
+    ]
+   },
+   "narration": "内积：Q_i（4×8）乘 K_jᵀ（8×4）得到 4×4 的分数块 S_ij，再除以 √d = 2.828 缩放。这一步的读全部来自 SRAM —— Q_i 和 K_j 都已经在里面了。产生的 S_ij 也<b>只写在 SRAM</b>：4×4 = 16 个元素，一个都没碰 HBM（访问日志里的增量是 0）。标准实现在这一步会把 8×8 = 64 个元素写回 HBM。",
+   "regions": {
+    "SP": "S_ij 是 FlashAttention 藏起来的第一个中间矩阵。整趟回放结束，HBM 的访问日志里都不会出现它的名字 —— 这不是「我们没画」，是访问日志里真的没有。"
+   },
+   "flows": [
+    {
+     "from": "SRAM",
+     "to": "SRAM",
+     "elements": 16,
+     "note": "S_ij 的 4×4 个元素在 SRAM 内产生，不跨层",
+     "bytes": 64
+    }
+   ],
+   "occ": {
+    "elements": 152,
+    "parts": [
+     {
+      "name": "Q_i",
+      "label": "当前 Q 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "O_i",
+      "label": "累积输出块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "S/P 共用缓冲",
+      "label": "S_ij / P_ij 共用一块缓冲",
+      "shape": [
+       4,
+       4
+      ],
+      "elements": 16,
+      "covers": [
+       "P",
+       "S"
+      ]
+     },
+     {
+      "name": "m_i",
+      "label": "行最大值",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     },
+     {
+      "name": "l_i",
+      "label": "行指数和",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     }
+    ]
+   },
+   "io": {
+    "step": 0,
+    "cum": 616
+   }
+  },
+  {
+   "id": "mx11",
+   "title": "(i=1, j=1)：行最大值 m_i 抬到 m_new",
+   "kind": "op",
+   "op": "max",
+   "phase": "内循环",
+   "formula": {
+    "sym": "\\tilde{m}_{ij} = \\mathrm{rowmax}(S_{ij}),\\qquad m_i^{\\mathrm{new}} = \\max\\left(\\slot{MOLD},\\ \\tilde{m}_{ij}\\right)",
+    "idx": "\\tilde{m}_{\\slot{II}\\slot{JJ}} = \\mathrm{rowmax}(S_{\\slot{II}\\slot{JJ}}),\\qquad m_{\\slot{II}}^{\\mathrm{new}} = \\max\\left(\\slot{MOLD},\\ \\tilde{m}_{\\slot{II}\\slot{JJ}}\\right)",
+    "num": "m_{\\slot{II}}^{\\mathrm{new}} = \\max\\left(\\slot{MOLD},\\ \\slot{MT}\\right) = \\slot{MNEW}"
+   },
+   "bindings": {
+    "II": {
+     "sym": "i",
+     "idx": "1",
+     "num": "1"
+    },
+    "JJ": {
+     "sym": "j",
+     "idx": "1",
+     "num": "1"
+    },
+    "MOLD": {
+     "sym": "m_i",
+     "idx": "m_{i}",
+     "num": "\\left[0.2822,\\; 0.2041,\\; 0.1071,\\; 0.4501\\right]"
+    },
+    "MT": {
+     "sym": "\\tilde{m}_{ij}",
+     "idx": "\\tilde{m}_{ij}",
+     "num": "\\left[0.2597,\\; 0.3046,\\; 0.1359,\\; 0.3426\\right]"
+    },
+    "MNEW": {
+     "sym": "m_i^{\\mathrm{new}}",
+     "idx": "m_{i}^{\\mathrm{new}}",
+     "num": "\\left[0.2822,\\; 0.3046,\\; 0.1359,\\; 0.4501\\right]"
+    }
+   },
+   "reads": [
+    "S",
+    "m_i"
+   ],
+   "writes": [
+    "m_i"
+   ],
+   "state": {
+    "m_i": [
+     0.2822063163715511,
+     0.304550890657046,
+     0.13594127868311373,
+     0.45010882156429677
+    ]
+   },
+   "narration": "每行取最大值 0.3426，与当前 m_i 比较后抬到 0.4501。m 一动，前面按旧 m 累出来的 ℓ_i 和 O_i 就都失去参照了 —— 下一步的修正因子就是为这件事准备的。",
+   "flows": [
+    {
+     "from": "SRAM",
+     "to": "SRAM",
+     "elements": 4,
+     "note": "4 行各一个最大值，全程在 SRAM",
+     "bytes": 16
+    }
+   ],
+   "occ": {
+    "elements": 152,
+    "parts": [
+     {
+      "name": "Q_i",
+      "label": "当前 Q 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "O_i",
+      "label": "累积输出块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "S/P 共用缓冲",
+      "label": "S_ij / P_ij 共用一块缓冲",
+      "shape": [
+       4,
+       4
+      ],
+      "elements": 16,
+      "covers": [
+       "P",
+       "S"
+      ]
+     },
+     {
+      "name": "m_i",
+      "label": "行最大值",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     },
+     {
+      "name": "l_i",
+      "label": "行指数和",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     }
+    ]
+   },
+   "io": {
+    "step": 0,
+    "cum": 616
+   }
+  },
+  {
+   "id": "p11",
+   "title": "(i=1, j=1)：P_ij = exp(S_ij − m_new) —— 就地覆盖 S",
+   "kind": "op",
+   "op": "exp",
+   "phase": "内循环",
+   "formula": {
+    "sym": "P_{ij} = \\region{SP}{\\exp\\left(S_{ij} - m_i^{\\mathrm{new}}\\right)}\\ \\in \\mathbb{R}^{B_r \\times B_c}",
+    "idx": "P_{\\slot{II}\\slot{JJ}} = \\exp\\left(S_{\\slot{II}\\slot{JJ}} - m_{\\slot{II}}^{\\mathrm{new}}\\right)",
+    "num": "P_{\\slot{II}\\slot{JJ}}[0,0] = \\exp\\left(\\slot{S00} - \\slot{M0}\\right) = \\slot{P00}"
+   },
+   "bindings": {
+    "II": {
+     "sym": "i",
+     "idx": "1",
+     "num": "1"
+    },
+    "JJ": {
+     "sym": "j",
+     "idx": "1",
+     "num": "1"
+    },
+    "S00": {
+     "sym": "S_{ij}[0,0]",
+     "idx": "S_{ij}[0,0]",
+     "num": "-0.0827"
+    },
+    "M0": {
+     "sym": "m_i^{\\mathrm{new}}[0]",
+     "idx": "m_{i}^{\\mathrm{new}}[0]",
+     "num": "0.2822"
+    },
+    "P00": {
+     "sym": "P_{ij}[0,0]",
+     "idx": "P_{ij}[0,0]",
+     "num": "0.6943"
+    }
+   },
+   "reads": [
+    "S",
+    "m_i"
+   ],
+   "writes": [
+    "P"
+   ],
+   "state": {
+    "P": [
+     [
+      0.6942643699878619,
+      0.9433659948383132,
+      0.9777649300678385,
+      0.6612741621815881
+     ],
+     [
+      0.8872689655421643,
+      0.5200704842877477,
+      0.8035562199559296,
+      1.0
+     ],
+     [
+      0.8068014959165726,
+      1.0,
+      0.7387331797542963,
+      0.993375237395435
+     ],
+     [
+      0.8980942769342517,
+      0.46315860168340056,
+      0.5972344744672342,
+      0.5911422856609921
+     ]
+    ]
+   },
+   "narration": "逐元素减掉本行的新最大值再取指数 —— 因为减过最大值，所有指数都落在 (0, 1]，不会溢出。真实 kernel 让 P 就地覆盖 S 的缓冲：两个名字，一块 4×4 的 SRAM，所以下面的占用账里它们算一份。HBM 访问量依然是 0。",
+   "regions": {
+    "SP": "P_ij 是 FlashAttention 藏起来的第二个中间矩阵。它和 S_ij 一样，整趟回放不会在 HBM 的访问日志里出现。"
+   },
+   "flows": [
+    {
+     "from": "SRAM",
+     "to": "SRAM",
+     "elements": 16,
+     "note": "P_ij 就地覆盖 S_ij 的 4×4 缓冲",
+     "bytes": 64
+    }
+   ],
+   "occ": {
+    "elements": 152,
+    "parts": [
+     {
+      "name": "Q_i",
+      "label": "当前 Q 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "O_i",
+      "label": "累积输出块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "S/P 共用缓冲",
+      "label": "S_ij / P_ij 共用一块缓冲",
+      "shape": [
+       4,
+       4
+      ],
+      "elements": 16,
+      "covers": [
+       "P",
+       "S"
+      ]
+     },
+     {
+      "name": "m_i",
+      "label": "行最大值",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     },
+     {
+      "name": "l_i",
+      "label": "行指数和",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     }
+    ]
+   },
+   "io": {
+    "step": 0,
+    "cum": 616
+   }
+  },
+  {
+   "id": "l11",
+   "title": "(i=1, j=1)：ℓ_i 用修正因子重缩放后并入本块",
+   "kind": "op",
+   "op": "sum-exp",
+   "phase": "内循环",
+   "formula": {
+    "sym": "\\ell_i^{\\mathrm{new}} = \\slot{LOLD}\\cdot \\region{CORR}{\\exp\\left(m_i - m_i^{\\mathrm{new}}\\right)} + \\mathrm{rowsum}\\left(P_{ij}\\right)",
+    "idx": "\\ell_{\\slot{II}}^{\\mathrm{new}} = \\slot{LOLD}\\cdot \\region{CORR}{\\exp\\left(\\slot{MOLD} - \\slot{MNEW}\\right)} + \\slot{SUM}",
+    "num": "\\ell_{\\slot{II}}^{\\mathrm{new}} = \\slot{LOLD}\\cdot \\region{CORR}{\\exp\\left(\\slot{MOLD} - \\slot{MNEW}\\right)} + \\slot{SUM} = \\slot{LNEW}"
+   },
+   "bindings": {
+    "II": {
+     "sym": "i",
+     "idx": "1",
+     "num": "1"
+    },
+    "LOLD": {
+     "sym": "\\ell_i",
+     "idx": "\\ell_{i}",
+     "num": "\\left[3.199,\\; 3.327,\\; 3.461,\\; 3.25\\right]"
+    },
+    "MOLD": {
+     "sym": "m_i",
+     "idx": "m_{i}",
+     "num": "\\left[0.2822,\\; 0.2041,\\; 0.1071,\\; 0.4501\\right]"
+    },
+    "MNEW": {
+     "sym": "m_i^{\\mathrm{new}}",
+     "idx": "m_{i}^{\\mathrm{new}}",
+     "num": "\\left[0.2822,\\; 0.3046,\\; 0.1359,\\; 0.4501\\right]"
+    },
+    "SUM": {
+     "sym": "\\mathrm{rowsum}(P_{ij})",
+     "idx": "\\mathrm{rowsum}(P_{ij})",
+     "num": "\\left[3.277,\\; 3.211,\\; 3.539,\\; 2.55\\right]"
+    },
+    "LNEW": {
+     "sym": "\\ell_i^{\\mathrm{new}}",
+     "idx": "\\ell_{i}^{\\mathrm{new}}",
+     "num": "\\left[6.476,\\; 6.22,\\; 6.902,\\; 5.8\\right]"
+    }
+   },
+   "reads": [
+    "P",
+    "m_i",
+    "l_i"
+   ],
+   "writes": [
+    "l_i"
+   ],
+   "state": {
+    "l_i": [
+     6.475970247333157,
+     6.2200418281791485,
+     6.901666178105687,
+     5.799514241206557
+    ]
+   },
+   "narration": "本块有 2/4 行的 m 被抬高，这些行之前累加的 ℓ_i 是按旧 m 算的，所以先乘修正因子 α = e^(m_old − m_new)（本块最小 0.9044）把它们拉回来，再加上本块的指数和 3.539。",
+   "regions": {
+    "CORR": "RESCALE · 2/4 行的 α < 1，最小 0.9044。抬高了 m 的那几行，历史 ℓ_i 与 O_i 必须乘上 α 才等价于「一开始就用新 m 归一」。"
+   },
+   "flows": [
+    {
+     "from": "SRAM",
+     "to": "SRAM",
+     "elements": 4,
+     "note": "4 行的指数和在 SRAM 内累加，不跨层",
+     "bytes": 16
+    }
+   ],
+   "occ": {
+    "elements": 152,
+    "parts": [
+     {
+      "name": "Q_i",
+      "label": "当前 Q 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "O_i",
+      "label": "累积输出块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "S/P 共用缓冲",
+      "label": "S_ij / P_ij 共用一块缓冲",
+      "shape": [
+       4,
+       4
+      ],
+      "elements": 16,
+      "covers": [
+       "P",
+       "S"
+      ]
+     },
+     {
+      "name": "m_i",
+      "label": "行最大值",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     },
+     {
+      "name": "l_i",
+      "label": "行指数和",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     }
+    ]
+   },
+   "io": {
+    "step": 0,
+    "cum": 616
+   },
+   "corr": {
+    "kind": "rescale",
+    "factor": 0.904435290657585,
+    "m_old": 0.20410637238949694,
+    "m_new": 0.304550890657046,
+    "o_correct": 0.7537435548900587,
+    "o_uncorrected": 0.7592881998165908,
+    "bias_abs": 0.005544644926532061,
+    "bias_rel": 0.007356142404880403
+   }
+  },
+  {
+   "id": "o11",
+   "title": "(i=1, j=1)：O_i 用同一个 α 重缩放后累加 P_ij V_j",
+   "kind": "op",
+   "op": "matmul",
+   "phase": "内循环",
+   "formula": {
+    "sym": "O_i^{\\mathrm{new}} = \\frac{\\region{CORR}{\\alpha}\\,\\ell_i}{\\ell_i^{\\mathrm{new}}}\\, O_i + \\frac{P_{ij} V_j}{\\ell_i^{\\mathrm{new}}}",
+    "idx": "O_{\\slot{II}}^{\\mathrm{new}} = \\frac{\\region{CORR}{\\alpha}\\,\\slot{LOLD}}{\\slot{LNEW}}\\, \\slot{OOLD} + \\frac{P_{\\slot{II}\\slot{JJ}} V_{\\slot{JJ}}}{\\slot{LNEW}}",
+    "num": "O_{\\slot{II}}^{\\mathrm{new}}[0,0] = \\slot{O00}"
+   },
+   "bindings": {
+    "II": {
+     "sym": "i",
+     "idx": "1",
+     "num": "1"
+    },
+    "JJ": {
+     "sym": "j",
+     "idx": "1",
+     "num": "1"
+    },
+    "LOLD": {
+     "sym": "\\ell_i",
+     "idx": "\\ell_{i}",
+     "num": "\\left[3.199,\\; 3.327,\\; 3.461,\\; 3.25\\right]"
+    },
+    "LNEW": {
+     "sym": "\\ell_i^{\\mathrm{new}}",
+     "idx": "\\ell_{i}^{\\mathrm{new}}",
+     "num": "\\left[6.476,\\; 6.22,\\; 6.902,\\; 5.8\\right]"
+    },
+    "OOLD": {
+     "sym": "O_i[0]",
+     "idx": "O_{i}[0,:]",
+     "num": "\\left[0.3775,\\; 0.2748,\\; \\ldots,\\; 0.2001\\right]"
+    },
+    "O00": {
+     "sym": "O_i^{\\mathrm{new}}[0,0]",
+     "idx": "O_{i}^{\\mathrm{new}}[0,0]",
+     "num": "0.0008721"
+    }
+   },
+   "reads": [
+    "P",
+    "V_j",
+    "O_i",
+    "l_i"
+   ],
+   "writes": [
+    "O_i"
+   ],
+   "state": {
+    "O_i": [
+     [
+      0.0008720593631093843,
+      0.2276812624230922,
+      -0.22863847612827817,
+      -0.1610966978474389,
+      0.028397782990702503,
+      0.06348306252953761,
+      -0.11547584431825038,
+      0.13695475446626598
+     ],
+     [
+      -0.03838819442926411,
+      0.18754219383275744,
+      -0.285651813272644,
+      -0.06231645641191155,
+      0.04615747567595417,
+      0.044513604294782655,
+      -0.08324525120518503,
+      0.0502373638413364
+     ],
+     [
+      -0.035181956929391134,
+      0.20267118126639072,
+      -0.2380319481997002,
+      -0.09861527937696592,
+      0.017133447144205616,
+      0.03857278935396487,
+      -0.07667643535968528,
+      0.05642279727495608
+     ],
+     [
+      0.024636259531240184,
+      0.1895137988373479,
+      -0.28745298311725004,
+      -0.04470534948428173,
+      0.0368033688316676,
+      0.08748996673057946,
+      -0.10000926237850344,
+      0.07576231170916731
+     ]
+    ]
+   },
+   "narration": "输出块用同一组逐行的 α 重缩放：第 0 行历史那部分的系数是 α·ℓ_i/ℓ_i^new = 0.494，本块的贡献是 P_ij V_j / ℓ_i^new。整趟回放里只有这一步和上一步用到 α —— 它和 L00 的修正因子放大器是同一个量。",
+   "regions": {
+    "CORR": "RESCALE · 2/4 行的 α < 1，最小 0.9044。抬高了 m 的那几行，历史 ℓ_i 与 O_i 必须乘上 α 才等价于「一开始就用新 m 归一」。"
+   },
+   "flows": [
+    {
+     "from": "SRAM",
+     "to": "SRAM",
+     "elements": 48,
+     "note": "P_ij V_j 是 SRAM 内的 4×8 次乘加，不跨层",
+     "bytes": 192
+    }
+   ],
+   "occ": {
+    "elements": 152,
+    "parts": [
+     {
+      "name": "Q_i",
+      "label": "当前 Q 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "O_i",
+      "label": "累积输出块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "S/P 共用缓冲",
+      "label": "S_ij / P_ij 共用一块缓冲",
+      "shape": [
+       4,
+       4
+      ],
+      "elements": 16,
+      "covers": [
+       "P",
+       "S"
+      ]
+     },
+     {
+      "name": "m_i",
+      "label": "行最大值",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     },
+     {
+      "name": "l_i",
+      "label": "行指数和",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     }
+    ]
+   },
+   "io": {
+    "step": 0,
+    "cum": 616
+   },
+   "corr": {
+    "kind": "rescale",
+    "factor": 0.904435290657585,
+    "m_old": 0.20410637238949694,
+    "m_new": 0.304550890657046,
+    "o_correct": 0.7537435548900587,
+    "o_uncorrected": 0.7592881998165908,
+    "bias_abs": 0.005544644926532061,
+    "bias_rel": 0.007356142404880403
+   }
+  },
+  {
+   "id": "wb11",
+   "title": "(i=1, j=1)：把 O_i、m_i、ℓ_i 写回 HBM",
+   "kind": "comm",
+   "op": "store",
+   "phase": "内循环",
+   "formula": {
+    "sym": "\\mathrm{HBM}[O]\\left[\\slot{R0}:\\slot{R1}\\right] \\leftarrow O_i,\\qquad \\mathrm{HBM}[m],\\,\\mathrm{HBM}[\\ell] \\leftarrow m_i,\\, \\ell_i",
+    "idx": "\\mathrm{HBM}[O]\\left[\\slot{R0}:\\slot{R1}\\right] \\leftarrow O_{\\slot{I}}^{\\mathrm{new}},\\qquad \\mathrm{HBM}[m], \\mathrm{HBM}[\\ell] \\leftarrow m_{\\slot{I}}^{\\mathrm{new}}, \\ell_{\\slot{I}}^{\\mathrm{new}}",
+    "num": "\\mathrm{IO} + \\slot{COST},\\qquad B_rd + 2B_r = \\slot{BR}\\cdot\\slot{D} + 2\\cdot\\slot{BR} = \\slot{COST}"
+   },
+   "bindings": {
+    "I": {
+     "sym": "i",
+     "idx": "1",
+     "num": "1"
+    },
+    "R0": {
+     "sym": "i B_r",
+     "idx": "4",
+     "num": "4"
+    },
+    "R1": {
+     "sym": "(i+1) B_r",
+     "idx": "8",
+     "num": "8"
+    },
+    "BR": {
+     "sym": "B_r",
+     "idx": "4",
+     "num": "4"
+    },
+    "D": {
+     "sym": "d",
+     "idx": "8",
+     "num": "8"
+    },
+    "COST": {
+     "sym": "B_rd + 2B_r",
+     "idx": "4\\cdot8 + 2\\cdot4",
+     "num": "40"
+    }
+   },
+   "reads": [
+    "O_i",
+    "m_i",
+    "l_i"
+   ],
+   "writes": [
+    "O",
+    "m",
+    "l"
+   ],
+   "state": {
+    "O": [
+     [
+      0.027942894000467622,
+      0.18404180889632119,
+      -0.2849092746224505,
+      -0.07069489343203039,
+      0.02100556426860599,
+      0.09666452398779768,
+      -0.10814696346148531,
+      0.09418525666532024
+     ],
+     [
+      -0.017815423090812216,
+      0.23019827749706434,
+      -0.22405645273509728,
+      -0.1499393102578448,
+      0.03181533667674413,
+      0.045373311213573936,
+      -0.10151030128774743,
+      0.10999344640863526
+     ],
+     [
+      -0.08562849322573202,
+      0.1920626558862319,
+      -0.23438040902394555,
+      -0.11721094567617563,
+      0.02313696340196654,
+      0.010962856915936875,
+      -0.06540511373390884,
+      0.04638006088230087
+     ],
+     [
+      -0.00545536952874115,
+      0.1550255207828729,
+      -0.28159570899680286,
+      -0.07584680393639978,
+      -0.007236018446830528,
+      0.08945557847824111,
+      -0.09568213058479388,
+      0.058330730413860915
+     ],
+     [
+      0.0008720593631093843,
+      0.2276812624230922,
+      -0.22863847612827817,
+      -0.1610966978474389,
+      0.028397782990702503,
+      0.06348306252953761,
+      -0.11547584431825038,
+      0.13695475446626598
+     ],
+     [
+      -0.03838819442926411,
+      0.18754219383275744,
+      -0.285651813272644,
+      -0.06231645641191155,
+      0.04615747567595417,
+      0.044513604294782655,
+      -0.08324525120518503,
+      0.0502373638413364
+     ],
+     [
+      -0.035181956929391134,
+      0.20267118126639072,
+      -0.2380319481997002,
+      -0.09861527937696592,
+      0.017133447144205616,
+      0.03857278935396487,
+      -0.07667643535968528,
+      0.05642279727495608
+     ],
+     [
+      0.024636259531240184,
+      0.1895137988373479,
+      -0.28745298311725004,
+      -0.04470534948428173,
+      0.0368033688316676,
+      0.08748996673057946,
+      -0.10000926237850344,
+      0.07576231170916731
+     ]
+    ],
+    "m": [
+     0.3280268357924394,
+     0.2180010206398126,
+     0.2900198463036624,
+     0.16617009357883863,
+     0.2822063163715511,
+     0.304550890657046,
+     0.13594127868311373,
+     0.45010882156429677
+    ],
+    "l": [
+     6.104106036035295,
+     6.67278582678906,
+     5.399873792564213,
+     6.296195197090807,
+     6.475970247333157,
+     6.2200418281791485,
+     6.901666178105687,
+     5.799514241206557
+    ]
+   },
+   "narration": "这一轮算完的东西立刻写回 HBM：O 的第 4..7 行（4×8）、m 和 ℓ 的同一段（各 4 个标量），共 40 个元素。这是最后一个外循环，O 就留在 HBM 里等着收尾。",
+   "spans": {
+    "O": [
+     [
+      4,
+      8
+     ],
+     [
+      0,
+      8
+     ]
+    ],
+    "m": [
+     [
+      4,
+      8
+     ]
+    ],
+    "l": [
+     [
+      4,
+      8
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "SRAM",
+     "to": "HBM",
+     "elements": 40,
+     "note": "O_i 的 4×8 加上 m、ℓ 各 4 个，全部写回 HBM",
+     "bytes": 160
+    }
+   ],
+   "occ": {
+    "elements": 152,
+    "parts": [
+     {
+      "name": "Q_i",
+      "label": "当前 Q 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "O_i",
+      "label": "累积输出块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "S/P 共用缓冲",
+      "label": "S_ij / P_ij 共用一块缓冲",
+      "shape": [
+       4,
+       4
+      ],
+      "elements": 16,
+      "covers": [
+       "P",
+       "S"
+      ]
+     },
+     {
+      "name": "m_i",
+      "label": "行最大值",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     },
+     {
+      "name": "l_i",
+      "label": "行指数和",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     }
+    ]
+   },
+   "io": {
+    "step": 40,
+    "cum": 656
+   }
+  },
+  {
+   "id": "sum",
+   "title": "收尾：S、P 没去过 HBM，IO 差在这里",
+   "kind": "op",
+   "op": "summary",
+   "phase": "收尾",
+   "formula": {
+    "sym": "\\mathrm{IO}_{\\mathrm{std}} = 4Nd + 4N^2 = \\slot{IOSTD},\\qquad \\mathrm{IO}_{\\mathrm{FA}} = Nd + 2N + 2B_cdT_c + (3B_rd + 4B_r)T_rT_c = \\slot{IOFA}",
+    "idx": "\\mathrm{IO}_{\\mathrm{std}} = \\slot{IOSTD},\\qquad \\mathrm{IO}_{\\mathrm{FA}} = \\slot{IOFA},\\qquad \\region{SPC}{\\mathrm{IO}_{\\mathrm{FA}} \\times B_c \\approx \\slot{LAW}}",
+    "num": "\\mathrm{IO}_{\\mathrm{std}} = \\slot{IOSTD},\\qquad \\mathrm{IO}_{\\mathrm{FA}} = \\slot{IOFA},\\qquad \\region{SPC}{S, P \\text{ 在 HBM 里出现的次数} = \\slot{SPC}}"
+   },
+   "bindings": {
+    "IOSTD": {
+     "sym": "4Nd + 4N^2",
+     "idx": "4\\cdot8\\cdot8 + 4\\cdot8^2",
+     "num": "512"
+    },
+    "IOFA": {
+     "sym": "Nd + 2N + 2B_cdT_c + (3B_rd+4B_r)T_rT_c",
+     "idx": "656",
+     "num": "656"
+    },
+    "LAW": {
+     "sym": "\\text{实测常数}",
+     "idx": "512000",
+     "num": "512000"
+    },
+    "SPC": {
+     "sym": "\\text{次}",
+     "idx": "0",
+     "num": "0"
+    }
+   },
+   "reads": [
+    "Q",
+    "K",
+    "V"
+   ],
+   "writes": [],
+   "state": {},
+   "narration": "回放结束。三个实现（分块递推、numpy 标准版、torch）的输出一致，两两之间都在按求和顺序推算的上界 4.085e-15 之内 —— 分块改变的是搬运和求和顺序，不是结果。但 HBM 访问量差了 0.7805 倍：标准实现 512 个元素，FlashAttention 656 个。差别全在 S、P 上：标准实现把它们各写一遍、各读一遍，FlashAttention 的访问日志里这两个名字共出现 <b>0</b> 次。注意：在这个尺寸上 FA 的 IO 反而更多 —— d=8、B_c=4 时 O(N²d²/M) 的常数还没有压过 O(N²)，要 M > 4d² = 256 才翻过来（旁边那条实测曲线把它画出来了）。",
+   "regions": {
+    "SPC": "S 和 P 在 FA 的 HBM 访问日志里各出现 0 次。同一个记录对象在标准实现上记录了它们 —— 对照组见 meta.exposure。"
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "SRAM",
+     "elements": 656,
+     "note": "整趟回放的 HBM 访问总量：656 个元素",
+     "bytes": 2624
+    }
+   ],
+   "occ": {
+    "elements": 152,
+    "parts": [
+     {
+      "name": "Q_i",
+      "label": "当前 Q 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "K_j",
+      "label": "当前 K 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "V_j",
+      "label": "当前 V 块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "O_i",
+      "label": "累积输出块",
+      "shape": [
+       4,
+       8
+      ],
+      "elements": 32
+     },
+     {
+      "name": "S/P 共用缓冲",
+      "label": "S_ij / P_ij 共用一块缓冲",
+      "shape": [
+       4,
+       4
+      ],
+      "elements": 16,
+      "covers": [
+       "P",
+       "S"
+      ]
+     },
+     {
+      "name": "m_i",
+      "label": "行最大值",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     },
+     {
+      "name": "l_i",
+      "label": "行指数和",
+      "shape": [
+       4
+      ],
+      "elements": 4
+     }
+    ]
+   },
+   "io": {
+    "step": 0,
+    "cum": 656
+   }
+  }
+ ]
+}

@@ -30,10 +30,23 @@ jobs:
       # CPU-only torch. The full package with CUDA is several hundred MB and
       # nothing here needs a GPU — the traces are reference arithmetic, not
       # kernels.
+      #
+      # numpy is pinned to <2 and that pin is LOAD-BEARING, not tidiness.
+      # `torch==2.2.0+cpu` is compiled against the numpy 1.x ABI. An unpinned
+      # numpy resolves to 2.x, and the generators then die at the first crossing
+      # of torch's numpy bridge (`torch.from_numpy`, `.numpy()`) with
+      # "RuntimeError: Numpy is not available" — after having imported torch and
+      # run every pure-torch operation successfully, so it reads as a broken
+      # script rather than as a version skew, and it is not reproducible on a
+      # machine with a pinned numpy. The failure is in the GENERATORS' reference
+      # checks, i.e. in this job's whole purpose.
+      #
+      # (If torch is ever bumped, bump this pin with it: the constraint is the
+      # pair, not numpy on its own.)
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install numpy "torch==2.2.0" --index-url https://download.pytorch.org/whl/cpu
+          pip install "numpy<2" "torch==2.2.0" --index-url https://download.pytorch.org/whl/cpu
 
       # Every generator asserts its trace against an independent torch
       # implementation and lints it against the engine's data contract, so a
@@ -49,13 +62,16 @@ jobs:
 
       # The generated JSON is committed, and the pages are built from it, so a
       # hand-edited or stale JSON would ship. Re-running the generators above
-      # must reproduce it byte for byte. The scripts are deterministic by
-      # construction (fixed inputs, no sampling), which is what makes this a
-      # valid check rather than a flaky one.
+      # must reproduce what is committed.
+      #
+      # NOT `git diff --exit-code`. The inputs are fixed, but the ARITHMETIC is
+      # not: a trace recording `A @ B` records what the BLAS kernel on THIS
+      # machine produced, and its summation order depends on the CPU -- so the
+      # byte-for-byte requirement was unsatisfiable for any trace that does a
+      # matmul (four of the six generators, including L05's kv-cache.json, which
+      # was already failing this on `feat/interactive-labs`). The replacement
+      # compares structure and strings exactly and floats within a tolerance
+      # derived from the measured drift; see the script's docstring for why that
+      # is strictly MORE informative than the byte diff, not weaker.
       - name: Check that committed traces are up to date
-        run: |
-          if ! git diff --exit-code -- labs/traces/; then
-            echo "::error::A committed trace does not match its generator's output."
-            echo "Run the scripts in labs/traces/ and commit the regenerated JSON."
-            exit 1
-          fi
+        run: python scripts/check-traces-reproducible.py

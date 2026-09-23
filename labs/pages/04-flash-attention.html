@@ -1,0 +1,1139 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>L06 · FlashAttention V1 回放 - AIInfraGuide</title>
+    <meta
+      name="description"
+      content="FlashAttention V1 的逐步回放：Q 块与 K/V 块的两层循环，在 HBM / SRAM 双层舞台上逐帧看 S 和 P 从不落到 HBM，IO 计数器与标准 Attention 的实测曲线对照。"
+    />
+    <link rel="canonical" href="./04-flash-attention.html" />
+    <link rel="stylesheet" href="./assets/vendor/katex/katex.min.css" />
+    <link rel="stylesheet" href="./assets/engine/lab.css" />
+    <link rel="stylesheet" href="./assets/engine/views/tiling-stage.css" />
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        margin: 0;
+        padding: 20px 22px 56px;
+        background: #f9fafb;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+          'Helvetica Neue', 'Noto Sans CJK SC', sans-serif;
+      }
+      @media (prefers-color-scheme: dark) { body { background: #0b1120; } }
+      .lab-back { display: inline-block; margin-bottom: 14px; color: #007aff; font-size: 13.5px; text-decoration: none; }
+      .lab-provenance {
+        margin-top: 22px;
+        padding-top: 14px;
+        border-top: 1px solid rgba(128, 128, 128, 0.25);
+        color: #6b7280;
+        font-size: 12px;
+        line-height: 1.6;
+      }
+      @media (prefers-color-scheme: dark) { .lab-provenance { color: #9ca3af; } }
+      .lab-provenance code {
+        background: rgba(128, 128, 128, 0.14);
+        border-radius: 4px;
+        padding: 1px 5px;
+        font: 0.92em/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .lab-banner {
+        margin: 0 0 14px;
+        padding: 8px 12px;
+        border: 1px solid rgba(0, 122, 255, 0.35);
+        border-radius: 8px;
+        background: rgba(0, 122, 255, 0.07);
+        font-size: 12.5px;
+        color: #1f2937;
+      }
+      @media (prefers-color-scheme: dark) { .lab-banner { color: #e5e7eb; } }
+
+      /* ---------------------------------------------------------------- L06 views
+       *
+       * These panels are L06's own, so they are styled here rather than in the
+       * shared lab.css: the four generic panels in that file are used by every
+       * lab, and the view components other tickets own live beside it. Colours
+       * are inherited from the engine's custom properties so these follow the
+       * light/dark theme without a second palette.
+       */
+      .l06-params {
+        margin: 0 0 12px;
+        padding: 10px 14px;
+        border: 1px solid var(--lab-line, #e3e6ec);
+        border-radius: 12px;
+        background: var(--lab-panel, #fff);
+        color: var(--lab-fg, #1f2937);
+        font-size: 13px;
+      }
+      .l06-params-row { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; }
+      .l06-param { display: flex; align-items: center; gap: 8px; }
+      .l06-param-label { font: 600 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--lab-dim, #6b7280); }
+      .l06-param-name { color: var(--lab-accent-2, #b45309); }
+      .l06-param input[type="range"] { width: 108px; accent-color: var(--lab-accent, #007aff); cursor: pointer; }
+      .l06-param-val {
+        font: 650 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: var(--lab-accent, #007aff);
+        min-width: 34px;
+        text-align: right;
+      }
+      .l06-param-hint { color: var(--lab-faint, #9ca3af); font-size: 11.5px; margin-left: auto; }
+      .l06-params-note {
+        margin-top: 8px;
+        padding: 6px 10px;
+        border-radius: 8px;
+        background: color-mix(in srgb, var(--lab-accent-2, #b45309) 12%, transparent);
+        color: var(--lab-accent-2, #b45309);
+        font-size: 12px;
+      }
+      .l06-params-note[hidden] { display: none; }
+      /* The derived blocking parameters, so the formula's output is visible next
+         to the slider that produced it. */
+      .l06-derived {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 14px;
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px dashed var(--lab-line, #e3e6ec);
+        font-size: 11.5px;
+        color: var(--lab-dim, #6b7280);
+      }
+      .l06-derived b {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: var(--lab-accent, #007aff);
+        font-weight: 650;
+      }
+      .l06-derived code {
+        background: rgba(128, 128, 128, 0.12);
+        border-radius: 3px;
+        padding: 0 4px;
+        font-size: 0.94em;
+      }
+
+      .l06-body { padding: 10px 12px; }
+      .l06-sub { margin: 0 0 8px; color: var(--lab-faint, #9ca3af); font-size: 11.5px; }
+
+      /* ---- the IO counter ---- */
+      .l06-io-head { display: flex; flex-wrap: wrap; gap: 12px; align-items: baseline; }
+      .l06-io-big {
+        font: 650 21px/1.1 ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: var(--lab-accent, #007aff);
+      }
+      .l06-io-big small { font-size: 12px; color: var(--lab-faint, #9ca3af); font-weight: 500; }
+      .l06-io-delta { color: var(--lab-accent-2, #b45309); font: 600 12px/1 ui-monospace, monospace; }
+      .l06-io-bar {
+        position: relative;
+        height: 21px;
+        margin: 9px 0 3px;
+        border-radius: 6px;
+        background: var(--lab-panel-2, #f6f7f9);
+        border: 1px solid var(--lab-line, #e3e6ec);
+        overflow: hidden;
+      }
+      /* The bar IS the comparison: one axis, the standard implementation's final
+         reading on it, and both runs drawn to the same scale. A bar chart with
+         two independently-scaled bars would show the ratio but not the size. */
+      .l06-io-fill {
+        display: block;
+        height: 100%;
+        background: linear-gradient(90deg,
+          color-mix(in srgb, var(--lab-accent, #007aff) 55%, transparent),
+          var(--lab-accent, #007aff));
+        transition: width 0.25s ease;
+      }
+      .l06-io-mark {
+        position: absolute;
+        top: 0; bottom: 0;
+        width: 2px;
+        background: var(--lab-bad, #c0392b);
+      }
+      .l06-io-mark span {
+        position: absolute;
+        top: -1px; left: 4px;
+        font-size: 9.5px;
+        color: var(--lab-bad, #c0392b);
+        white-space: nowrap;
+        background: var(--lab-panel, #fff);
+        padding: 0 3px;
+        border-radius: 3px;
+      }
+      .l06-io-axis {
+        display: flex;
+        justify-content: space-between;
+        font: 10px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: var(--lab-faint, #9ca3af);
+      }
+
+      /* ---- the two-run comparison table ---- */
+      .l06-vs {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(126px, 1fr));
+        gap: 8px;
+        margin: 10px 0 4px;
+      }
+      .l06-vs-cell {
+        border: 1px solid var(--lab-line, #e3e6ec);
+        border-radius: 8px;
+        padding: 7px 9px;
+        background: var(--lab-panel-2, #f6f7f9);
+      }
+      .l06-vs-cell.bad { border-color: color-mix(in srgb, var(--lab-bad, #c0392b) 45%, transparent); }
+      .l06-vs-cell.good { border-color: color-mix(in srgb, var(--lab-ok, #0f7b52) 45%, transparent); }
+      .l06-vs-k { font-size: 10.5px; color: var(--lab-dim, #6b7280); display: block; }
+      .l06-vs-v { font: 650 15px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; display: block; }
+      .l06-vs-cell.bad .l06-vs-v { color: var(--lab-bad, #c0392b); }
+      .l06-vs-cell.good .l06-vs-v { color: var(--lab-ok, #0f7b52); }
+      .l06-vs-note { font-size: 10.5px; color: var(--lab-faint, #9ca3af); }
+
+      /* The per-tensor breakdown: which tensors went to HBM at all. */
+      .l06-tags { display: flex; flex-wrap: wrap; gap: 5px; margin: 7px 0 3px; }
+      .l06-tag {
+        font: 600 10.5px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+        padding: 3px 7px;
+        border-radius: 5px;
+        border: 1px solid var(--lab-line, #e3e6ec);
+        background: var(--lab-panel-2, #f6f7f9);
+        color: var(--lab-dim, #6b7280);
+      }
+      .l06-tag b { color: var(--lab-fg, #1f2937); font-weight: 650; }
+      .l06-tag-forbidden {
+        border-color: color-mix(in srgb, var(--lab-bad, #c0392b) 55%, transparent);
+        background: color-mix(in srgb, var(--lab-bad, #c0392b) 10%, transparent);
+        color: var(--lab-bad, #c0392b);
+      }
+      .l06-tag-forbidden b { color: var(--lab-bad, #c0392b); }
+      .l06-tag-absent {
+        border-style: dashed;
+        color: var(--lab-ok, #0f7b52);
+        border-color: color-mix(in srgb, var(--lab-ok, #0f7b52) 45%, transparent);
+      }
+      .l06-tag-absent b { color: var(--lab-ok, #0f7b52); }
+
+      /* ---- the measured curves ---- */
+      .l06-curve { width: 100%; height: auto; display: block; margin: 4px 0 6px; }
+      .l06-curve .axis { stroke: var(--lab-line, #e3e6ec); stroke-width: 1; }
+      .l06-curve .grid { stroke: var(--lab-line, #e3e6ec); stroke-width: 1; opacity: 0.55; }
+      .l06-curve .tick { fill: var(--lab-faint, #9ca3af); font: 9px ui-monospace, monospace; }
+      .l06-curve .std { fill: none; stroke: var(--lab-bad, #c0392b); stroke-width: 2; }
+      .l06-curve .fa { fill: none; stroke-width: 2; }
+      .l06-curve .fa-0 { stroke: var(--lab-accent, #007aff); }
+      .l06-curve .fa-1 { stroke: var(--lab-accent-2, #b45309); }
+      .l06-curve .fa-2 { stroke: var(--lab-ok, #0f7b52); }
+      .l06-curve .fa-3 { stroke: var(--lab-region, #d6408c); }
+      .l06-curve .now { stroke: var(--lab-fg, #1f2937); stroke-width: 1.5; stroke-dasharray: 3 3; }
+      .l06-curve-key {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px 13px;
+        font-size: 10.5px;
+        color: var(--lab-dim, #6b7280);
+        margin-bottom: 4px;
+      }
+      .l06-curve-key i {
+        display: inline-block;
+        width: 15px; height: 3px;
+        border-radius: 2px;
+        vertical-align: middle;
+        margin-right: 4px;
+      }
+      .l06-curve-key .sw-std { background: var(--lab-bad, #c0392b); }
+      .l06-curve-key .sw-0 { background: var(--lab-accent, #007aff); }
+      .l06-curve-key .sw-1 { background: var(--lab-accent-2, #b45309); }
+      .l06-curve-key .sw-2 { background: var(--lab-ok, #0f7b52); }
+      .l06-curve-key .sw-3 { background: var(--lab-region, #d6408c); }
+
+      .l06-table { width: 100%; border-collapse: collapse; font-size: 11px; margin-top: 4px; }
+      .l06-table th, .l06-table td {
+        text-align: right;
+        padding: 3px 6px;
+        border-bottom: 1px solid var(--lab-line, #e3e6ec);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .l06-table th { color: var(--lab-faint, #9ca3af); font-weight: 600; }
+      .l06-table td:first-child, .l06-table th:first-child { text-align: left; }
+      .l06-table tr.on td { color: var(--lab-accent, #007aff); font-weight: 650; }
+
+      .l06-note { color: var(--lab-dim, #6b7280); font-size: 11.5px; line-height: 1.65; margin: 8px 0 0; }
+      .l06-note b { color: var(--lab-fg, #1f2937); }
+      .l06-note code {
+        background: rgba(128, 128, 128, 0.12);
+        border-radius: 3px;
+        padding: 0 4px;
+        font-size: 0.94em;
+      }
+
+      /* ---- the correction-factor strip, L00's amplifier on a 2-D recurrence ---- */
+      .l06-corr-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: baseline; }
+      .l06-corr-factor {
+        font: 650 20px/1.1 ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: var(--lab-region, #d6408c);
+      }
+      .l06-tag-k {
+        font-size: 10.5px;
+        padding: 1px 8px;
+        border-radius: 999px;
+        border: 1px solid currentColor;
+        font-weight: 600;
+      }
+      .l06-tag-init { color: var(--lab-faint, #9ca3af); }
+      .l06-tag-identity { color: var(--lab-ok, #0f7b52); }
+      .l06-tag-rescale { color: var(--lab-region, #d6408c); }
+      .l06-bars { display: flex; gap: 3px; margin: 11px 0 6px; flex-wrap: wrap; }
+      .l06-bar {
+        flex: 1 1 0;
+        min-width: 40px;
+        max-width: 82px;
+        border: 1px solid var(--lab-line, #e3e6ec);
+        border-radius: 7px;
+        padding: 4px 5px 5px;
+        background: var(--lab-panel-2, #f6f7f9);
+        text-align: center;
+      }
+      .l06-bar-on { outline: 2px solid var(--lab-accent, #007aff); outline-offset: 1px; }
+      .l06-bar-n { display: block; font-size: 9.5px; color: var(--lab-faint, #9ca3af); }
+      .l06-bar-v { display: block; font: 650 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .l06-bar.k-rescale .l06-bar-v { color: var(--lab-region, #d6408c); }
+      .l06-bar.k-identity .l06-bar-v { color: var(--lab-ok, #0f7b52); }
+      .l06-bar.k-init .l06-bar-v { color: var(--lab-faint, #9ca3af); }
+      /* The fill is the factor as a fraction of 1: an identity block fills it, a
+         rescale block fills it partway, and the first block's defined-as-zero
+         factor leaves it empty -- so the strip is readable without the numbers. */
+      .l06-bar-fill { display: block; height: 4px; border-radius: 3px; margin-top: 3px; background: var(--lab-line, #e3e6ec); }
+      .l06-bar-fill > i { display: block; height: 100%; border-radius: 3px; }
+      .l06-strip-legend { font-size: 10.5px; color: var(--lab-faint, #9ca3af); }
+
+      /* The stage is the point of this page, so it gets the full width above the
+         engine's two-column block rather than a slot inside it. */
+      .lab-stage-panel { margin-bottom: 14px; }
+      .lab-stage-panel .lab-tensor-host { max-height: 420px; overflow: auto; }
+      .l06-panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 14px; }
+      @media (prefers-color-scheme: dark) {
+        .l06-params, .l06-vs-cell, .l06-bar, .l06-tag, .l06-io-bar { color: var(--lab-fg, #e5e7eb); }
+      }
+    </style>
+  </head>
+  <!--
+    Two build-time facts this document depends on, both learned the hard way in
+    the scaffolding ticket:
+
+      * The no-index marker must wrap the whole document. On a bare <meta> tag
+        Pagefind ignores it and indexes the page anyway.
+      * Asset paths are relative to the SERVED location, not to this source file:
+        scripts/build-labs.mjs flattens labs/pages/*.html to public/labs/*.html,
+        so this page lands beside assets/ and must use ./assets/… — a ../ would
+        404 the whole engine.
+
+    The page holds a trace set and a config. Every algorithmic decision — state
+    reconstruction, layout, formula tiers, playback — lives in the engine; the
+    three panels below read fields out of the trace and format them, they do not
+    compute anything about the algorithm. The IO counts, the curves, the SRAM
+    account and the correction factors all arrive in the JSON, measured by a real
+    numpy run of both implementations.
+  -->
+  <body data-pagefind-ignore>
+    <a class="lab-back" href="./">← 全部实验室</a>
+    <p class="lab-banner" id="lab-banner" hidden></p>
+
+    <div id="lab-params"></div>
+    <!-- The player is rebuilt here on every parameter change. A fresh element per
+         build means the previous player's DOM — including the narrow-screen
+         fallback it inserted beside its mount — goes away with it, instead of
+         accumulating one stale copy per slider move. -->
+    <div id="lab-stage"></div>
+
+    <p class="lab-provenance">
+      本页每个数字都来自一次真实的 numpy 运行，不是手编的演示数据。
+      trace 由 <code>labs/traces/flash_attention.py</code> 生成：它把 HBM 建模成一个
+      <b>按块读写、每次访问都记账的内存对象</b>，标准 Attention 与 FlashAttention 是两段真实的
+      numpy 代码、只能通过它访问内存 —— 所以「S、P 从不落回 HBM」是<b>访问日志里数出来的 0 次</b>，
+      而不是文字声明。同一个记录对象跑标准实现时记下了 S、P（对照组），否则那个 0 没有区分力。
+      IO 曲线的每个点、每一条 <code>IO × B_c</code> 也都是这么数出来的；脚本还会断言实测值与
+      公式预测一致，公式与算法脱节就会在同一处失败而不是悄悄改个标签。
+      输出正确性对拍三个实现（分块递推、numpy 标准版、<b>torch</b>），容差按 float64 的求和顺序
+      推导；同一条递推里「忘记乘修正因子」的影子版本作为对照组，必须被同一判据抓到。不通过就拒绝写文件。
+      引擎本身在 <code>labs/assets/engine/</code>，两层内存舞台是其中一个视图组件
+      （<code>views/tiling-stage.js</code>，与 L01 的三层舞台是同一份代码）。
+    </p>
+
+    <!-- KaTeX is vendored, never a CDN: a lab page must make zero external requests. -->
+    <script src="./assets/vendor/katex/katex.min.js"></script>
+    <script src="./assets/engine/trace-model.js"></script>
+    <script src="./assets/engine/layout.js"></script>
+    <script src="./assets/engine/formula.js"></script>
+    <script src="./assets/engine/dag.js"></script>
+    <script src="./assets/engine/tensors.js"></script>
+    <script src="./assets/engine/narrow.js"></script>
+    <script src="./assets/engine/views/tiling-stage.js"></script>
+    <script src="./assets/engine/player.js"></script>
+    <script src="./assets/engine/verify.js"></script>
+
+    <!--
+      The whole trace set — manifest plus every configuration it names — is
+      substituted here at build time (see the trace-set step in
+      scripts/build-labs.mjs). Inlining rather than fetching is what makes "the
+      lab page is data plus config" literally true: the page cannot disagree with
+      the JSON it was built from, because there is no second copy.
+    -->
+    <!-- traces:flash-attention -->
+
+    <script>
+      (function () {
+        'use strict';
+        var SET = 'flash-attention';
+        var stage = document.getElementById('lab-stage');
+        var paramsHost = document.getElementById('lab-params');
+        var banner = document.getElementById('lab-banner');
+        var traces = window.LabTraces || {};
+        var manifest = (window.LabTraceSets || {})[SET];
+
+        if (!manifest || !traces[manifest.default]) {
+          stage.textContent =
+            'trace 未加载：本页的 trace 集合占位符没有被构建脚本替换。';
+          return;
+        }
+
+        var esc = function (s) {
+          return String(s).replace(/[&<>"]/g, function (c) {
+            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+          });
+        };
+        var TM = LabEngine.traceModel;
+
+        /* ==================================================== value formatting
+         *
+         * Every value these panels print comes straight out of the trace. The only
+         * transformations are choosing how wide a number reads on screen and
+         * turning a byte count into a readable unit. */
+        function num(v, digits) {
+          if (v === null || v === undefined) return '—';
+          if (TM.isSentinel(v)) return TM.SENTINEL_TEXT[v];
+          if (typeof v !== 'number') return String(v);
+          if (!isFinite(v)) return v > 0 ? '+∞' : '−∞';
+          return v.toPrecision(digits || 4).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
+        }
+        function pct(v) { return v === null || v === undefined ? '—' : (v * 100).toPrecision(4) + '%'; }
+        function int(v) { return typeof v === 'number' ? v.toLocaleString('en-US') : String(v); }
+        /** Elements as a readable size, for the IO axis. The unit is the trace's
+         *  own (fp32 => 4 bytes); this is a display choice, not a recomputation. */
+        function elems(v) {
+          if (v >= 1e6) return (v / 1e6).toPrecision(3) + 'M';
+          if (v >= 1e3) return (v / 1e3).toPrecision(3) + 'k';
+          return String(v);
+        }
+
+        /* ===================================================== the IO counter
+         *
+         * The panel the ticket asks for: a running count and the two asymptotics
+         * side by side. Everything here is a field the generator measured; the
+         * panel picks a layout, it does not count anything.
+         *
+         * The bar is deliberately on ONE scale. Two independently-scaled bars
+         * would show the ratio and hide the size, and the whole point of the
+         * config this page opens on is that FlashAttention's constant has not yet
+         * beaten O(N^2) -- a pair of normalised bars would make that invisible.
+         */
+        function ioPanel(trace) {
+          var io = trace.meta.io;
+          var cfg = trace.meta.config;
+          var forbidden = (trace.meta.exposure || {}).forbidden || [];
+          return function (step, ctx) {
+            var cum = (step.io || {}).cum || 0;
+            var stepCost = (step.io || {}).step || 0;
+            var stdFinal = io.standard.elements;
+            var faFinal = io.flash.elements;
+            var scale = Math.max(stdFinal, faFinal);
+
+            var html = '<div class="l06-body">' +
+              '<p class="l06-sub">把 HBM 当对象记账：每次按块读写各记一条，这里是数出来的</p>';
+
+            html += '<div class="l06-io-head">' +
+              '<span class="l06-io-big">' + int(cum) +
+                ' <small>个元素已访问</small></span>' +
+              (stepCost ? '<span class="l06-io-delta">本步 +' + int(stepCost) + '</span>' : '') +
+              '<span class="l06-io-delta" style="color:var(--lab-faint)">' +
+                '标准实现跑完需要 ' + int(stdFinal) + '</span>' +
+              '</div>';
+
+            html += '<div class="l06-io-bar">' +
+              '<span class="l06-io-fill" style="width:' +
+                (100 * Math.min(1, cum / scale)).toFixed(2) + '%"></span>' +
+              '<span class="l06-io-mark" style="left:' +
+                (100 * stdFinal / scale).toFixed(2) + '%"><span>标准 ' +
+                elems(stdFinal) + '</span></span>' +
+              '</div>';
+            html += '<div class="l06-io-axis"><span>0</span><span>' +
+              elems(scale) + ' 个元素</span></div>';
+
+            /* The two runs' totals, and the ratio between them.
+             *
+             * `io.ratio` is `standard / flash` -- the trace's own definition --
+             * so the label has to say that, and the verdict line has to be read
+             * off the same quantity rather than off a separate comparison that
+             * could drift from it. An earlier version labelled this "FA ÷ 标准"
+             * while printing `io.ratio`: the number was right, the label was
+             * backwards, and the note underneath said "FA 更多" for a ratio below
+             * 1 -- three statements, two of them contradicting the third. */
+            var ratio = io.ratio;
+            var faWins = ratio > 1;
+            html += '<div class="l06-vs">' +
+              '<div class="l06-vs-cell bad"><span class="l06-vs-k">标准 Attention（S、P 落 HBM）</span>' +
+                '<span class="l06-vs-v">' + int(stdFinal) + '</span>' +
+                '<span class="l06-vs-note">' + io.standard.accesses + ' 次访问 · ' +
+                  int(io.standard.reads) + ' 读 / ' + int(io.standard.writes) + ' 写</span></div>' +
+              '<div class="l06-vs-cell good"><span class="l06-vs-k">FlashAttention（S、P 不落 HBM）</span>' +
+                '<span class="l06-vs-v">' + int(faFinal) + '</span>' +
+                '<span class="l06-vs-note">' + io.flash.accesses + ' 次访问 · ' +
+                  int(io.flash.reads) + ' 读 / ' + int(io.flash.writes) + ' 写</span></div>' +
+              '<div class="l06-vs-cell' + (faWins ? ' good' : '') + '">' +
+                '<span class="l06-vs-k">标准 ÷ FA</span>' +
+                '<span class="l06-vs-v">' + ratio.toPrecision(3) + '×</span>' +
+                '<span class="l06-vs-note">' +
+                  (faWins ? '大于 1：FA 更省' : '小于 1：FA 更贵 —— 见下面的曲线') +
+                '</span></div>' +
+              '</div>';
+
+            /* Which tensors actually reached HBM, as a set difference against the
+               control. This is the claim in the form the access log produced it:
+               every name the standard run touched, tagged with whether the
+               FlashAttention run ever touched it. */
+            var fa = io.flash.tensors;
+            html += '<div class="l06-tags">';
+            io.standard.tensors.forEach(function (t) {
+              var absentInFa = fa.indexOf(t) === -1;
+              html += '<span class="l06-tag' + (absentInFa ? ' l06-tag-forbidden' : '') +
+                '"><b>' + esc(t) + '</b>' +
+                (absentInFa ? ' FA 从未访问' : ' FA 也访问') + '</span>';
+            });
+            forbidden.forEach(function (t) {
+              if (fa.indexOf(t) === -1) return;   // already shown as a hit above
+              html += '<span class="l06-tag l06-tag-forbidden"><b>' + esc(t) +
+                '</b> FA 访问 ' + io.flash.by_tensor[t].read + ' 次</span>';
+            });
+            html += '</div>';
+
+            /* The per-tensor counts, summed over the whole forbidden set rather
+               than read off one member of it. The sentence's subject is "S 和 P
+               ​two tensors", so quoting only S's numbers understated the total by
+               half -- the kind of arithmetic slip a reader can check and a
+               spot-check cannot. */
+            var fbRead = 0, fbWrite = 0;
+            forbidden.forEach(function (t) {
+              var b = io.standard.by_tensor[t];
+              if (!b) return;
+              fbRead += b.read;
+              fbWrite += b.write;
+            });
+            html += '<p class="l06-note"><b>这一栏是一个集合差：</b>' +
+              '标准实现的访问日志里有 <b>' + esc(forbidden.join('、')) +
+              '</b>（每个各写一遍、各读一遍，合计 ' +
+              fbRead + ' 读 + ' + fbWrite + ' 写），' +
+              'FlashAttention 的日志里两个都没有 —— 各 <b>0</b> 次。' +
+              '两份日志出自同一个记录对象、同一份数据、同一个脚本：' +
+              '对照组（标准实现）里这个集合非空，正是 FA 那边为空这件事有意义的前提。' +
+              '脚本另跑了一份「不修正」的影子递推，读取代价与正确版<b>逐位相同</b>，' +
+              '但结果是错的 —— 所以上面这个 0 换来的不是近似。</p>';
+
+            html += '<p class="l06-note">' + esc(io.model) + ' 实测与公式预测一致：标准 ' +
+              '<code>' + esc(io.predict.standard_expr) + '</code> = ' + int(io.predict.standard) +
+              '，FA <code>' + esc(io.predict.flash_expr) + '</code> = ' +
+              int(io.predict.flash) + '。</p>';
+
+            html += '</div>';
+            return html;
+          };
+        }
+
+        /* ================================================== the measured curves
+         *
+         * The design doc asks for O(N^2) against O(N^2 d^2 / M). Those are
+         * ASYMPTOTICS; what this panel can show is the measurement underneath
+         * them, at five values of N, for every block size this `d` offers.
+         *
+         * Why this matters beyond decoration: at the sizes this lab replays, the
+         * standard implementation often WINS, because FA's constant has not yet
+         * been amortised. A page that only drew a curve where FA is ahead would
+         * be selling rather than teaching, so the crossing is on the chart.
+         */
+        function curvePanel(trace) {
+          var curves = trace.meta.io.curves;
+          var law = trace.meta.io.law;
+          var cfg = trace.meta.config;
+          var ns = curves.ns;
+
+          return function (step) {
+            var W = 460, H = 190;
+            var padL = 46, padR = 12, padT = 12, padB = 26;
+            var xs = ns;
+            // Log scale on y: the curves span nearly two orders of magnitude, and
+            // on a linear axis the small-N end (where the story is) collapses
+            // into the corner.
+            var all = [];
+            curves.standard.forEach(function (p) { all.push(p.elements); });
+            curves.flash.forEach(function (c) {
+              c.points.forEach(function (p) { all.push(p.elements); });
+            });
+            var yMin = Math.log10(Math.min.apply(null, all) * 0.8);
+            var yMax = Math.log10(Math.max.apply(null, all) * 1.25);
+            var xMin = Math.log10(xs[0] * 0.8), xMax = Math.log10(xs[xs.length - 1] * 1.25);
+            function px(n) {
+              return padL + (W - padL - padR) * (Math.log10(n) - xMin) / (xMax - xMin);
+            }
+            function py(v) {
+              return H - padB - (H - padT - padB) * (Math.log10(v) - yMin) / (yMax - yMin);
+            }
+
+            var svg = '<svg class="l06-curve" viewBox="0 0 ' + W + ' ' + H +
+                      '" role="img" aria-label="标准 Attention 与 FlashAttention 的 HBM 访问量随 N 的变化">';
+            // y grid + labels, one per decade.
+            for (var dec = Math.ceil(yMin); dec <= Math.floor(yMax); dec++) {
+              var y = py(Math.pow(10, dec));
+              svg += '<line class="grid" x1="' + padL + '" y1="' + y.toFixed(1) +
+                     '" x2="' + (W - padR) + '" y2="' + y.toFixed(1) + '"/>';
+              svg += '<text class="tick" x="' + (padL - 4) + '" y="' + (y + 3).toFixed(1) +
+                     '" text-anchor="end">1e' + dec + '</text>';
+            }
+            xs.forEach(function (n) {
+              svg += '<text class="tick" x="' + px(n).toFixed(1) + '" y="' + (H - padB + 13) +
+                     '" text-anchor="middle">N=' + n + '</text>';
+            });
+            svg += '<line class="axis" x1="' + padL + '" y1="' + (H - padB) + '" x2="' +
+                   (W - padR) + '" y2="' + (H - padB) + '"/>';
+            svg += '<line class="axis" x1="' + padL + '" y1="' + padT + '" x2="' + padL +
+                   '" y2="' + (H - padB) + '"/>';
+
+            function path(points) {
+              return points.map(function (p, i) {
+                return (i ? 'L' : 'M') + px(p.N).toFixed(1) + ' ' + py(p.elements).toFixed(1);
+              }).join(' ');
+            }
+            svg += '<path class="std" d="' + path(curves.standard) + '"/>';
+            curves.flash.forEach(function (c, i) {
+              if (c.points.length < 2) return;
+              svg += '<path class="fa fa-' + (i % 4) + '" d="' + path(c.points) + '"/>';
+            });
+
+            // The cursor's own N, so the chart and the replay are on the same page.
+            if (xs.indexOf(cfg.N) !== -1) {
+              svg += '<line class="now" x1="' + px(cfg.N).toFixed(1) + '" y1="' + padT +
+                     '" x2="' + px(cfg.N).toFixed(1) + '" y2="' + (H - padB) + '"/>';
+            }
+            svg += '</svg>';
+
+            var key = '<div class="l06-curve-key">' +
+              '<span><i class="sw-std"></i>标准 O(N²)</span>';
+            curves.flash.forEach(function (c, i) {
+              key += '<span><i class="sw-' + (i % 4) + '"></i>FA B_c=' + c.Bc +
+                     '（M=' + (4 * c.Bc * cfg.d) + '）</span>';
+            });
+            key += '</div>';
+
+            var html = '<div class="l06-body">' +
+              '<p class="l06-sub">同一份计数模型，N = ' + xs.join('、') +
+              ' 上逐点跑出来的实测值（对数纵轴）</p>' + key + svg;
+
+            /* The law, which is O(N^2 d^2 / M) made checkable: M = 4 B_c d, so
+               IO x B_c should be constant. The table is the measurement and the
+               spread is how far off it is. */
+            html += '<table class="l06-table"><thead><tr>' +
+              '<th>B_c</th><th>B_r</th><th>N</th><th>IO</th><th>IO × B_c</th></tr></thead><tbody>';
+            law.rows.forEach(function (r) {
+              var on = r.Bc === cfg.Bc;
+              html += '<tr' + (on ? ' class="on"' : '') + '><td>' + r.Bc + '</td><td>' +
+                r.Br + '</td><td>' + r.N + '</td><td>' + int(r.elements) +
+                '</td><td>' + int(r.times_bc) + '</td></tr>';
+            });
+            html += '</tbody></table>';
+            html += '<p class="l06-note">' + esc(law.note) + '实测跨度 <b>' +
+              (law.spread * 100).toPrecision(2) + '%</b>，全部来自 ⌈M/4d⌉ 的取整 —— ' +
+              '固定 M 只看 B_c 的话，这个乘积在滑杆的两端应当一样。' +
+              '标准实现那一列不在表里，因为它<b>与 B_c 无关</b>：它读的是完整的 N×N，' +
+              '分块参数对它没有意义 —— 这正是两条曲线斜率不同的原因。' +
+              '表里的 N 固定取 ' + law.rows[0].N + '（曲线的最右端），' +
+              '因为 <code>IO × B_c</code> 只在同一个 N 上才谈得上"与 B_c 无关"。</p>';
+
+            /* The verdict on whether FA is ahead, read off the curves rather
+               than asserted.
+             *
+             * Every number here is compared AT THE CONFIGURATION'S OWN N, and a
+             * series that has no point there is EXCLUDED rather than falling back
+             * to its last point. That fallback is what broke the first version of
+             * this paragraph: a curve can be missing an N for a real reason (the
+             * generator skips cells where the block size does not divide N, so
+             * B_c=16 has no N=8 point at all), and silently comparing its N=128
+             * value against N=8's standard implementation produced a verdict
+             * about a cross-section the chart does not draw -- while the sentence
+             * around it said "at N=...".
+             *
+             * The chart draws every N and every block size, so the honest
+             * statement is about this N's cross-section only, plus a note that
+             * the reader can move the N slider to see the crossing. */
+            var stdAtN = curves.standard.filter(function (pt) { return pt.N === cfg.N; })[0];
+            var winners = [], losers = [], absent = [];
+            curves.flash.forEach(function (c) {
+              var mine = c.points.filter(function (pt) { return pt.N === cfg.N; })[0];
+              if (!mine || !stdAtN) { absent.push(c); return; }
+              if (mine.elements < stdAtN.elements) winners.push(c);
+              else losers.push(c);
+            });
+            var nowBc = curves.flash.filter(function (c) { return c.Bc === cfg.Bc; })[0];
+            var nowWins = nowBc && winners.indexOf(nowBc) !== -1;
+            // Whether ANY block size wins at some larger N: that is the crossing
+            // the reader can actually reach by moving the N slider.
+            var winsSomewhere = curves.flash.filter(function (c) {
+              return c.points.some(function (pt) {
+                var s_ = curves.standard.filter(function (q) { return q.N === pt.N; })[0];
+                return s_ && pt.elements < s_.elements;
+              });
+            });
+            html += '<p class="l06-note"><b>为什么这个尺寸下 FA 可能反而更贵：</b>' +
+              'O(N²d²/M) 是渐近说法，它的常数要等 <code>M &gt; 4d² = ' + (4 * cfg.d * cfg.d) +
+              '</code> 才压过 O(N²)。图的横轴是 N、纵轴是 IO，红线是标准实现。' +
+              '在 N=' + cfg.N + ' 这个截面上（当前配置的 N），' +
+              (stdAtN ? (curves.flash.length - absent.length) + ' 条画得出点的 FA 曲线里 ' +
+                (winners.length ? '<b>' + winners.length + ' 条已经低于红线</b>（B_c = ' +
+                  winners.map(function (c) { return c.Bc; }).join('、') + '，即 M ≥ ' +
+                  (4 * winners[0].Bc * cfg.d) + '）' : '<b>一条都没有低于红线</b>') +
+                (losers.length ? '，其余 ' + losers.length + ' 条还在红线上方' : '')
+                : '标准实现没有这个 N 的点，无法比较') +
+              (absent.length ? '；另有 ' + absent.length + ' 条（B_c = ' +
+                absent.map(function (c) { return c.Bc; }).join('、') +
+                '）在这里没有点 —— 块大小除不尽 N，生成脚本不产出这种组合' : '') + '。' +
+              '当前配置 M = ' + cfg.M + '（B_c = ' + cfg.Bc + '）' +
+              (nowBc ? (nowWins
+                ? '，在这个 N 上已经越过这道门槛。'
+                : '，在这个 N 上还没越过。') : '。') +
+              (winsSomewhere.length
+                ? '把 <b>N 滑杆</b>往右推可以看到交叉：B_c = ' +
+                  winsSomewhere.map(function (c) { return c.Bc; }).join('、') +
+                  ' 的曲线在大 N 处会落到红线下方 —— 这正是 O(N²d²/M) 里那个 M ' +
+                  '在长序列上才开始兑现的样子。'
+                : '在图上这些 N 里还没有出现交叉点。') +
+              '滑杆一动，这条结论和整条回放会一起重算。</p>';
+
+            html += '</div>';
+            return html;
+          };
+        }
+
+        /* ============================================ the correction amplifier
+         *
+         * L00's mechanism, on the 2-D recurrence, and the second thing the
+         * ticket names outright ("修正因子在 m 变化的步上被正确触发"). Per block
+         * rather than per step because alpha is applied to a whole row-block
+         * between one K/V block and the next.
+         *
+         * The `kind` is the block's, the factor is a row's -- `rows_scaled` says
+         * how many rows that abstracts over, so a reader is never handed a
+         * summary that silently averages away the interesting case.
+         */
+        function corrPanel(trace) {
+          var corr = trace.meta.correction;
+          var perBlock = corr.per_block;
+          var KIND_LABEL = {
+            init: '首块 · 因子按定义为 0',
+            identity: 'm 未变 · 因子恰好 = 1',
+            rescale: 'm 被抬高 · 必须缩放',
+          };
+          var FILL = { init: '#9ca3af', identity: '#0f7b52', rescale: '#d6408c' };
+          var KIND_SHORT = { init: '首块', identity: '恒等', rescale: '缩放' };
+          var WHY = {
+            init: '第一块没有历史：ℓ_i 旧值是 0，α 按定义为 0，更新化简成直接求和。',
+            identity: '本块每一行的 m 都没动，α = e^0 = 1 —— 乘以 1 是恒等操作。' +
+                      '这一步漏掉 α 不会出错，也正因如此，「忘了乘」这个 bug ' +
+                      '在只看少数几步时特别不容易被发现。',
+            rescale: '本块有行抬高了 m，这些行此前累加的 ℓ_i 与 O_i 是按旧 m 算的。' +
+                     '乘这个小于 1 的因子，等价于把历史重新按新 m 归一 —— ' +
+                     '这正是 FlashAttention 里对 O 做 rescale 的那一步。',
+          };
+
+          return function (step, ctx) {
+            var cr = step.corr;
+            var html = '<div class="l06-body">' +
+              '<p class="l06-sub">逐块 e^(m_old − m_new)，以及漏掉它的代价</p>';
+
+            if (cr) {
+              html += '<div class="l06-corr-head">' +
+                '<span class="l06-corr-factor">' + num(cr.factor, 5) + '</span>' +
+                '<span class="l06-tag-k l06-tag-' + esc(cr.kind) + '">' +
+                  esc(KIND_LABEL[cr.kind]) + '</span>' +
+                '<span class="l06-track-sub">m_old = ' + num(cr.m_old, 4) +
+                  ' → m_new = ' + num(cr.m_new, 4) + '</span>' +
+                '</div>';
+            } else {
+              html += '<div class="l06-corr-head"><span class="l06-param-label">' +
+                '本步不涉及修正因子（只有 ℓ_i 与 O_i 的更新步才有）</span></div>';
+            }
+
+            /* One cell per (i, j) block, so the reader can see that most blocks
+               have a factor of exactly 1 and only the m-raising ones do work -- the
+               same distribution L00's amplifier showed, which is what makes "the
+               rescale is rare and load-bearing" a shape rather than a sentence. */
+            var cur = currentBlockN(ctx.cursor, trace);
+            html += '<div class="l06-bars">';
+            perBlock.forEach(function (e) {
+              var cls = 'l06-bar k-' + e.kind + (e.n === cur ? ' l06-bar-on' : '');
+              var filled = e.n <= cur && typeof e.factor === 'number';
+              /* The kind goes ON the cell, not only in the header. Two reasons,
+                 both about the empty-looking bars: an `init` block's factor is 0
+                 by definition, so its fill is always zero and the fill colour
+                 (which is the only thing carrying the kind) is never visible;
+                 and without a per-cell label a reader sees "块 1 · 0 · 4 行" with
+                 an empty track and has to infer that zero means "defined", not
+                 "not computed yet". */
+              html += '<div class="' + cls + '">' +
+                '<span class="l06-bar-n">块 ' + e.n + ' · ' + esc(KIND_SHORT[e.kind]) +
+                  '</span>' +
+                '<span class="l06-bar-v">' + num(e.factor, 4) + '</span>' +
+                '<span class="l06-bar-fill"><i style="width:' +
+                  (filled ? Math.round(100 * Math.max(0, Math.min(1, e.factor))) : 0) +
+                  '%;background:' + FILL[e.kind] + '"></i></span>' +
+                '<span class="l06-bar-n">' + e.rows_scaled + ' 行</span>' +
+                '</div>';
+            });
+            html += '</div>';
+
+            /* The comparison that gives the panel its name. Both numbers are
+               running answers, so they are the same kind of quantity and their
+               difference is the error you would be looking at right now. */
+            if (cr) {
+              html += '<div class="l06-vs">' +
+                '<div class="l06-vs-cell good"><span class="l06-vs-k">带上修正因子，本块为止 ‖O_i‖ =</span>' +
+                  '<span class="l06-vs-v">' + num(cr.o_correct, 4) + '</span></div>' +
+                '<div class="l06-vs-cell bad"><span class="l06-vs-k">漏掉因子，本块为止 ‖O_i‖ =</span>' +
+                  '<span class="l06-vs-v">' + num(cr.o_uncorrected, 4) + '</span></div>' +
+                '<div class="l06-vs-cell' + (cr.bias_abs > 0 ? ' bad' : '') + '">' +
+                  '<span class="l06-vs-k">本块偏差</span>' +
+                  '<span class="l06-vs-v">' + num(cr.bias_abs, 4) + '</span>' +
+                  '<span class="l06-vs-k">相对 ' + pct(cr.bias_rel) + '</span></div>' +
+                '</div>';
+              html += '<p class="l06-note">' + esc(WHY[cr.kind]) + '</p>';
+            }
+
+            html += '<p class="l06-note">整条 trace 走完：修正后 ‖O‖ = <b>' +
+              num(corr.final_o_correct, 6) + '</b>，永不修正 ‖O‖ = <b>' +
+              num(corr.final_o_uncorrected, 6) + '</b> —— 逐元素最大偏差 <b>' +
+              num(corr.final_bias_abs, 4) + '</b>（相对 ' + pct(corr.final_bias_rel) +
+              '）。共 <b>' + corr.rows + ' / ' + corr.rows_total + '</b> 行真的做了缩放，' +
+              '落在 ' + corr.rescales + ' / ' + perBlock.length + ' 个块里；其余行的因子恰好是 1。' +
+              '两个数都不是估出来的：脚本另外跑了一遍「α 恒为 1」的递推，这是它跑完的结果。' +
+              'α 是<b>逐行</b>的而 kind 是<b>整块</b>的 —— 一块 4 行里可能有 1 行被缩放、' +
+              '3 行没动，把这样的块笼统说成「本块的因子是 0.78」就会把 1 和 0.78 ' +
+              '平均掉。上面每格里的「n 行」就是这一步的诚实度：它数出该块有几行的 α 严格小于 1。</p>';
+
+            html += '</div>';
+            return html;
+          };
+        }
+
+        /** Which (i, j) block the cursor is inside, derived from the step's id --
+         *  the same grouping the stage's per-block annotation uses, so the strip
+         *  and the timeline agree on what "块 n" means. */
+        function currentBlockN(cursor, trace) {
+          var s = trace.steps[cursor];
+          var m = /^(?:ld|s|mx|p|l|o|wb)(\d)(\d)$/.exec(s.id);
+          if (!m) return s.id === 'sum' ? trace.meta.config.n_blocks : 0;
+          var i = Number(m[1]), j = Number(m[2]);
+          return j * trace.meta.config.Tr + i + 1;
+        }
+
+        /* ======================================================= jump purity
+         *
+         * Every cursor move goes through `resolve(trace, i)` -- a pure function of
+         * the cursor -- so jumping to step 19 and playing forward to step 19 must
+         * produce the same screen. This panel asserts that, and it carries the
+         * control group that makes the assertion worth something: the same plan run
+         * against a deliberately stateful reconstruction (one mutable object, the
+         * target step's writes layered on top of whatever is already there, no
+         * re-derivation).
+         *
+         * It calls `LabEngine.verify.runJumpCheck` directly rather than
+         * `verify.panel`: the panel bundles a sabotage table written against L00's
+         * trace, and several of those cases are no-ops on any other trace (see the
+         * note in labs/README.md). The jump check is generic; that table is not.
+         *
+         * The result is rendered here because `runJumpCheck` returns numbers and
+         * does not touch the DOM -- the page owns the presentation.
+         */
+        function jumpPanel(trace, idx) {
+          return function () {
+            var r = LabEngine.verify.runJumpCheck(trace, idx);
+            var html = '<div class="l06-body">';
+            html += '<div class="lab-verdict ' + (r.passed ? 'lab-ok' : 'lab-bad') + '">' +
+              '<b>任意跳转 · 纯函数重建：</b>' + r.total + ' 次跳转' +
+              '（正向 / 完全逆序 / 跳回 / 乱序回环），' +
+              (r.pureFailures === 0
+                ? '<b>0 次不一致</b>，与顺序累积基准逐位相同。'
+                : '<b>' + r.pureFailures + ' 次不一致</b>。') +
+              '<br><b>对照组（故意做错的有状态播放器）：</b>同一批跳转里 <b>' +
+              r.controlFailures + ' 次不一致</b>。' +
+              (!r.conclusive
+                ? '<br><b>⚠️ 对照组也全过了 —— 这组跳转没有区分力，上面的 0 不能当作证据。</b>'
+                : '对照组确实翻车，说明上面那个 0 不是测试写错。') +
+              '</div>';
+            html += '<p class="l06-note">这张表是引擎通用的，每个 lab 都跑同一份跳转计划；' +
+              '它检验的是「任意跳转 == 顺序播放」这条引擎性质。' +
+              '<b>本 lab 自己的主张</b>（S、P 从不落到 HBM）不在这一栏 —— ' +
+              '它是生成器的访问日志数出来的，并由验收脚本逐帧读 DOMP 的 HBM 层复核。' +
+              '</p>';
+            html += '</div>';
+            return html;
+          };
+        }
+
+        /* ============================================================ params */
+        var current = null;
+        var player = null;
+
+        function configId(values) {
+          return 'flash-attention-N' + values.N + '-d' + values.d + '-M' + values.M;
+        }
+
+        function readUrlConfig() {
+          var raw = null;
+          try { raw = new URLSearchParams(location.search).get('cfg'); } catch (e) { return null; }
+          if (!raw) return null;
+          return manifest.traces.indexOf(raw) === -1 ? null : raw;
+        }
+
+        function valueFromId(id) {
+          var m = /^flash-attention-N(\d+)-d(\d+)-M(\d+)$/.exec(id);
+          return { N: Number(m[1]), d: Number(m[2]), M: Number(m[3]) };
+        }
+
+        function buildParamBar() {
+          var state = valueFromId(current);
+          var html = '<div class="l06-params-row">';
+          /* The label is the human name only -- the symbol is rendered as its
+             own chip right after it, so repeating it in the label reads as
+             "SRAM 容量 M M". `N` and `d` are spelled the same as their symbols,
+             which is why this only showed up on the third slider. */
+          [['N', '序列长度'], ['d', 'd_head'], ['M', 'SRAM 容量']].forEach(function (p) {
+            var key = p[0];
+            var opts = manifest.params[key];
+            var i = opts.indexOf(state[key]);
+            html += '<div class="l06-param">' +
+              '<span class="l06-param-label">' + p[1] + '</span>' +
+              '<span class="l06-param-label l06-param-name">' + esc(key) + '</span>' +
+              '<input type="range" min="0" max="' + (opts.length - 1) + '" step="1" value="' + i +
+                '" data-param="' + key + '" aria-label="' + esc(p[1]) + '">' +
+              '<span class="l06-param-val" data-param-val="' + key + '">' +
+                esc(String(state[key])) + '</span>' +
+              '</div>';
+          });
+          html += '<span class="l06-param-hint">改动会载入对应配置的 trace，' +
+            '页面上的数字随之全部变化（' + manifest.traces.length + ' / ' +
+            Object.keys(manifest.skipped || {}).length + ' 格有回放）</span>';
+          html += '</div>';
+
+          /* The derived blocking parameters, printed next to the sliders. The
+             formula is the tutorial's; these numbers are what this script's own
+             `block_plan` produced for the configuration that is now loaded, so
+             the reader can see the slider's effect on B_c / B_r directly rather
+             than through the IO numbers three panels down. */
+          var tr = traces[current];
+          var c = tr.meta.config;
+          html += '<div class="l06-derived">' +
+            '<span><code>B_c = ⌈M/4d⌉</code> = <b>' + c.Bc + '</b></span>' +
+            '<span><code>B_r = min(B_c, d)</code> = <b>' + c.Br + '</b></span>' +
+            '<span><code>T_r</code> = <b>' + c.Tr + '</b></span>' +
+            '<span><code>T_c</code> = <b>' + c.Tc + '</b></span>' +
+            '<span>T_r × T_c = <b>' + c.n_blocks + '</b> 个 tile 对</span>' +
+            '<span>SRAM 峰值 <b>' + tr.meta.sram.used + '</b> / 主导项 <b>' +
+              tr.meta.sram.dominant + '</b> 个元素</span>' +
+            '<span>共 <b>' + c.n_steps + '</b> 步</span>' +
+            '</div>';
+
+          html += '<div class="l06-params-note" id="l06-params-note" hidden></div>';
+
+          paramsHost.innerHTML = html;
+          Array.prototype.forEach.call(
+            paramsHost.querySelectorAll('input[data-param]'),
+            function (input) {
+              input.addEventListener('input', function () {
+                var key = input.dataset.param;
+                var opts = manifest.params[key];
+                var next = {};
+                Object.keys(state).forEach(function (kk) { next[kk] = state[kk]; });
+                next[key] = opts[Number(input.value)];
+                apply(next);
+              });
+            }
+          );
+        }
+
+        function note(msg) {
+          var el = document.getElementById('l06-params-note');
+          if (!el) return;
+          el.hidden = !msg;
+          el.textContent = msg || '';
+        }
+
+        function apply(values) {
+          var id = configId(values);
+          if (manifest.traces.indexOf(id) === -1) {
+            /* Reachable whenever a slider lands on a cell the generator skipped.
+               Reported rather than silently ignored -- and reported with the
+               generator's own reason, so the reader learns why the combination
+               is not a smaller version of the same thing.
+             *
+             * `buildParamBar` FIRST and `note` second, which looks arbitrary and
+             * is not: the bar is rebuilt by replacing `paramsHost.innerHTML`, and
+             * that element CONTAINS the note. Writing the message first means the
+             * rebuild deletes it, and the reader sees the slider snap back with
+             * no explanation -- the exact failure this branch exists to prevent. */
+            buildParamBar();
+            note('这一格没有回放：' + (manifest.skipped[id] || '生成脚本没有产出这一组'));
+            return;
+          }
+          note('');
+          var url = new URL(location.href);
+          url.searchParams.set('cfg', id);
+          url.searchParams.set('step', '0');
+          try { history.replaceState(null, '', url); } catch (e) { /* file:// */ }
+          mount(id);
+        }
+
+        /* ============================================================ mounting */
+        function mount(id) {
+          var trace = traces[id];
+          current = id;
+          if (player) { try { player.destroy(); } catch (e) { /* already gone */ } }
+          stage.innerHTML = '';
+          var slot = document.createElement('main');
+          stage.appendChild(slot);
+
+          var c = trace.meta.config;
+          var m = trace.meta.model;
+
+          /* The two-layer stage: HBM and SRAM, which is the whole reason the
+           * component's layer list is configurable. The `emptyText` is what makes
+           * an absence a statement -- a layer with nothing in it says so. */
+          var stagePanel = LabEngine.tilingStage.panel({
+            id: 'stage',
+            label: '内存层级舞台',
+            layers: [
+              { id: 'HBM', label: 'Global Memory', sub: '容量最大，带宽最低（~900 GB/s）' },
+              { id: 'SRAM', label: 'Shared Memory / SRAM',
+                sub: `${c.Br}×${c.d} 的块在这里算完；容量 M = ${c.M} 个元素`,
+                /* The budget bar is what turns "SRAM 里同时驻留四块" from a
+                 * sentence into an account: it shows the four blocks, the shared
+                 * S/P buffer, and the two row statistics, against M. The
+                 * capacity is a property of the configuration, so it comes from
+                 * the trace's meta -- the component is told a number, and knows
+                 * neither the key name nor the formula. */
+                budget: function (tr) {
+                  return {
+                    capacity: tr.meta.sram.M,
+                    label: 'SRAM 占用账',
+                    note: function (t) {
+                      var s = t.meta.sram;
+                      return '教程的公式只约束主导项 4B_c·d = ' + s.dominant +
+                        '；完整账（' + s.exact + '）峰值 ' + s.used + ' 个元素。' +
+                        'S 与 P 共用一块 B_r×B_c 缓冲 —— P 就地覆盖 S —— 所以只算一份。';
+                    },
+                  };
+                } },
+            ],
+            /* The order the tensors are placed in each layer. HBM first: Q, K, V
+             * are the inputs and O/m/l are what the inner loop keeps writing
+             * back. SRAM second: the blocks of the current (i, j) pair. */
+            order: ['Q', 'K', 'V', 'O', 'm', 'l', 'Q_i', 'K_j', 'V_j', 'O_i',
+                    'S', 'P', 'm_i', 'l_i'],
+            emptyText: '',
+          }, { trace: trace });
+
+          player = LabEngine.lab(trace, {
+            mount: slot,
+            title: 'FlashAttention V1 回放',
+            lead: '外循环遍历 K/V 块、内循环遍历 Q 块（V1 的顺序），每一轮：载入 Q_i、O_i、m_i、ℓ_i，' +
+                  '算 S_ij = Q_i K_jᵀ/√d，抬 m，用修正因子 α = e^(m_old − m_new) 重缩放 ℓ_i 与 O_i，' +
+                  '再写回 HBM。S 和 P 从头到尾只活在 SRAM 里 —— 双层舞台上肉眼可查。' +
+                  '当前配置 N=' + c.N + '、d_head=' + c.d + '、SRAM M=' + c.M +
+                  '，推出 B_c=' + c.Bc + '、B_r=' + c.Br + '，共 ' + c.n_steps + ' 步。',
+            tier: 'num',
+            speed: 900,
+            panels: [
+              stagePanel,
+              { id: 'io', label: 'IO 计数器', render: ioPanel(trace) },
+              { id: 'corr', label: '修正因子放大器', render: corrPanel(trace) },
+              { id: 'curves', label: 'IO 对照曲线（实测）', render: curvePanel(trace) },
+            ],
+            tutorial: {
+              href: '/AIInfraGuide/cuda/模块二-cuda编程与算子优化/61-flashattention-v1详解',
+              label: '返回教程正文：6.1 FlashAttention V1 详解'
+            }
+          });
+
+          /* Compact proof panel. It carries the control group, so a green verdict
+             here means something -- see labs/assets/engine/verify.js. The lab's
+             own claim (S/P never in HBM) is NOT what this checks: the engine's
+             generic jump check folds tensor state, and the headline claim is
+             asserted by the Python side's access log plus the acceptance
+             harness's walk over every rendered frame. */
+          var proof = document.createElement('section');
+          proof.className = 'lab-panel lab-panel-extra';
+          proof.innerHTML = '<div class="lab-panel-hd"><span class="lab-panel-t">自检 · 任意跳转 = 纯函数重建</span>' +
+            '<span class="lab-panel-sub">在浏览器里真跑，不是预期值</span></div>' +
+            '<div class="lab-panel-bd"></div>';
+          slot.appendChild(proof);
+          proof.querySelector('.lab-panel-bd').innerHTML =
+            jumpPanel(trace, player.index)();
+
+          /* Read back by the acceptance harness: the page's own verdict on its
+             own reconstruction, so the harness asserts against the same object
+             the reader sees rather than a re-implementation of it. */
+          window.__labJump = LabEngine.verify.runJumpCheck(trace, player.index);
+
+          buildParamBar();
+
+          /* The stage panel renders into the engine's container, which the player
+             places after the DAG. On L06 the memory traffic IS the subject and the
+             DAG is the index to it, so the stage leads. */
+          var panelEl = document.querySelector('[data-panel="stage"]');
+          if (panelEl) {
+            panelEl.classList.add('lab-stage-panel');
+            document.querySelector('.lab-panel-dag').before(panelEl);
+          }
+
+          /* The player handle, for the acceptance harness in
+           * scripts/verify-flash-attention.py. Exposing it is harmless in
+           * production and it is the only way the harness can assert against the
+           * same object the page drives, rather than against a re-implementation
+           * of it. */
+          window.__p = player;
+          window.__labTrace = trace;
+          window.__labConfig = id;
+        }
+
+        /* Deep-link reporting, on the same terms the player uses for ?step: a bad
+           value is announced rather than silently ignored. */
+        var query = new URLSearchParams(location.search);
+        var messages = [];
+        var requestedCfg = query.get('cfg');
+        if (requestedCfg && manifest.traces.indexOf(requestedCfg) === -1) {
+          messages.push('深链里的 ?cfg=' + requestedCfg + ' 不在本页内联的 ' +
+            manifest.traces.length + ' 个配置里，已载入默认配置 ' + manifest.default +
+            '。' + (manifest.skipped && manifest.skipped[requestedCfg]
+              ? '（这一格被跳过：' + manifest.skipped[requestedCfg] + '）' : ''));
+        }
+        var startId = readUrlConfig() || manifest.default;
+        valueFromId(startId); // fail fast if the manifest's naming drifts
+        mount(startId);
+
+        var requestedStep = query.get('step');
+        if (requestedStep !== null) {
+          var n = parseInt(requestedStep, 10);
+          if (isNaN(n) || n < 0 || n > traces[startId].steps.length - 1) {
+            messages.push('深链里的 ?step=' + requestedStep + ' 超出范围（本配置共 ' +
+              traces[startId].steps.length + ' 步），已停在第一步。');
+          }
+        }
+        if (messages.length) {
+          banner.hidden = false;
+          banner.textContent = messages.join(' ');
+        }
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,159 @@
+{
+ "set": "flash-attention",
+ "lab": "L06",
+ "default": "flash-attention-N8-d16-M256",
+ "params": {
+  "N": [
+   8,
+   16
+  ],
+  "d": [
+   8,
+   16
+  ],
+  "M": [
+   128,
+   256,
+   512,
+   1024
+  ]
+ },
+ "traces": [
+  "flash-attention-N8-d8-M128",
+  "flash-attention-N8-d16-M128",
+  "flash-attention-N8-d16-M256",
+  "flash-attention-N16-d8-M128",
+  "flash-attention-N16-d8-M256",
+  "flash-attention-N16-d16-M256",
+  "flash-attention-N16-d16-M512"
+ ],
+ "labels": {
+  "flash-attention-N8-d8-M128": "N=8 · d=8 · M=128",
+  "flash-attention-N8-d16-M128": "N=8 · d=16 · M=128",
+  "flash-attention-N8-d16-M256": "N=8 · d=16 · M=256",
+  "flash-attention-N16-d8-M128": "N=16 · d=8 · M=128",
+  "flash-attention-N16-d8-M256": "N=16 · d=8 · M=256",
+  "flash-attention-N16-d16-M256": "N=16 · d=16 · M=256",
+  "flash-attention-N16-d16-M512": "N=16 · d=16 · M=512"
+ },
+ "skipped": {
+  "flash-attention-N8-d8-M256": "B_c = 8 时整个序列只够 1 个 K/V 块 —— 没有外循环，行最大值也不会再被抬高，修正因子永远不会触发",
+  "flash-attention-N8-d8-M512": "B_c = ⌈512/(4×8)⌉ = 16 比 N = 8 还大 —— 一块就装下全部，回放里没有分块过程可看",
+  "flash-attention-N8-d8-M1024": "B_c = ⌈1024/(4×8)⌉ = 32 比 N = 8 还大 —— 一块就装下全部，回放里没有分块过程可看",
+  "flash-attention-N8-d16-M512": "B_c = 8 时整个序列只够 1 个 K/V 块 —— 没有外循环，行最大值也不会再被抬高，修正因子永远不会触发",
+  "flash-attention-N8-d16-M1024": "B_c = ⌈1024/(4×16)⌉ = 16 比 N = 8 还大 —— 一块就装下全部，回放里没有分块过程可看",
+  "flash-attention-N16-d8-M512": "B_c = 16 时整个序列只够 1 个 K/V 块 —— 没有外循环，行最大值也不会再被抬高，修正因子永远不会触发",
+  "flash-attention-N16-d8-M1024": "B_c = ⌈1024/(4×8)⌉ = 32 比 N = 16 还大 —— 一块就装下全部，回放里没有分块过程可看",
+  "flash-attention-N16-d16-M128": "B_c = 2 太小，要 64 个 tile 对（约 458 步）—— 本页只回放 ≤ 16 对的组合；它的 IO 由旁边的实测曲线覆盖",
+  "flash-attention-N16-d16-M1024": "B_c = 16 时整个序列只够 1 个 K/V 块 —— 没有外循环，行最大值也不会再被抬高，修正因子永远不会触发"
+ },
+ "notes": "M 是 SRAM 容量（元素个数），B_c / B_r / T_r / T_c 全由它按教程的公式推出：B_c = ⌈M/4d⌉、B_r = min(B_c, d)。滑杆上的每一格合法组合都有一份 trace；skipped 里列的是不做回放的格子与原因（块比序列还大、块不能整除 N，或块太小以致回放步数过多）。",
+ "curves": {
+  "ns": [
+   8,
+   16,
+   32,
+   64,
+   128
+  ],
+  "standard": [
+   {
+    "N": 8,
+    "elements": 512
+   },
+   {
+    "N": 16,
+    "elements": 1536
+   },
+   {
+    "N": 32,
+    "elements": 5120
+   },
+   {
+    "N": 64,
+    "elements": 18432
+   },
+   {
+    "N": 128,
+    "elements": 69632
+   }
+  ],
+  "flash": [
+   {
+    "Bc": 4,
+    "Br": 4,
+    "points": [
+     {
+      "N": 8,
+      "elements": 656
+     },
+     {
+      "N": 16,
+      "elements": 2208
+     },
+     {
+      "N": 32,
+      "elements": 8000
+     },
+     {
+      "N": 64,
+      "elements": 30336
+     },
+     {
+      "N": 128,
+      "elements": 118016
+     }
+    ]
+   },
+   {
+    "Bc": 8,
+    "Br": 8,
+    "points": [
+     {
+      "N": 8,
+      "elements": 432
+     },
+     {
+      "N": 16,
+      "elements": 1312
+     },
+     {
+      "N": 32,
+      "elements": 4416
+     },
+     {
+      "N": 64,
+      "elements": 16000
+     },
+     {
+      "N": 128,
+      "elements": 60672
+     }
+    ]
+   },
+   {
+    "Bc": 16,
+    "Br": 8,
+    "points": [
+     {
+      "N": 16,
+      "elements": 864
+     },
+     {
+      "N": 32,
+      "elements": 2624
+     },
+     {
+      "N": 64,
+      "elements": 8832
+     },
+     {
+      "N": 128,
+      "elements": 32000
+     }
+    ]
+   }
+  ],
+  "note": "同一份计数模型在 N = 8、16、32、64、128 上逐点跑出来的曲线：标准实现的读数与 B_c 无关，FA 的读数随 B_c 下降 —— 这就是 O(N²d²/M) 里那个 M 的来历。"
+ }
+}
