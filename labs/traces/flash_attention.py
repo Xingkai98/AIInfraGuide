@@ -522,12 +522,25 @@ def row_sum_bound(n):
 
 
 def torch_reference(Q, K, V):
-    """Independent reference, deliberately a different library and route."""
+    """Independent reference, deliberately a different library and route.
+
+    The result crosses back through `.tolist()` rather than `.numpy()`, and that
+    is deliberate rather than stylistic. `.numpy()` goes through torch's numpy
+    BRIDGE, which is compiled against the numpy ABI the wheel was built for -- so
+    a CI image that installs an unpinned numpy (2.x) next to `torch==2.2.0`
+    (built against 1.x) fails at that call with "Numpy is not available", after
+    having imported torch successfully and run every pure-torch operation in this
+    function without complaint. `.tolist()` is a plain tensor-to-Python
+    conversion with no numpy involved, so this reference keeps working across
+    that version skew and the failure mode is a wrong number rather than an
+    import error nobody can reproduce locally.
+    """
     Qt = torch.tensor(Q, dtype=torch.float64)
     Kt = torch.tensor(K, dtype=torch.float64)
     Vt = torch.tensor(V, dtype=torch.float64)
     S = Qt @ Kt.T / math.sqrt(Qt.shape[1])
-    return (torch.softmax(S, dim=1) @ Vt).numpy()
+    P = torch.softmax(S, dim=1)
+    return np.array((P @ Vt).tolist(), dtype=np.float64)
 
 
 # =============================================================== trace build
