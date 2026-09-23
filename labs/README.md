@@ -80,9 +80,20 @@ trace 一起内联。清单由 trace 生成脚本自己写出，所以「有哪�
 审阅时不必自己跑一遍）：
 
 ```bash
-npm run build:labs && python3 scripts/verify-labs.py    # 引擎：L00 页面
-npm run build:labs && python3 scripts/verify-ledger.py  # 显存账本视图组件
+npm run build:labs && python3 scripts/verify-labs.py           # 引擎：L00 页面
+npm run build:labs && python3 scripts/verify-tiling-stage.py   # 内存层级舞台视图
+npm run build:labs && python3 scripts/verify-l01-params.py     # L01 滑杆与 Roofline
+npm run build:labs && python3 scripts/verify-ledger.py         # 显存账本视图组件
+npm run build:labs && python3 scripts/verify-gantt.py          # 甘特视图 + L10
+npm run build:labs && python3 scripts/verify-ring.py           # 环形拓扑视图 + L13
+npm run build:labs && python3 scripts/verify-flash-attention.py # L06 旗舰
 ```
+
+> ⚠️ **`npm run build:labs` 不是可选的，也不是一次性的。** 验收脚本驱动的是
+> `public/labs/` 里的**暂存产物**，不是 `labs/` 源文件。合并或拉取之后不重跑它，
+> 脚本就会对着**上一次构建的页面**断言：新加的参数集不在里面，报出来的却是
+> `trace.steps must be an array` 或读不到某个 `LabTraceSets` 条目 —— 看起来像代码坏了，
+> 实际是构建陈旧。**每次 `git merge` / `git pull` 之后先跑一次 `build:labs`。**
 
 `verify-labs.py` 覆盖引擎本身的契约。其中「任意跳转」同时跑纯函数重建与**故意做错的有状态
 对照组** —— 只有对照组确实失败，纯函数的「0 次不一致」才算数；两者都过时脚本会报「无区分力」
