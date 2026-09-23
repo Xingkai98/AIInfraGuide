@@ -177,6 +177,14 @@
    * Each mutation breaks one rule. The lint must catch every one, or the clean
    * verdict it gives the real trace means nothing.
    */
+  /* The last two mutate a step that carries a `corr` block, so they are found
+   * by role rather than by a hard-coded index — how many blocks a trace has is
+   * a property of its input and block size, and the fixture's could change. */
+  function anyCorrStep(t) {
+    for (var i = 0; i < t.steps.length; i++) if (t.steps[i].corr) return i;
+    throw new Error('no step carries a corr block');
+  }
+
   var SABOTAGES = {
     '删掉被读张量的声明与 init': function (t) { delete t.tensors.x; },
     'state 写入未声明的张量': function (t) { t.steps[2].state.ghost = 0; },
@@ -187,7 +195,53 @@
     '步骤没有对应图节点': function (t) { t.graph.nodes.splice(0, 1); },
     '缺一个档位的公式': function (t) { delete t.steps[0].formula.idx; },
     'state 用裸 -Infinity': function (t) { t.steps[0].state.m = '-Infinity'; },
-    'state 用未知哨兵串': function (t) { t.steps[0].state.m = '-inf'; }
+    'state 用未知哨兵串': function (t) { t.steps[0].state.m = '-inf'; },
+    // --- the fields L00's amplifier and comparison panels read
+    'corr 字段不全': function (t) { delete t.steps[anyCorrStep(t)].corr.bias_abs; },
+    'corr.kind 不在词表里': function (t) { t.steps[anyCorrStep(t)].corr.kind = 'maybe'; },
+    'corr 说 identity 但因子不是 1': function (t) {
+      t.steps[anyCorrStep(t)].corr.kind = 'identity';
+    },
+    'corr 说 rescale 但因子大于 1': function (t) {
+      var s = t.steps[anyCorrStep(t)];
+      s.corr.kind = 'rescale';
+      s.corr.factor = 1.4;
+    },
+    'corr 带裸 Infinity': function (t) {
+      t.steps[anyCorrStep(t)].corr.bias_abs = Infinity;
+    },
+    'corr 带裸 NaN': function (t) { t.steps[anyCorrStep(t)].corr.o_uncorrected = NaN; },
+    'corr 挂在没有 region 的步骤上': function (t) {
+      t.steps[0].corr = t.steps[anyCorrStep(t)].corr;
+    },
+    'k 倒退': function (t) { t.steps[4].k = 0; },
+    'k 超出 N': function (t) { t.steps[4].k = 999; },
+    '最后一步没读完': function (t) { t.steps[t.steps.length - 1].k = 0; },
+    '步骤没有 k': function (t) { delete t.steps[2].k; },
+    'meta.correction 缺失': function (t) { delete t.meta.correction; },
+    'meta.correction.per_block 与块数不符': function (t) {
+      t.meta.correction.per_block.pop();
+    },
+    'meta.correction.rescales 数错': function (t) { t.meta.correction.rescales = 99; },
+    'compare 缺失': function (t) { delete t.compare; },
+    'compare 少一条轨迹': function (t) { t.compare.methods.pop(); },
+    'compare 轨迹顺序错': function (t) { t.compare.methods.reverse(); },
+    'compare 帧序列没有覆盖到 reads': function (t) {
+      var safe = t.compare.methods.filter(function (m) { return m.id === 'safe'; })[0];
+      safe.frames.pop();
+    },
+    'compare 的 reads 与 passes 不符': function (t) {
+      var safe = t.compare.methods.filter(function (m) { return m.id === 'safe'; })[0];
+      safe.reads = 2 * t.meta.config.N;
+    },
+    'compare 带裸 NaN': function (t) { t.compare.methods[0].frames[1].out = NaN; },
+    'shift_invariance 缺失': function (t) { delete t.compare.shift_invariance; },
+    'shift_invariance 报了个有限值': function (t) {
+      t.compare.shift_invariance.shifted_final = 1.0;
+    },
+    'shift_invariance 与 online 终值矛盾': function (t) {
+      t.compare.shift_invariance.unshifted_final = 99.0;
+    }
   };
 
   function runLintCheck(trace) {

@@ -1,14 +1,50 @@
 {
  "meta": {
   "lab": "L00",
-  "title": "Online Softmax（1-D，N=4，Bc=2）",
+  "title": "Online Softmax（1-D，N=4，Bc=2，T=1）",
   "source": "docs/guides/模块二-CUDA编程与算子优化/5.2-CUDA Online Softmax实现.md",
   "config": {
    "N": 4,
    "Bc": 2,
+   "T": 1.0,
    "n_blocks": 2
   },
-  "reference": "O = softmax(x)·x = 0.9216596581865774 (torch float64, per-block statistics also cross-checked)"
+  "input": {
+   "raw": [
+    0.83,
+    -0.2,
+    1.4,
+    0.35
+   ],
+   "scaled": [
+    0.83,
+    -0.2,
+    1.4,
+    0.35
+   ],
+   "note": "送入 softmax 的实际输入是 x/T（T = 1），即 tensors.x；x_raw 是未经温度缩放的原始 logits。"
+  },
+  "reference": "O = softmax(x/T)·(x/T) = 0.9216596581865774 (torch float64, per-block statistics also cross-checked)",
+  "correction": {
+   "rescales": 1,
+   "final_o_correct": 0.9216596581865774,
+   "final_o_uncorrected": 0.8426758078647553,
+   "final_bias_abs": 0.07898385032182209,
+   "final_bias_rel": 0.0856974151144119,
+   "note": "「不修正」= 同一条递推里 ℓ 与 acc 的历史永不缩放。",
+   "per_block": [
+    {
+     "n": 1,
+     "kind": "init",
+     "factor": 0.0
+    },
+    {
+     "n": 2,
+     "kind": "rescale",
+     "factor": 0.5655254386995371
+    }
+   ]
+  }
  },
  "tensors": {
   "x": {
@@ -24,7 +60,7 @@
     1.4,
     0.35
    ],
-   "note": "整条序列，全程驻留 HBM"
+   "note": "整条序列，全程驻留 HBM（已按 x/T 缩放，T = 1）"
   },
   "x_blk": {
    "shape": [
@@ -220,6 +256,205 @@
    }
   ]
  },
+ "compare": {
+  "axis": "已从 HBM 读取的元素数 k",
+  "axis_max": 12,
+  "reference": "torch.softmax(x/T)·(x/T)，float64",
+  "methods": [
+   {
+    "id": "naive",
+    "label": "朴素 softmax（不减最大值）",
+    "passes": 1,
+    "reads_factor": 1,
+    "reads": 4,
+    "status": "overflow",
+    "note": "先 exp 再归一，不减最大值。同样的代码在原始 logits 上算得对，一旦 logits 整体变大（这里加 1000 模拟）就先溢出 —— 而 softmax 对整体平移是不变的。",
+    "final": "NaN",
+    "matches_reference": false,
+    "frames": [
+     {
+      "k": 0,
+      "sum_exp": 0.0,
+      "out": null
+     },
+     {
+      "k": 1,
+      "sum_exp": "+\\infty",
+      "out": "NaN"
+     },
+     {
+      "k": 2,
+      "sum_exp": "+\\infty",
+      "out": "NaN"
+     },
+     {
+      "k": 3,
+      "sum_exp": "+\\infty",
+      "out": "NaN"
+     },
+     {
+      "k": 4,
+      "sum_exp": "+\\infty",
+      "out": "NaN"
+     }
+    ]
+   },
+   {
+    "id": "safe",
+    "label": "三遍安全 softmax",
+    "passes": 3,
+    "reads_factor": 3,
+    "reads": 12,
+    "status": "ok",
+    "note": "先扫一遍求最大值，再扫一遍求和，最后扫一遍归一化。正确，但要把 x 读三遍 —— 这正是 online 递推要消掉的代价。",
+    "final": 0.9216596581865774,
+    "matches_reference": true,
+    "frames": [
+     {
+      "k": 0,
+      "pass": 1,
+      "m": "-\\infty",
+      "l": null,
+      "out": null
+     },
+     {
+      "k": 1,
+      "pass": 1,
+      "m": 0.83,
+      "l": null,
+      "out": null
+     },
+     {
+      "k": 2,
+      "pass": 1,
+      "m": 0.83,
+      "l": null,
+      "out": null
+     },
+     {
+      "k": 3,
+      "pass": 1,
+      "m": 1.4,
+      "l": null,
+      "out": null
+     },
+     {
+      "k": 4,
+      "pass": 1,
+      "m": 1.4,
+      "l": null,
+      "out": null
+     },
+     {
+      "k": 5,
+      "pass": 2,
+      "m": 1.4,
+      "l": 0.5655254386995371,
+      "out": null
+     },
+     {
+      "k": 6,
+      "pass": 2,
+      "m": 1.4,
+      "l": 0.7674219566941926,
+      "out": null
+     },
+     {
+      "k": 7,
+      "pass": 2,
+      "m": 1.4,
+      "l": 1.7674219566941924,
+      "out": null
+     },
+     {
+      "k": 8,
+      "pass": 2,
+      "m": 1.4,
+      "l": 2.117359705805348,
+      "out": null
+     },
+     {
+      "k": 9,
+      "pass": 3,
+      "m": 1.4,
+      "l": 2.117359705805348,
+      "out": 0.22168463527177706
+     },
+     {
+      "k": 10,
+      "pass": 3,
+      "m": 1.4,
+      "l": 2.117359705805348,
+      "out": 0.2026140430203898
+     },
+     {
+      "k": 11,
+      "pass": 3,
+      "m": 1.4,
+      "l": 2.117359705805348,
+      "out": 0.8638148754351651
+     },
+     {
+      "k": 12,
+      "pass": 3,
+      "m": 1.4,
+      "l": 2.117359705805348,
+      "out": 0.9216596581865774
+     }
+    ]
+   },
+   {
+    "id": "online",
+    "label": "Online softmax（本页回放）",
+    "passes": 1,
+    "reads_factor": 1,
+    "reads": 4,
+    "status": "ok",
+    "note": "一遍扫描，每块用新的最大值修正历史统计量。读数与朴素版相同，结果与三遍版相同。",
+    "final": 0.9216596581865774,
+    "matches_reference": true,
+    "frames": [
+     {
+      "k": 0,
+      "m": "-\\infty",
+      "l": 0.0,
+      "acc": 0.0,
+      "out": null
+     },
+     {
+      "k": 2,
+      "m": 0.83,
+      "l": 1.3570069605691475,
+      "acc": 0.7585986078861705,
+      "out": 0.5590233727084227
+     },
+     {
+      "k": 4,
+      "m": 1.4,
+      "l": 2.117359705805348,
+      "acc": 1.9514850227105889,
+      "out": 0.9216596581865774
+     }
+    ]
+   }
+  ],
+  "shift_invariance": {
+   "offset": 1000.0,
+   "note": "同一份朴素实现，只把 logits 整体加 1000。数学上 softmax(x + c) = softmax(x)，两个结果应该一模一样。",
+   "unshifted_final": 0.9216596581865775,
+   "unshifted_sum_exp": 8.586317008780096,
+   "shifted_final": "NaN",
+   "shifted_sum_exp": "+\\infty",
+   "reference": 0.9216596581865774
+  },
+  "uncorrected": {
+   "label": "Online（漏掉修正因子）",
+   "note": "同一遍扫描，但 ℓ 与 acc 的历史永不缩放 —— 即忘记乘 e^(m_old − m_new)。与 online 版读取代价完全相同。",
+   "final": 0.8426758078647553,
+   "bias_abs": 0.07898385032182209,
+   "bias_rel": 0.0856974151144119
+  }
+ },
  "steps": [
   {
    "id": "init",
@@ -260,7 +495,8 @@
     "l": 0.0,
     "acc": 0.0
    },
-   "narration": "开始时 m 是 -∞ 而不是 0。如果这里写 0，遇到一整块全是负数的输入，最大值就会被 0 顶掉，后面 exp 全溢出。"
+   "narration": "开始时 m 是 -∞ 而不是 0。如果这里写 0，遇到一整块全是负数的输入，最大值就会被 0 顶掉，后面 exp 全溢出。",
+   "k": 0
   },
   {
    "id": "ld1",
@@ -307,7 +543,8 @@
      -0.2
     ]
    },
-   "narration": "把 x 的第 1 块（下标 0..1）从 HBM 搬进 SRAM。这一步不改任何标量状态，只是把数据挪个位置。"
+   "narration": "把 x 的第 1 块（下标 0..1）从 HBM 搬进 SRAM。这一步不改任何标量状态，只是把数据挪个位置。",
+   "k": 2
   },
   {
    "id": "m1",
@@ -352,7 +589,8 @@
    "state": {
     "m": 0.83
    },
-   "narration": "本块最大值 0.83，比当前的 m 大，m 要抬上去。这是第一块，m 还是 -∞，所以直接取本块最大值。"
+   "narration": "本块最大值 0.83，比当前的 m 大，m 要抬上去。这是第一块，m 还是 -∞，所以直接取本块最大值。",
+   "k": 2
   },
   {
    "id": "l1",
@@ -409,8 +647,19 @@
     "l": 1.3570069605691475
    },
    "narration": "第一块没有历史，修正因子是 0（ℓ 旧值是 0），只加本块的 1 + 0.357 = 1.357。",
+   "k": 2,
    "regions": {
-    "CORR": "修正因子 e^(m_old - m_new) = 0，第一块时恒为 0"
+    "CORR": "INIT · e^(m_old − m_new) = e^(-∞ − 0.83) = 0。第一块没有历史：ℓ 旧值是 0，因子按定义为 0，更新化简成直接求和。 本步为止：修正后 O = 0.559，不修正 O = 0.559，偏差 0（相对 0%）。"
+   },
+   "corr": {
+    "kind": "init",
+    "factor": 0.0,
+    "m_old": "-\\infty",
+    "m_new": 0.83,
+    "o_correct": 0.5590233727084227,
+    "o_uncorrected": 0.5590233727084227,
+    "bias_abs": 0.0,
+    "bias_rel": 0.0
    }
   },
   {
@@ -467,9 +716,20 @@
    "state": {
     "acc": 0.7585986078861705
    },
-   "narration": "和 ℓ 用同一个修正因子 0，把旧的 acc 缩回来，再加上本块的加权和 1·0.83 + 0.357·(-0.2) = 0.7586。这就是 FlashAttention 里对 O 做 rescale 的那一步。",
+   "narration": "第一块，旧的 acc 是 0，直接取本块加权和 1·0.83 + 0.357·(-0.2) = 0.7586。",
+   "k": 2,
    "regions": {
-    "CORR": "修正因子 e^(m_old - m_new) = 0，第一块时恒为 0"
+    "CORR": "INIT · e^(m_old − m_new) = e^(-∞ − 0.83) = 0。第一块没有历史：ℓ 旧值是 0，因子按定义为 0，更新化简成直接求和。 本步为止：修正后 O = 0.559，不修正 O = 0.559，偏差 0（相对 0%）。"
+   },
+   "corr": {
+    "kind": "init",
+    "factor": 0.0,
+    "m_old": "-\\infty",
+    "m_new": 0.83,
+    "o_correct": 0.5590233727084227,
+    "o_uncorrected": 0.5590233727084227,
+    "bias_abs": 0.0,
+    "bias_rel": 0.0
    }
   },
   {
@@ -517,7 +777,8 @@
      0.35
     ]
    },
-   "narration": "把 x 的第 2 块（下标 2..3）从 HBM 搬进 SRAM。这一步不改任何标量状态，只是把数据挪个位置。"
+   "narration": "把 x 的第 2 块（下标 2..3）从 HBM 搬进 SRAM。这一步不改任何标量状态，只是把数据挪个位置。",
+   "k": 4
   },
   {
    "id": "m2",
@@ -562,7 +823,8 @@
    "state": {
     "m": 1.4
    },
-   "narration": "本块最大值 1.4，比当前的 m 大，m 要抬上去。"
+   "narration": "本块最大值 1.4，比当前的 m 大，m 要抬上去。 m 一动，下一步的 ℓ 与 acc 就必须乘修正因子 —— 这是本步真正的后果。",
+   "k": 4
   },
   {
    "id": "l2",
@@ -619,8 +881,19 @@
     "l": 2.117359705805348
    },
    "narration": "m 变了，之前累加的 ℓ 是按旧的 m 算的，所以要乘修正因子 0.5655 把它拉回来；本块的 1 + 0.3499 = 1.35 再加进去。",
+   "k": 4,
    "regions": {
-    "CORR": "修正因子 e^(m_old - m_new) = 0.5655"
+    "CORR": "RESCALE · e^(m_old − m_new) = e^(0.83 − 1.4) = 0.5655。本步 m 被抬高，历史 ℓ 与 acc 是按旧的 m 累加的，必须乘这个因子拉回来。 本步为止：修正后 O = 0.9217，不修正 O = 0.8427，偏差 0.07898（相对 8.57%）。"
+   },
+   "corr": {
+    "kind": "rescale",
+    "factor": 0.5655254386995371,
+    "m_old": 0.83,
+    "m_new": 1.4,
+    "o_correct": 0.9216596581865774,
+    "o_uncorrected": 0.8426758078647553,
+    "bias_abs": 0.07898385032182209,
+    "bias_rel": 0.0856974151144119
    }
   },
   {
@@ -678,8 +951,19 @@
     "acc": 1.9514850227105889
    },
    "narration": "和 ℓ 用同一个修正因子 0.5655，把旧的 acc 缩回来，再加上本块的加权和 1·1.4 + 0.3499·0.35 = 1.522。这就是 FlashAttention 里对 O 做 rescale 的那一步。",
+   "k": 4,
    "regions": {
-    "CORR": "修正因子 e^(m_old - m_new) = 0.5655"
+    "CORR": "RESCALE · e^(m_old − m_new) = e^(0.83 − 1.4) = 0.5655。本步 m 被抬高，历史 ℓ 与 acc 是按旧的 m 累加的，必须乘这个因子拉回来。 本步为止：修正后 O = 0.9217，不修正 O = 0.8427，偏差 0.07898（相对 8.57%）。"
+   },
+   "corr": {
+    "kind": "rescale",
+    "factor": 0.5655254386995371,
+    "m_old": 0.83,
+    "m_new": 1.4,
+    "o_correct": 0.9216596581865774,
+    "o_uncorrected": 0.8426758078647553,
+    "bias_abs": 0.07898385032182209,
+    "bias_rel": 0.0856974151144119
    }
   },
   {
@@ -720,7 +1004,8 @@
    "state": {
     "O": 0.9216596581865774
    },
-   "narration": "整条 trace 只在这里除一次。O = 1.951 / 2.117 = 0.9217，就是 softmax 加权平均，与 torch 的参考实现逐位一致。"
+   "narration": "整条 trace 只在这里除一次。O = 1.951 / 2.117 = 0.9217，就是 softmax 加权平均，与 torch 的参考实现逐位一致。三遍安全版得到同一个数，代价是 3 倍的读数；朴素版读数相同但结果是 NaN。",
+   "k": 4
   }
  ]
 }
