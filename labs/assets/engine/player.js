@@ -309,8 +309,8 @@
           (cfg.lead ? '<p class="lab-lead">' + esc(cfg.lead) + '</p>' : '') +
         '</div>' +
         '<div class="lab-header-meta">' +
-          '<span class="lab-kbd-hint">键盘 <kbd>←</kbd><kbd>→</kbd> <kbd>空格</kbd> ' +
-          '<kbd>Home</kbd>/<kbd>End</kbd></span>' +
+          '<span class="lab-kbd-hint">键盘 <kbd>←</kbd><kbd>→</kbd> 单步 · <kbd>空格</kbd> 播放 · ' +
+          '<kbd>Home</kbd>/<kbd>End</kbd> 首尾 · DAG 节点 <kbd>Tab</kbd> 聚焦、<kbd>↵</kbd> 跳转</span>' +
         '</div>' +
       '</header>' +
 
