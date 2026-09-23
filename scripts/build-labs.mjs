@@ -77,11 +77,94 @@ const traceDir = path.join(srcRoot, 'traces');
 // the page. A marker that is a real HTML comment stands alone on its line.
 const TRACE_MARKER_RE = /^[ \t]*<!--\s*trace:([A-Za-z0-9_-]+)\s*-->[ \t]*$/gm;
 
+// ---------------------------------------------------------------------------
+// Trace SETS.
+//
+// A lab with parameter controls does not ship one trace, it ships a set: one
+// trace per slider position, plus a manifest saying which is which. Writing the
+// set out in the page would make the sliders and the generator two independent
+// lists that can disagree — a slider position with no trace behind it, or a
+// regenerated set the page never picks up.
+//
+//   <!-- traces:online-softmax -->
+//
+// expands to every trace the generator's manifest names, plus the manifest
+// itself. The generator writes that manifest (see labs/traces/online_softmax.py),
+// so the set is defined in exactly one place: the file that produces the data.
+const TRACE_SET_MARKER_RE = /^[ \t]*<!--\s*traces:([A-Za-z0-9_-]+)\s*-->[ \t]*$/gm;
+
+/** Escape a JSON payload for embedding in an inline <script>. */
+function scriptPayload(value) {
+  // `</` would close the <script> early if a payload ever contained it in a
+  // string. Escaping the slash keeps the JSON byte-identical when parsed.
+  return JSON.stringify(value).replace(/<\//g, '<\\/');
+}
+
 let inlined = 0;
 for (const file of await readdir(path.join(srcRoot, 'pages')).catch(() => [])) {
   if (!file.endsWith('.html')) continue;
   const pagePath = path.join(destRoot, file);
   let html = await readFile(pagePath, 'utf8');
+
+  // Expand trace sets first: each one splices in its manifest and the traces the
+  // manifest names, all inside a single <script>.
+  const setNames = [...html.matchAll(TRACE_SET_MARKER_RE)].map((m) => m[1]);
+  for (const setName of setNames) {
+    const manifestPath = path.join(traceDir, `${setName}.manifest.json`);
+    if (!existsSync(manifestPath)) {
+      console.error(
+        `labs/pages/${file} declares trace set "${setName}" but ` +
+          `labs/traces/${setName}.manifest.json does not exist.\n` +
+          `Generate it with the matching labs/traces/*.py script.`
+      );
+      process.exit(1);
+    }
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+    if (!Array.isArray(manifest.traces) || manifest.traces.length === 0) {
+      console.error(`labs/traces/${setName}.manifest.json lists no traces.`);
+      process.exit(1);
+    }
+    if (!manifest.traces.includes(manifest.default)) {
+      console.error(
+        `labs/traces/${setName}.manifest.json: default "${manifest.default}" ` +
+          `is not one of its own traces — the page would open on a missing trace.`
+      );
+      process.exit(1);
+    }
+
+    const parts = [
+      // Both globals are initialised here. A page that inlines only a trace set
+      // (and not a single `trace:` marker) has nothing else to create them, and
+      // the failure is a TypeError inside the generated payload — which reads
+      // like a page bug rather than a build one.
+      'window.LabTraces=window.LabTraces||{};window.LabTraceSets=window.LabTraceSets||{};',
+      `window.LabTraceSets[${JSON.stringify(setName)}]=${scriptPayload(manifest)};`
+    ];
+    for (const name of manifest.traces) {
+      const jsonPath = path.join(traceDir, `${name}.json`);
+      if (!existsSync(jsonPath)) {
+        console.error(
+          `labs/traces/${setName}.manifest.json names trace "${name}", but ` +
+            `labs/traces/${name}.json does not exist.\n` +
+            `The manifest and the trace files have drifted apart — re-run the generator.`
+        );
+        process.exit(1);
+      }
+      parts.push(`window.LabTraces[${JSON.stringify(name)}]=` +
+                 `${scriptPayload(JSON.parse(await readFile(jsonPath, 'utf8')))};`);
+      inlined += 1;
+    }
+
+    const setRe = new RegExp(
+      `^[ \\t]*<!--\\s*traces:${setName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*-->[ \\t]*$`,
+      'm'
+    );
+    if (!setRe.test(html)) {
+      console.error(`labs/pages/${file}: could not locate the trace-set marker for "${setName}"`);
+      process.exit(1);
+    }
+    html = html.replace(setRe, `<script>${parts.join('')}</script>`);
+  }
 
   const names = [...html.matchAll(TRACE_MARKER_RE)].map((m) => m[1]);
   const duplicated = names.filter((n, i) => names.indexOf(n) !== i);
@@ -103,9 +186,6 @@ for (const file of await readdir(path.join(srcRoot, 'pages')).catch(() => [])) {
       process.exit(1);
     }
     const json = JSON.parse(await readFile(jsonPath, 'utf8'));
-    // `</` would close the <script> early if a trace ever contained it in a
-    // string. Escaping the slash keeps the JSON byte-identical when parsed.
-    const payload = JSON.stringify(json).replace(/<\//g, '<\\/');
     // Replace exactly this marker, identified by its own name — a bare global
     // replace would splice the same payload into every marker on the page.
     const markerRe = new RegExp(
@@ -119,16 +199,16 @@ for (const file of await readdir(path.join(srcRoot, 'pages')).catch(() => [])) {
     html = html.replace(
       markerRe,
       `<script>window.LabTraces=window.LabTraces||{};` +
-        `window.LabTraces[${JSON.stringify(name)}]=${payload};</script>`
+        `window.LabTraces[${JSON.stringify(name)}]=${scriptPayload(json)};</script>`
     );
     inlined += 1;
   }
 
-  if (names.length > 0) {
+  if (names.length > 0 || setNames.length > 0) {
     // Every declared trace must have been substituted. A surviving marker means
     // the page would ship a comment where its data should be, and would fail
     // only at runtime in the reader's browser.
-    const leftover = [...html.matchAll(/<!--\s*trace:[A-Za-z0-9_-]+\s*-->/g)];
+    const leftover = [...html.matchAll(/<!--\s*traces?:[A-Za-z0-9_-]+\s*-->/g)];
     if (leftover.length > 0) {
       console.error(
         `labs/pages/${file} still has ${leftover.length} unsubstituted trace marker(s): ` +

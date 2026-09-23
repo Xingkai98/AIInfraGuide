@@ -1,0 +1,1131 @@
+{
+ "meta": {
+  "lab": "L00",
+  "title": "Online Softmax（1-D，N=8，Bc=4，T=0.5）",
+  "source": "docs/guides/模块二-CUDA编程与算子优化/5.2-CUDA Online Softmax实现.md",
+  "config": {
+   "N": 8,
+   "Bc": 4,
+   "T": 0.5,
+   "n_blocks": 2
+  },
+  "input": {
+   "raw": [
+    0.83,
+    -0.2,
+    1.4,
+    0.35,
+    0.12,
+    -1.05,
+    2.1,
+    0.44
+   ],
+   "scaled": [
+    1.66,
+    -0.4,
+    2.8,
+    0.7,
+    0.24,
+    -2.1,
+    4.2,
+    0.88
+   ],
+   "note": "送入 softmax 的实际输入是 x/T（T = 0.5），即 tensors.x；x_raw 是未经温度缩放的原始 logits。"
+  },
+  "reference": "O = softmax(x/T)·(x/T) = 3.564215558282284 (torch float64, per-block statistics also cross-checked)",
+  "correction": {
+   "rescales": 1,
+   "final_o_correct": 3.564215558282284,
+   "final_o_uncorrected": 3.004951745647845,
+   "final_bias_abs": 0.5592638126344389,
+   "final_bias_rel": 0.15691077138554635,
+   "note": "「不修正」= 同一条递推里 ℓ 与 acc 的历史永不缩放。",
+   "per_block": [
+    {
+     "n": 1,
+     "kind": "init",
+     "factor": 0.0
+    },
+    {
+     "n": 2,
+     "kind": "rescale",
+     "factor": 0.24659696394160638
+    }
+   ]
+  }
+ },
+ "tensors": {
+  "x": {
+   "shape": [
+    8
+   ],
+   "dtype": "fp32",
+   "at": "HBM",
+   "role": "input",
+   "init": [
+    1.66,
+    -0.4,
+    2.8,
+    0.7,
+    0.24,
+    -2.1,
+    4.2,
+    0.88
+   ],
+   "note": "整条序列，全程驻留 HBM（已按 x/T 缩放，T = 0.5）"
+  },
+  "x_blk": {
+   "shape": [
+    4
+   ],
+   "dtype": "fp32",
+   "at": "SRAM",
+   "role": "staging",
+   "note": "当前块的临时副本，每块覆盖一次"
+  },
+  "m": {
+   "shape": [],
+   "dtype": "fp32",
+   "at": "register",
+   "role": "state",
+   "note": "运行最大值，标量"
+  },
+  "l": {
+   "shape": [],
+   "dtype": "fp32",
+   "at": "register",
+   "role": "state",
+   "note": "指数和，标量"
+  },
+  "acc": {
+   "shape": [],
+   "dtype": "fp32",
+   "at": "register",
+   "role": "state",
+   "note": "加权累加器，标量"
+  },
+  "O": {
+   "shape": [],
+   "dtype": "fp32",
+   "at": "register",
+   "role": "output",
+   "note": "归一化后的输出，标量"
+  }
+ },
+ "graph": {
+  "nodes": [
+   {
+    "id": "init",
+    "title": "初始化",
+    "kind": "state",
+    "op": "init",
+    "phase": "准备"
+   },
+   {
+    "id": "ld1",
+    "title": "第 1 块载入 SRAM",
+    "kind": "comm",
+    "op": "load",
+    "phase": "取数"
+   },
+   {
+    "id": "m1",
+    "title": "第 1 块：更新运行最大值 m",
+    "kind": "op",
+    "op": "max",
+    "phase": "统计量更新"
+   },
+   {
+    "id": "l1",
+    "title": "第 1 块：更新指数和 ℓ",
+    "kind": "op",
+    "op": "sum-exp",
+    "phase": "统计量更新"
+   },
+   {
+    "id": "a1",
+    "title": "第 1 块：更新累加器 acc",
+    "kind": "op",
+    "op": "fma",
+    "phase": "输出更新"
+   },
+   {
+    "id": "ld2",
+    "title": "第 2 块载入 SRAM",
+    "kind": "comm",
+    "op": "load",
+    "phase": "取数"
+   },
+   {
+    "id": "m2",
+    "title": "第 2 块：更新运行最大值 m",
+    "kind": "op",
+    "op": "max",
+    "phase": "统计量更新"
+   },
+   {
+    "id": "l2",
+    "title": "第 2 块：更新指数和 ℓ",
+    "kind": "op",
+    "op": "sum-exp",
+    "phase": "统计量更新"
+   },
+   {
+    "id": "a2",
+    "title": "第 2 块：更新累加器 acc",
+    "kind": "op",
+    "op": "fma",
+    "phase": "输出更新"
+   },
+   {
+    "id": "fin",
+    "title": "收尾：归一化",
+    "kind": "op",
+    "op": "div",
+    "phase": "收尾"
+   }
+  ],
+  "edges": [
+   {
+    "from": "init",
+    "to": "m1",
+    "tensor": "m"
+   },
+   {
+    "from": "init",
+    "to": "l1",
+    "tensor": "l"
+   },
+   {
+    "from": "init",
+    "to": "a1",
+    "tensor": "acc"
+   },
+   {
+    "from": "ld1",
+    "to": "m1",
+    "tensor": "x_blk"
+   },
+   {
+    "from": "m1",
+    "to": "l1",
+    "tensor": "m"
+   },
+   {
+    "from": "m1",
+    "to": "a1",
+    "tensor": "m"
+   },
+   {
+    "from": "l1",
+    "to": "a1",
+    "tensor": "l"
+   },
+   {
+    "from": "m1",
+    "to": "m2",
+    "tensor": "m"
+   },
+   {
+    "from": "l1",
+    "to": "l2",
+    "tensor": "l"
+   },
+   {
+    "from": "a1",
+    "to": "a2",
+    "tensor": "acc"
+   },
+   {
+    "from": "ld2",
+    "to": "m2",
+    "tensor": "x_blk"
+   },
+   {
+    "from": "m2",
+    "to": "l2",
+    "tensor": "m"
+   },
+   {
+    "from": "m2",
+    "to": "a2",
+    "tensor": "m"
+   },
+   {
+    "from": "l2",
+    "to": "a2",
+    "tensor": "l"
+   },
+   {
+    "from": "a2",
+    "to": "fin",
+    "tensor": "acc"
+   },
+   {
+    "from": "l2",
+    "to": "fin",
+    "tensor": "l"
+   }
+  ]
+ },
+ "compare": {
+  "axis": "已从 HBM 读取的元素数 k",
+  "axis_max": 24,
+  "reference": "torch.softmax(x/T)·(x/T)，float64",
+  "methods": [
+   {
+    "id": "naive",
+    "label": "朴素 softmax（不减最大值）",
+    "passes": 1,
+    "reads_factor": 1,
+    "reads": 8,
+    "status": "overflow",
+    "note": "先 exp 再归一，不减最大值。同样的代码在原始 logits 上算得对，一旦 logits 整体变大（这里加 1000 模拟）就先溢出 —— 而 softmax 对整体平移是不变的。",
+    "final": "NaN",
+    "matches_reference": false,
+    "frames": [
+     {
+      "k": 0,
+      "sum_exp": 0.0,
+      "out": null
+     },
+     {
+      "k": 1,
+      "sum_exp": "+\\infty",
+      "out": "NaN"
+     },
+     {
+      "k": 2,
+      "sum_exp": "+\\infty",
+      "out": "NaN"
+     },
+     {
+      "k": 3,
+      "sum_exp": "+\\infty",
+      "out": "NaN"
+     },
+     {
+      "k": 4,
+      "sum_exp": "+\\infty",
+      "out": "NaN"
+     },
+     {
+      "k": 5,
+      "sum_exp": "+\\infty",
+      "out": "NaN"
+     },
+     {
+      "k": 6,
+      "sum_exp": "+\\infty",
+      "out": "NaN"
+     },
+     {
+      "k": 7,
+      "sum_exp": "+\\infty",
+      "out": "NaN"
+     },
+     {
+      "k": 8,
+      "sum_exp": "+\\infty",
+      "out": "NaN"
+     }
+    ]
+   },
+   {
+    "id": "safe",
+    "label": "三遍安全 softmax",
+    "passes": 3,
+    "reads_factor": 3,
+    "reads": 24,
+    "status": "ok",
+    "note": "先扫一遍求最大值，再扫一遍求和，最后扫一遍归一化。正确，但要把 x 读三遍 —— 这正是 online 递推要消掉的代价。",
+    "final": 3.564215558282284,
+    "matches_reference": true,
+    "frames": [
+     {
+      "k": 0,
+      "pass": 1,
+      "m": "-\\infty",
+      "l": null,
+      "out": null
+     },
+     {
+      "k": 1,
+      "pass": 1,
+      "m": 1.66,
+      "l": null,
+      "out": null
+     },
+     {
+      "k": 2,
+      "pass": 1,
+      "m": 1.66,
+      "l": null,
+      "out": null
+     },
+     {
+      "k": 3,
+      "pass": 1,
+      "m": 2.8,
+      "l": null,
+      "out": null
+     },
+     {
+      "k": 4,
+      "pass": 1,
+      "m": 2.8,
+      "l": null,
+      "out": null
+     },
+     {
+      "k": 5,
+      "pass": 1,
+      "m": 2.8,
+      "l": null,
+      "out": null
+     },
+     {
+      "k": 6,
+      "pass": 1,
+      "m": 2.8,
+      "l": null,
+      "out": null
+     },
+     {
+      "k": 7,
+      "pass": 1,
+      "m": 4.2,
+      "l": null,
+      "out": null
+     },
+     {
+      "k": 8,
+      "pass": 1,
+      "m": 4.2,
+      "l": null,
+      "out": null
+     },
+     {
+      "k": 9,
+      "pass": 2,
+      "m": 4.2,
+      "l": 0.07886639979067495,
+      "out": null
+     },
+     {
+      "k": 10,
+      "pass": 2,
+      "m": 4.2,
+      "l": 0.08891823553530852,
+      "out": null
+     },
+     {
+      "k": 11,
+      "pass": 2,
+      "m": 4.2,
+      "l": 0.3355151994769149,
+      "out": null
+     },
+     {
+      "k": 12,
+      "pass": 2,
+      "m": 4.2,
+      "l": 0.36571258289923336,
+      "out": null
+     },
+     {
+      "k": 13,
+      "pass": 2,
+      "m": 4.2,
+      "l": 0.384775697190845,
+      "out": null
+     },
+     {
+      "k": 14,
+      "pass": 2,
+      "m": 4.2,
+      "l": 0.3866120019678739,
+      "out": null
+     },
+     {
+      "k": 15,
+      "pass": 2,
+      "m": 4.2,
+      "l": 1.3866120019678738,
+      "out": null
+     },
+     {
+      "k": 16,
+      "pass": 2,
+      "m": 4.2,
+      "l": 1.4227648337219203,
+      "out": null
+     },
+     {
+      "k": 17,
+      "pass": 3,
+      "m": 4.2,
+      "l": 1.4227648337219203,
+      "out": 0.09201676942635792
+     },
+     {
+      "k": 18,
+      "pass": 3,
+      "m": 4.2,
+      "l": 1.4227648337219203,
+      "out": 0.0891907688094216
+     },
+     {
+      "k": 19,
+      "pass": 3,
+      "m": 4.2,
+      "l": 1.4227648337219203,
+      "out": 0.574493387113699
+     },
+     {
+      "k": 20,
+      "pass": 3,
+      "m": 4.2,
+      "l": 1.4227648337219203,
+      "out": 0.5893504934285395
+     },
+     {
+      "k": 21,
+      "pass": 3,
+      "m": 4.2,
+      "l": 1.4227648337219203,
+      "out": 0.5925661671094937
+     },
+     {
+      "k": 22,
+      "pass": 3,
+      "m": 4.2,
+      "l": 1.4227648337219203,
+      "out": 0.5898557824131889
+     },
+     {
+      "k": 23,
+      "pass": 3,
+      "m": 4.2,
+      "l": 1.4227648337219203,
+      "out": 3.5418545248988997
+     },
+     {
+      "k": 24,
+      "pass": 3,
+      "m": 4.2,
+      "l": 1.4227648337219203,
+      "out": 3.564215558282284
+     }
+    ]
+   },
+   {
+    "id": "online",
+    "label": "Online softmax（本页回放）",
+    "passes": 1,
+    "reads_factor": 1,
+    "reads": 8,
+    "status": "ok",
+    "note": "一遍扫描，每块用新的最大值修正历史统计量。读数与朴素版相同，结果与三遍版相同。",
+    "final": 3.564215558282284,
+    "matches_reference": true,
+    "frames": [
+     {
+      "k": 0,
+      "m": "-\\infty",
+      "l": 0.0,
+      "acc": 0.0,
+      "out": null
+     },
+     {
+      "k": 4,
+      "m": 2.8,
+      "l": 1.483037654047652,
+      "acc": 3.4003141944008055,
+      "out": 2.2928036824421376
+     },
+     {
+      "k": 8,
+      "m": 4.2,
+      "l": 1.4227648337219203,
+      "acc": 5.071040556128575,
+      "out": 3.564215558282284
+     }
+    ]
+   }
+  ],
+  "shift_invariance": {
+   "offset": 1000.0,
+   "note": "同一份朴素实现，只把 logits 整体加 1000。数学上 softmax(x + c) = softmax(x)，两个结果应该一模一样。",
+   "unshifted_final": 3.564215558282284,
+   "unshifted_sum_exp": 94.8789666949668,
+   "shifted_final": "NaN",
+   "shifted_sum_exp": "+\\infty",
+   "reference": 3.564215558282284
+  },
+  "uncorrected": {
+   "label": "Online（漏掉修正因子）",
+   "note": "同一遍扫描，但 ℓ 与 acc 的历史永不缩放 —— 即忘记乘 e^(m_old − m_new)。与 online 版读取代价完全相同。",
+   "final": 3.004951745647845,
+   "bias_abs": 0.5592638126344389,
+   "bias_rel": 0.15691077138554635
+  }
+ },
+ "steps": [
+  {
+   "id": "init",
+   "title": "初始化",
+   "kind": "state",
+   "op": "init",
+   "phase": "准备",
+   "formula": {
+    "sym": "m^{(0)} = \\slot{m0},\\quad \\ell^{(0)} = \\slot{l0},\\quad \\mathrm{acc}^{(0)} = \\slot{a0}",
+    "idx": "m^{(0)} = \\slot{m0},\\quad \\ell^{(0)} = \\slot{l0},\\quad \\mathrm{acc}^{(0)} = \\slot{a0}",
+    "num": "m^{(0)} = \\slot{m0},\\quad \\ell^{(0)} = \\slot{l0},\\quad \\mathrm{acc}^{(0)} = \\slot{a0}"
+   },
+   "bindings": {
+    "m0": {
+     "sym": "-\\infty",
+     "idx": "-\\infty",
+     "num": "-\\infty"
+    },
+    "l0": {
+     "sym": "0",
+     "idx": "0",
+     "num": "0"
+    },
+    "a0": {
+     "sym": "0",
+     "idx": "0",
+     "num": "0"
+    }
+   },
+   "reads": [],
+   "writes": [
+    "m",
+    "l",
+    "acc"
+   ],
+   "state": {
+    "m": "-\\infty",
+    "l": 0.0,
+    "acc": 0.0
+   },
+   "narration": "开始时 m 是 -∞ 而不是 0。如果这里写 0，遇到一整块全是负数的输入，最大值就会被 0 顶掉，后面 exp 全溢出。",
+   "k": 0
+  },
+  {
+   "id": "ld1",
+   "title": "第 1 块载入 SRAM",
+   "kind": "comm",
+   "op": "load",
+   "phase": "取数",
+   "formula": {
+    "sym": "x^{(j)} \\leftarrow \\mathrm{HBM}[\\,x\\,]\\left[\\,(j-1)B_c \\,:\\, jB_c\\,\\right]",
+    "idx": "x^{(\\slot{J})} \\leftarrow \\mathrm{HBM}[\\,x\\,]\\left[\\slot{LO} : \\slot{HI}\\right]",
+    "num": "x^{(\\slot{J})} \\leftarrow \\mathrm{HBM}[\\,x\\,]\\left[\\slot{LO} : \\slot{HI}\\right] = \\slot{VALS}"
+   },
+   "bindings": {
+    "J": {
+     "sym": "j",
+     "idx": "1",
+     "num": "1"
+    },
+    "LO": {
+     "sym": "(j-1)B_c",
+     "idx": "0",
+     "num": "0"
+    },
+    "HI": {
+     "sym": "jB_c",
+     "idx": "4",
+     "num": "4"
+    },
+    "VALS": {
+     "sym": "[\\cdot]",
+     "idx": "[\\cdot]",
+     "num": "\\left[1.66, -0.4, 2.8, 0.7\\right]"
+    }
+   },
+   "reads": [
+    "x"
+   ],
+   "writes": [
+    "x_blk"
+   ],
+   "state": {
+    "x_blk": [
+     1.66,
+     -0.4,
+     2.8,
+     0.7
+    ]
+   },
+   "narration": "把 x 的第 1 块（下标 0..3）从 HBM 搬进 SRAM。这一步不改任何标量状态，只是把数据挪个位置。注意 x 已经是 x_raw / T（T = 0.5）之后的值，温度只在这里体现为数值本身。",
+   "k": 4
+  },
+  {
+   "id": "m1",
+   "title": "第 1 块：更新运行最大值 m",
+   "kind": "op",
+   "op": "max",
+   "phase": "统计量更新",
+   "formula": {
+    "sym": "m^{(j)} = \\max\\left(\\slot{MOLD},\\; \\slot{BLKMAX}\\right)",
+    "idx": "m^{(\\slot{J})} = \\max\\left(\\slot{MOLD},\\; \\slot{BLKMAX}\\right)",
+    "num": "m^{(\\slot{J})} = \\max\\left(\\slot{MOLD},\\; \\slot{BLKMAX}\\right) = \\slot{MNEW}"
+   },
+   "bindings": {
+    "J": {
+     "sym": "j",
+     "idx": "1",
+     "num": "1"
+    },
+    "MOLD": {
+     "sym": "m^{(j-1)}",
+     "idx": "m^{0}",
+     "num": "-\\infty"
+    },
+    "BLKMAX": {
+     "sym": "\\max_i x^{(j)}_i",
+     "idx": "\\max_i x^{1}_i",
+     "num": "2.8"
+    },
+    "MNEW": {
+     "sym": "m^{(j)}",
+     "idx": "m^{1}",
+     "num": "2.8"
+    }
+   },
+   "reads": [
+    "x_blk",
+    "m"
+   ],
+   "writes": [
+    "m"
+   ],
+   "state": {
+    "m": 2.8
+   },
+   "narration": "本块最大值 2.8，比当前的 m 大，m 要抬上去。这是第一块，m 还是 -∞，所以直接取本块最大值。",
+   "k": 4
+  },
+  {
+   "id": "l1",
+   "title": "第 1 块：更新指数和 ℓ",
+   "kind": "op",
+   "op": "sum-exp",
+   "phase": "统计量更新",
+   "formula": {
+    "sym": "\\ell^{(j)} = \\slot{LOLD}\\cdot \\region{CORR}{\\exp\\left(m^{(j-1)} - m^{(j)}\\right)} + \\sum_i \\exp\\left(x^{(j)}_i - m^{(j)}\\right)",
+    "idx": "\\ell^{(\\slot{J})} = \\slot{LOLD}\\cdot \\region{CORR}{\\exp\\left(\\slot{MOLD} - \\slot{MNEW}\\right)} + \\slot{SUM}",
+    "num": "\\ell^{(\\slot{J})} = \\slot{LOLD}\\cdot \\region{CORR}{\\exp\\left(\\slot{MOLD} - \\slot{MNEW}\\right)} + \\slot{SUM} = \\slot{LNEW}"
+   },
+   "bindings": {
+    "J": {
+     "sym": "j",
+     "idx": "1",
+     "num": "1"
+    },
+    "LOLD": {
+     "sym": "\\ell^{(j-1)}",
+     "idx": "\\ell^{0}",
+     "num": "0"
+    },
+    "MOLD": {
+     "sym": "m^{(j-1)}",
+     "idx": "m^{0}",
+     "num": "-\\infty"
+    },
+    "MNEW": {
+     "sym": "m^{(j)}",
+     "idx": "m^{1}",
+     "num": "2.8"
+    },
+    "SUM": {
+     "sym": "\\sum_i \\exp(x^{(j)}_i - m^{(j)})",
+     "idx": "\\sum_i \\exp(x^{1}_i - m^{1})",
+     "num": "0.3198 + 0.04076 + 1 + 0.1225"
+    },
+    "LNEW": {
+     "sym": "\\ell^{(j)}",
+     "idx": "\\ell^{1}",
+     "num": "1.483"
+    }
+   },
+   "reads": [
+    "x_blk",
+    "m",
+    "l"
+   ],
+   "writes": [
+    "l"
+   ],
+   "state": {
+    "l": 1.483037654047652
+   },
+   "narration": "第一块没有历史，修正因子是 0（ℓ 旧值是 0），只加本块的 0.3198 + 0.04076 + 1 + 0.1225 = 1.483。",
+   "k": 4,
+   "regions": {
+    "CORR": "INIT · e^(m_old − m_new) = e^(-∞ − 2.8) = 0。第一块没有历史：ℓ 旧值是 0，因子按定义为 0，更新化简成直接求和。 本步为止：修正后 O = 2.293，不修正 O = 2.293，偏差 0（相对 0%）。"
+   },
+   "corr": {
+    "kind": "init",
+    "factor": 0.0,
+    "m_old": "-\\infty",
+    "m_new": 2.8,
+    "o_correct": 2.2928036824421376,
+    "o_uncorrected": 2.2928036824421376,
+    "bias_abs": 0.0,
+    "bias_rel": 0.0
+   }
+  },
+  {
+   "id": "a1",
+   "title": "第 1 块：更新累加器 acc",
+   "kind": "op",
+   "op": "fma",
+   "phase": "输出更新",
+   "formula": {
+    "sym": "\\mathrm{acc}^{(j)} = \\slot{AOLD}\\cdot \\region{CORR}{\\exp\\left(m^{(j-1)} - m^{(j)}\\right)} + \\sum_i \\exp\\left(x^{(j)}_i - m^{(j)}\\right)\\cdot x^{(j)}_i",
+    "idx": "\\mathrm{acc}^{(\\slot{J})} = \\slot{AOLD}\\cdot \\region{CORR}{\\exp\\left(\\slot{MOLD} - \\slot{MNEW}\\right)} + \\slot{WSUM}",
+    "num": "\\mathrm{acc}^{(\\slot{J})} = \\slot{AOLD}\\cdot \\region{CORR}{\\exp\\left(\\slot{MOLD} - \\slot{MNEW}\\right)} + \\slot{WSUM} = \\slot{ANEW}"
+   },
+   "bindings": {
+    "J": {
+     "sym": "j",
+     "idx": "1",
+     "num": "1"
+    },
+    "AOLD": {
+     "sym": "\\mathrm{acc}^{(j-1)}",
+     "idx": "\\mathrm{acc}^{0}",
+     "num": "0"
+    },
+    "MOLD": {
+     "sym": "m^{(j-1)}",
+     "idx": "m^{0}",
+     "num": "-\\infty"
+    },
+    "MNEW": {
+     "sym": "m^{(j)}",
+     "idx": "m^{1}",
+     "num": "2.8"
+    },
+    "WSUM": {
+     "sym": "\\sum_i \\exp(x^{(j)}_i - m^{(j)})\\cdot x^{(j)}_i",
+     "idx": "\\sum_i \\exp(x^{1}_i - m^{1})\\cdot x^{1}_i",
+     "num": "0.3198\\cdot 1.66 + 0.04076\\cdot \\left(-0.4\\right) + 1\\cdot 2.8 + 0.1225\\cdot 0.7"
+    },
+    "ANEW": {
+     "sym": "\\mathrm{acc}^{(j)}",
+     "idx": "\\mathrm{acc}^{1}",
+     "num": "3.4"
+    }
+   },
+   "reads": [
+    "x_blk",
+    "m",
+    "acc"
+   ],
+   "writes": [
+    "acc"
+   ],
+   "state": {
+    "acc": 3.4003141944008055
+   },
+   "narration": "第一块，旧的 acc 是 0，直接取本块加权和 0.3198·1.66 + 0.04076·(-0.4) + 1·2.8 + 0.1225·0.7 = 3.4。",
+   "k": 4,
+   "regions": {
+    "CORR": "INIT · e^(m_old − m_new) = e^(-∞ − 2.8) = 0。第一块没有历史：ℓ 旧值是 0，因子按定义为 0，更新化简成直接求和。 本步为止：修正后 O = 2.293，不修正 O = 2.293，偏差 0（相对 0%）。"
+   },
+   "corr": {
+    "kind": "init",
+    "factor": 0.0,
+    "m_old": "-\\infty",
+    "m_new": 2.8,
+    "o_correct": 2.2928036824421376,
+    "o_uncorrected": 2.2928036824421376,
+    "bias_abs": 0.0,
+    "bias_rel": 0.0
+   }
+  },
+  {
+   "id": "ld2",
+   "title": "第 2 块载入 SRAM",
+   "kind": "comm",
+   "op": "load",
+   "phase": "取数",
+   "formula": {
+    "sym": "x^{(j)} \\leftarrow \\mathrm{HBM}[\\,x\\,]\\left[\\,(j-1)B_c \\,:\\, jB_c\\,\\right]",
+    "idx": "x^{(\\slot{J})} \\leftarrow \\mathrm{HBM}[\\,x\\,]\\left[\\slot{LO} : \\slot{HI}\\right]",
+    "num": "x^{(\\slot{J})} \\leftarrow \\mathrm{HBM}[\\,x\\,]\\left[\\slot{LO} : \\slot{HI}\\right] = \\slot{VALS}"
+   },
+   "bindings": {
+    "J": {
+     "sym": "j",
+     "idx": "2",
+     "num": "2"
+    },
+    "LO": {
+     "sym": "(j-1)B_c",
+     "idx": "4",
+     "num": "4"
+    },
+    "HI": {
+     "sym": "jB_c",
+     "idx": "8",
+     "num": "8"
+    },
+    "VALS": {
+     "sym": "[\\cdot]",
+     "idx": "[\\cdot]",
+     "num": "\\left[0.24, -2.1, 4.2, 0.88\\right]"
+    }
+   },
+   "reads": [
+    "x"
+   ],
+   "writes": [
+    "x_blk"
+   ],
+   "state": {
+    "x_blk": [
+     0.24,
+     -2.1,
+     4.2,
+     0.88
+    ]
+   },
+   "narration": "把 x 的第 2 块（下标 4..7）从 HBM 搬进 SRAM。这一步不改任何标量状态，只是把数据挪个位置。注意 x 已经是 x_raw / T（T = 0.5）之后的值，温度只在这里体现为数值本身。",
+   "k": 8
+  },
+  {
+   "id": "m2",
+   "title": "第 2 块：更新运行最大值 m",
+   "kind": "op",
+   "op": "max",
+   "phase": "统计量更新",
+   "formula": {
+    "sym": "m^{(j)} = \\max\\left(\\slot{MOLD},\\; \\slot{BLKMAX}\\right)",
+    "idx": "m^{(\\slot{J})} = \\max\\left(\\slot{MOLD},\\; \\slot{BLKMAX}\\right)",
+    "num": "m^{(\\slot{J})} = \\max\\left(\\slot{MOLD},\\; \\slot{BLKMAX}\\right) = \\slot{MNEW}"
+   },
+   "bindings": {
+    "J": {
+     "sym": "j",
+     "idx": "2",
+     "num": "2"
+    },
+    "MOLD": {
+     "sym": "m^{(j-1)}",
+     "idx": "m^{1}",
+     "num": "2.8"
+    },
+    "BLKMAX": {
+     "sym": "\\max_i x^{(j)}_i",
+     "idx": "\\max_i x^{2}_i",
+     "num": "4.2"
+    },
+    "MNEW": {
+     "sym": "m^{(j)}",
+     "idx": "m^{2}",
+     "num": "4.2"
+    }
+   },
+   "reads": [
+    "x_blk",
+    "m"
+   ],
+   "writes": [
+    "m"
+   ],
+   "state": {
+    "m": 4.2
+   },
+   "narration": "本块最大值 4.2，比当前的 m 大，m 要抬上去。 m 一动，下一步的 ℓ 与 acc 就必须乘修正因子 —— 这是本步真正的后果。",
+   "k": 8
+  },
+  {
+   "id": "l2",
+   "title": "第 2 块：更新指数和 ℓ",
+   "kind": "op",
+   "op": "sum-exp",
+   "phase": "统计量更新",
+   "formula": {
+    "sym": "\\ell^{(j)} = \\slot{LOLD}\\cdot \\region{CORR}{\\exp\\left(m^{(j-1)} - m^{(j)}\\right)} + \\sum_i \\exp\\left(x^{(j)}_i - m^{(j)}\\right)",
+    "idx": "\\ell^{(\\slot{J})} = \\slot{LOLD}\\cdot \\region{CORR}{\\exp\\left(\\slot{MOLD} - \\slot{MNEW}\\right)} + \\slot{SUM}",
+    "num": "\\ell^{(\\slot{J})} = \\slot{LOLD}\\cdot \\region{CORR}{\\exp\\left(\\slot{MOLD} - \\slot{MNEW}\\right)} + \\slot{SUM} = \\slot{LNEW}"
+   },
+   "bindings": {
+    "J": {
+     "sym": "j",
+     "idx": "2",
+     "num": "2"
+    },
+    "LOLD": {
+     "sym": "\\ell^{(j-1)}",
+     "idx": "\\ell^{1}",
+     "num": "1.483"
+    },
+    "MOLD": {
+     "sym": "m^{(j-1)}",
+     "idx": "m^{1}",
+     "num": "2.8"
+    },
+    "MNEW": {
+     "sym": "m^{(j)}",
+     "idx": "m^{2}",
+     "num": "4.2"
+    },
+    "SUM": {
+     "sym": "\\sum_i \\exp(x^{(j)}_i - m^{(j)})",
+     "idx": "\\sum_i \\exp(x^{2}_i - m^{2})",
+     "num": "0.01906 + 0.001836 + 1 + 0.03615"
+    },
+    "LNEW": {
+     "sym": "\\ell^{(j)}",
+     "idx": "\\ell^{2}",
+     "num": "1.423"
+    }
+   },
+   "reads": [
+    "x_blk",
+    "m",
+    "l"
+   ],
+   "writes": [
+    "l"
+   ],
+   "state": {
+    "l": 1.4227648337219203
+   },
+   "narration": "m 变了，之前累加的 ℓ 是按旧的 m 算的，所以要乘修正因子 0.2466 把它拉回来；本块的 0.01906 + 0.001836 + 1 + 0.03615 = 1.057 再加进去。",
+   "k": 8,
+   "regions": {
+    "CORR": "RESCALE · e^(m_old − m_new) = e^(2.8 − 4.2) = 0.2466。本步 m 被抬高，历史 ℓ 与 acc 是按旧的 m 累加的，必须乘这个因子拉回来。 本步为止：修正后 O = 3.564，不修正 O = 3.005，偏差 0.5593（相对 15.69%）。"
+   },
+   "corr": {
+    "kind": "rescale",
+    "factor": 0.24659696394160638,
+    "m_old": 2.8,
+    "m_new": 4.2,
+    "o_correct": 3.564215558282284,
+    "o_uncorrected": 3.004951745647845,
+    "bias_abs": 0.5592638126344389,
+    "bias_rel": 0.15691077138554635
+   }
+  },
+  {
+   "id": "a2",
+   "title": "第 2 块：更新累加器 acc",
+   "kind": "op",
+   "op": "fma",
+   "phase": "输出更新",
+   "formula": {
+    "sym": "\\mathrm{acc}^{(j)} = \\slot{AOLD}\\cdot \\region{CORR}{\\exp\\left(m^{(j-1)} - m^{(j)}\\right)} + \\sum_i \\exp\\left(x^{(j)}_i - m^{(j)}\\right)\\cdot x^{(j)}_i",
+    "idx": "\\mathrm{acc}^{(\\slot{J})} = \\slot{AOLD}\\cdot \\region{CORR}{\\exp\\left(\\slot{MOLD} - \\slot{MNEW}\\right)} + \\slot{WSUM}",
+    "num": "\\mathrm{acc}^{(\\slot{J})} = \\slot{AOLD}\\cdot \\region{CORR}{\\exp\\left(\\slot{MOLD} - \\slot{MNEW}\\right)} + \\slot{WSUM} = \\slot{ANEW}"
+   },
+   "bindings": {
+    "J": {
+     "sym": "j",
+     "idx": "2",
+     "num": "2"
+    },
+    "AOLD": {
+     "sym": "\\mathrm{acc}^{(j-1)}",
+     "idx": "\\mathrm{acc}^{1}",
+     "num": "3.4"
+    },
+    "MOLD": {
+     "sym": "m^{(j-1)}",
+     "idx": "m^{1}",
+     "num": "2.8"
+    },
+    "MNEW": {
+     "sym": "m^{(j)}",
+     "idx": "m^{2}",
+     "num": "4.2"
+    },
+    "WSUM": {
+     "sym": "\\sum_i \\exp(x^{(j)}_i - m^{(j)})\\cdot x^{(j)}_i",
+     "idx": "\\sum_i \\exp(x^{2}_i - m^{2})\\cdot x^{2}_i",
+     "num": "0.01906\\cdot 0.24 + 0.001836\\cdot \\left(-2.1\\right) + 1\\cdot 4.2 + 0.03615\\cdot 0.88"
+    },
+    "ANEW": {
+     "sym": "\\mathrm{acc}^{(j)}",
+     "idx": "\\mathrm{acc}^{2}",
+     "num": "5.071"
+    }
+   },
+   "reads": [
+    "x_blk",
+    "m",
+    "acc"
+   ],
+   "writes": [
+    "acc"
+   ],
+   "state": {
+    "acc": 5.071040556128575
+   },
+   "narration": "和 ℓ 用同一个修正因子 0.2466，把旧的 acc 缩回来，再加上本块的加权和 0.01906·0.24 + 0.001836·(-2.1) + 1·4.2 + 0.03615·0.88 = 4.233。这就是 FlashAttention 里对 O 做 rescale 的那一步。",
+   "k": 8,
+   "regions": {
+    "CORR": "RESCALE · e^(m_old − m_new) = e^(2.8 − 4.2) = 0.2466。本步 m 被抬高，历史 ℓ 与 acc 是按旧的 m 累加的，必须乘这个因子拉回来。 本步为止：修正后 O = 3.564，不修正 O = 3.005，偏差 0.5593（相对 15.69%）。"
+   },
+   "corr": {
+    "kind": "rescale",
+    "factor": 0.24659696394160638,
+    "m_old": 2.8,
+    "m_new": 4.2,
+    "o_correct": 3.564215558282284,
+    "o_uncorrected": 3.004951745647845,
+    "bias_abs": 0.5592638126344389,
+    "bias_rel": 0.15691077138554635
+   }
+  },
+  {
+   "id": "fin",
+   "title": "收尾：归一化",
+   "kind": "op",
+   "op": "div",
+   "phase": "收尾",
+   "formula": {
+    "sym": "O = \\slot{ACC} \\,/\\, \\slot{L}",
+    "idx": "O = \\slot{ACC} \\,/\\, \\slot{L}",
+    "num": "O = \\slot{ACC} \\,/\\, \\slot{L} = \\slot{ONUM}"
+   },
+   "bindings": {
+    "ACC": {
+     "sym": "\\mathrm{acc}^{(J)}",
+     "idx": "\\mathrm{acc}^{2}",
+     "num": "5.071"
+    },
+    "L": {
+     "sym": "\\ell^{(J)}",
+     "idx": "\\ell^{2}",
+     "num": "1.423"
+    },
+    "ONUM": {
+     "sym": "O",
+     "idx": "O",
+     "num": "3.564"
+    }
+   },
+   "reads": [
+    "acc",
+    "l"
+   ],
+   "writes": [
+    "O"
+   ],
+   "state": {
+    "O": 3.564215558282284
+   },
+   "narration": "整条 trace 只在这里除一次。O = 5.071 / 1.423 = 3.564，就是 softmax 加权平均，与 torch 的参考实现逐位一致。三遍安全版得到同一个数，代价是 3 倍的读数；朴素版读数相同但结果是 NaN。",
+   "k": 8
+  }
+ ]
+}

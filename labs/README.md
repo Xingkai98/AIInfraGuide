@@ -31,11 +31,19 @@ labs/
 | `lab.css` | 全部样式（含亮/暗色） |
 
 页面配置项见 `player.js` 顶部的 `DEFAULTS`。额外面板用 `panels: [{id, label, render(step, ctx)}]`，
-引擎负责容器，`render` 返回 HTML 字符串。
+引擎负责容器，`render` 返回 HTML 字符串。面板只格式化 trace 里的字段，**不做任何算法计算** ——
+L00 的修正因子放大器与对照模式都挂在这一层。
 
 **trace 由 `scripts/build-labs.mjs` 在构建期内联**：页面里写 `<!-- trace:NAME -->`，
 构建时替换成 `labs/traces/NAME.json` 的内容（包在 `window.LabTraces.NAME` 里）。
 这样页面与 JSON 不可能漂移 —— 它们就是同一份数据。JSON 缺失会直接构建失败。
+
+**带参数滑杆的 lab 用 trace 集合**，写 `<!-- traces:SET -->`：构建时读
+`labs/traces/SET.manifest.json`，把清单（`window.LabTraceSets.SET`）和它列出的**每一份**
+trace 一起内联。清单由 trace 生成脚本自己写出，所以「有哪些配置」只在产生数据的地方定义一次 ——
+滑杆位置不可能指向一份不存在的 trace，manifest 列了但没生成的也会直接构建失败。
+（文件大小按 lab 数翻倍增长，但 [R02 实测](../docs/research/size-budget.md)：trace 相对 KaTeX
+字体的体积是零头，压缩后更小。）
 
 **引擎的验收脚本**：`npm run build:labs && python3 scripts/verify-labs.py`。
 它在真 Chromium 里跑完整条验收清单并出截图到 `labs/pages/shots/`（截图入库，
@@ -51,7 +59,10 @@ labs/
 
 1. 写 `traces/<name>.py`，跑出 `traces/<name>.json`（必须带与 PyTorch 参考实现的对拍断言，
    并跑一遍 lint；`online_softmax.py` 是范本——它同时演示了 lint 与 lint 的对照组）。
-2. 写 `pages/<name>.html`：放一个 `<!-- trace:<name> -->` 占位符，用 `./assets/`
+   有参数滑杆的话，为每个合法组合各出一份 trace，并让脚本自己写
+   `traces/<name>.manifest.json`（`default` + `params` + `traces` + `labels`）。
+2. 写 `pages/<name>.html`：放一个 `<!-- trace:<name> -->`（单份）或
+   `<!-- traces:<name> -->`（整组）占位符，用 `./assets/`
    下的共享引擎与 KaTeX，末尾调 `LabEngine.lab(trace, config)`。页面本身不写算法逻辑。
 3. 在 `src/utils/labRegistry.ts` 加一条映射，让对应教程正文顶部出现入口卡片；把 `published` 置 `true`。
 4. 在 `src/utils/labRoadmap.ts` 把对应节点的「已上线」点亮（`labId` 已在表中）。

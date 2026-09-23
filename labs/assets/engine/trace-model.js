@@ -169,6 +169,24 @@
   var LATEX_IN_TEXT_RE = /\\[a-zA-Z]+\{/;
   var BAD_LITERAL_RE = /^(NaN|Infinity|-Infinity|undefined|null)$/;
 
+  /* The fields L00's correction-factor amplifier and comparison panel read.
+   * Named here rather than inline so a missing one is reported as a named gap
+   * instead of surfacing as an undefined in the page. */
+  var CORR_KEYS = ['kind', 'factor', 'm_old', 'm_new', 'o_correct', 'o_uncorrected',
+                   'bias_abs', 'bias_rel'];
+  var CORR_KINDS = ['init', 'identity', 'rescale'];
+  var METHOD_IDS = ['naive', 'safe', 'online'];
+
+  /* A trace value: a finite number, null (not produced yet), or one of the
+   * three sentinels. A non-finite number is NOT acceptable even though bare
+   * `NaN` / `Infinity` are legal JavaScript — they are illegal JSON, and the
+   * sentinel vocabulary exists precisely to replace them. */
+  function valueOk(v) {
+    if (v === null || v === undefined) return true;
+    if (typeof v === 'string') return isSentinel(v);
+    return typeof v === 'number' && isFinite(v);
+  }
+
   function lint(trace) {
     var gaps = [], warns = [], infos = [];
     var declared = {};
@@ -176,6 +194,8 @@
 
     var stepIds = {};
     trace.steps.forEach(function (s) { stepIds[s.id] = true; });
+
+    var cfgN = ((trace.meta || {}).config || {}).N;
 
     var written = {}, read = {};
     trace.steps.forEach(function (s) {
@@ -337,11 +357,268 @@
           });
         }
       });
+
+      // The correction factor. It may only ride on a step whose formula shows
+      // it, and its numbers must be real: the amplifier's entire claim is that
+      // the deviation is measured rather than described.
+      var corr = s.corr;
+      if (corr) {
+        var corrKeys = Object.keys(corr).sort().join(',');
+        if (corrKeys !== CORR_KEYS.slice().sort().join(',')) {
+          gaps.push({
+            what: '步骤 "' + sid + '" 的 corr 字段是 {' + corrKeys + '} 而不是 {' +
+                  CORR_KEYS.join(', ') + '}',
+            why: '放大器按固定字段读取，缺一个就会显示 undefined。'
+          });
+        }
+        if (CORR_KINDS.indexOf(corr.kind) === -1) {
+          gaps.push({
+            what: '步骤 "' + sid + '" 的 corr.kind = ' + JSON.stringify(corr.kind) +
+                  ' 不属于 ' + CORR_KINDS.join(' / '),
+            why: '这个字段决定高亮的颜色与解释文案。'
+          });
+        }
+        if (!(s.regions || {}).CORR) {
+          gaps.push({
+            what: '步骤 "' + sid + '" 带了 corr，却没有 \\region{CORR} 的说明',
+            why: '被框住的那一段没有文字解释。'
+          });
+        }
+        CORR_KEYS.forEach(function (k) {
+          if (k === 'kind') return;
+          if (!valueOk(corr[k])) {
+            gaps.push({
+              what: '步骤 "' + sid + '" 的 corr.' + k + ' = ' + JSON.stringify(corr[k]) +
+                    ' 不是数、null 或哨兵字符串',
+              why: '裸 NaN / Infinity 是非法 JSON —— 用哨兵字符串。'
+            });
+          }
+        });
+        if (corr.kind === 'identity' && corr.factor !== 1) {
+          gaps.push({
+            what: '步骤 "' + sid + '" 的 corr.kind 是 identity，但因子是 ' +
+                  JSON.stringify(corr.factor) + ' 而不是 1',
+            why: 'm 没变时 e^(m_old − m_new) 必然是 1 —— 两个字段在互相矛盾。'
+          });
+        }
+        if (corr.kind === 'rescale' && !(typeof corr.factor === 'number' && corr.factor < 1)) {
+          gaps.push({
+            what: '步骤 "' + sid + '" 的 corr.kind 是 rescale，因子 ' +
+                  JSON.stringify(corr.factor) + ' 却不小于 1',
+            why: 'm 抬高时 e^(m_old − m_new) 必然小于 1。'
+          });
+        }
+      }
     });
+
+    // ---- progress axis: k is a real HBM read count and can only grow.
+    var n = cfgN === undefined ? null : cfgN;
+    var lastK = 0;
+    trace.steps.forEach(function (s) {
+      if (typeof s.k !== 'number') {
+        gaps.push({
+          what: '步骤 "' + s.id + '" 没有 k（截至本步已从 HBM 读取的元素数）',
+          why: '对照面板无法把它对齐到共同的时间轴。'
+        });
+        return;
+      }
+      if (n !== null && (s.k < 0 || s.k > n || s.k !== Math.floor(s.k))) {
+        gaps.push({
+          what: '步骤 "' + s.id + '" 的 k = ' + s.k + ' 不是 0..' + n + ' 的整数',
+          why: 'k 是已读元素数，落在输入长度之外没有意义。'
+        });
+      } else if (s.k < lastK) {
+        gaps.push({
+          what: '步骤 "' + s.id + '" 的 k = ' + s.k + ' 比上一步的 ' + lastK + ' 还小',
+          why: 'k 是已读元素数，只能单调不减。'
+        });
+      }
+      lastK = Math.max(lastK, s.k);
+    });
+    if (n !== null && trace.steps.length &&
+        trace.steps[trace.steps.length - 1].k !== n) {
+      gaps.push({
+        what: '最后一步的 k = ' + trace.steps[trace.steps.length - 1].k +
+              ' 而不是 N = ' + n,
+        why: '整条输入必须都被读过。'
+      });
+    }
+
+    // ---- the trace-level correction summary
+    var metaCorr = (trace.meta || {}).correction;
+    if (!metaCorr || typeof metaCorr !== 'object') {
+      gaps.push({
+        what: 'meta.correction 缺失',
+        why: '放大器面板报不出整条 trace 的最终偏差。'
+      });
+    } else {
+      ['final_o_correct', 'final_o_uncorrected', 'final_bias_abs', 'final_bias_rel',
+       'per_block', 'rescales'].forEach(function (key) {
+        if (!(key in metaCorr)) {
+          gaps.push({
+            what: 'meta.correction 缺 ' + key,
+            why: '放大器的结论行会显示 undefined。'
+          });
+        }
+      });
+      var perBlock = metaCorr.per_block;
+      var nBlocks = ((trace.meta || {}).config || {}).n_blocks;
+      if (!Array.isArray(perBlock)) {
+        gaps.push({ what: 'meta.correction.per_block 不是数组', why: '每块一格的条带画不出来。' });
+      } else {
+        if (nBlocks !== undefined && perBlock.length !== nBlocks) {
+          gaps.push({
+            what: 'meta.correction.per_block 有 ' + perBlock.length + ' 项，应该是 n_blocks = ' +
+                  nBlocks + ' 项',
+            why: '条带的格数与块数对不上。'
+          });
+        }
+        perBlock.forEach(function (e, i) {
+          if (CORR_KINDS.indexOf(e && e.kind) === -1) {
+            gaps.push({
+              what: 'meta.correction.per_block[' + i + '].kind = ' +
+                    JSON.stringify(e && e.kind) + ' 非法',
+              why: '条带按 kind 上色。'
+            });
+          }
+        });
+        var stepped = perBlock.filter(function (e) { return e && e.kind === 'rescale'; }).length;
+        if (metaCorr.rescales !== stepped) {
+          gaps.push({
+            what: 'meta.correction.rescales = ' + JSON.stringify(metaCorr.rescales) +
+                  ' 与 per_block 里 rescale 的项数 ' + stepped + ' 不一致',
+            why: '结论行的「几块真的做了缩放」会与条带矛盾。'
+          });
+        }
+      }
+    }
+
+    // ---- the comparison block: three real runs on one shared axis
+    var cmp = trace.compare;
+    if (!cmp || typeof cmp !== 'object') {
+      gaps.push({ what: 'compare 缺失', why: '对照模式没有数据。' });
+    } else {
+      var methods = cmp.methods || [];
+      var ids = methods.map(function (m) { return m.id; });
+      if (ids.join(',') !== METHOD_IDS.join(',')) {
+        gaps.push({
+          what: 'compare.methods 的 id 是 [' + ids.join(', ') + ']，应该是 [' +
+                METHOD_IDS.join(', ') + ']',
+          why: '顺序也参与渲染 —— 三行要按固定顺序并排。'
+        });
+      }
+      methods.forEach(function (m) {
+        var frames = m.frames || [];
+        if (!frames.length) {
+          gaps.push({ what: 'compare.methods["' + m.id + '"] 没有 frames', why: '这一行画不出轨迹。' });
+          return;
+        }
+        if (frames[0].k !== 0 || frames[frames.length - 1].k !== m.reads) {
+          gaps.push({
+            what: 'compare.methods["' + m.id + '"] 的 frames 覆盖 k = ' + frames[0].k + '..' +
+                  frames[frames.length - 1].k + '，应该从 0 到它自己的 reads = ' + m.reads,
+            why: '横轴对不齐，三条轨迹没法在同一 k 上比较。'
+          });
+        }
+        if (m.reads !== m.passes * n) {
+          gaps.push({
+            what: 'compare.methods["' + m.id + '"] 的 reads = ' + m.reads +
+                  ' 与 passes × N = ' + m.passes + ' × ' + n + ' 不一致',
+            why: '「读了几遍」是这张对照表的全部论点。'
+          });
+        }
+        if (!valueOk(m.final)) {
+          gaps.push({
+            what: 'compare.methods["' + m.id + '"].final = ' + JSON.stringify(m.final) + ' 非法',
+            why: '裸 NaN / Infinity 是非法 JSON。'
+          });
+        }
+        var ks = frames.map(function (f) { return f.k; });
+        for (var i = 1; i < ks.length; i++) {
+          if (ks[i] <= ks[i - 1]) {
+            gaps.push({
+              what: 'compare.methods["' + m.id + '"] 的 frames 在 k = ' + ks[i] + ' 处没有严格递增',
+              why: '同一个 k 有两帧时取哪一帧是不确定的。'
+            });
+            break;
+          }
+        }
+        // Every value a frame carries is printed at some point in the replay,
+        // so each one has to satisfy the same value contract as `state`.
+        frames.forEach(function (f) {
+          Object.keys(f).forEach(function (key) {
+            if (key === 'k') return;
+            if (!valueOk(f[key])) {
+              gaps.push({
+                what: 'compare.methods["' + m.id + '"] 的 frame k = ' + f.k +
+                      ' 字段 ' + key + ' = ' + JSON.stringify(f[key]) + ' 非法',
+                why: '裸 NaN / Infinity 是非法 JSON —— 用哨兵字符串。'
+              });
+            }
+          });
+        });
+      });
+      var byId = {};
+      methods.forEach(function (m) { byId[m.id] = m; });
+      if ((byId.naive || {}).final === SENTINEL.POS_INF) {
+        warns.push({
+          what: 'compare 的朴素版最终值是 +∞ 而不是 NaN',
+          why: '检查是否真的复现了「指数和先溢出、再 +∞/+∞」这条路径。'
+        });
+      }
+
+      // The shift-invariance control. This is what makes the naive row's NaN a
+      // lesson about logit magnitude rather than evidence of broken code.
+      var si = cmp.shift_invariance;
+      if (!si || typeof si !== 'object') {
+        gaps.push({
+          what: 'compare.shift_invariance 缺失',
+          why: '对照面板说不清朴素版是量级问题还是代码本来就写错了。'
+        });
+      } else {
+        ['offset', 'unshifted_final', 'unshifted_sum_exp', 'shifted_final',
+         'shifted_sum_exp', 'reference'].forEach(function (key) {
+          if (!(key in si)) {
+            gaps.push({
+              what: 'compare.shift_invariance 缺 ' + key,
+              why: '对照组的那句说明会显示 undefined。'
+            });
+          }
+        });
+        for (var sk in si) {
+          if (sk === 'offset' || sk === 'note') continue;
+          if (!valueOk(si[sk])) {
+            gaps.push({
+              what: 'compare.shift_invariance.' + sk + ' = ' + JSON.stringify(si[sk]) + ' 非法',
+              why: '裸 NaN / Infinity 是非法 JSON。'
+            });
+          }
+        }
+        if (typeof si.shifted_final === 'number' && isFinite(si.shifted_final)) {
+          gaps.push({
+            what: 'compare.shift_invariance.shifted_final = ' + si.shifted_final + ' 是有限值',
+            why: '加上偏移的朴素路径本该溢出，否则这个对照没有说服力。'
+          });
+        }
+        var onlineFinal = (byId.online || {}).final;
+        ['unshifted_final', 'reference'].forEach(function (key) {
+          if (typeof si[key] === 'number' && typeof onlineFinal === 'number' &&
+              Math.abs(si[key] - onlineFinal) > 1e-9 * Math.max(1, Math.abs(onlineFinal))) {
+            gaps.push({
+              what: 'compare.shift_invariance.' + key + ' = ' + si[key] +
+                    ' 与 online 版的终值 ' + onlineFinal + ' 不一致',
+              why: '对照组的「本该算对」不成立 —— 页面会自相矛盾。'
+            });
+          }
+        });
+      }
+    }
 
     infos.push({
       what: trace.steps.length + ' 步 / ' + (trace.graph.nodes || []).length + ' 节点 / ' +
-            (trace.graph.edges || []).length + ' 数据边',
+            (trace.graph.edges || []).length + ' 数据边' +
+            (metaCorr && typeof metaCorr.rescales === 'number'
+              ? ' / ' + metaCorr.rescales + ' 次修正' : ''),
       why: ''
     });
     infos.push({

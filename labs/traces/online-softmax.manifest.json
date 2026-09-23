@@ -1,0 +1,61 @@
+{
+ "set": "online-softmax",
+ "lab": "L00",
+ "default": "online-softmax-N8-B4-T1",
+ "params": {
+  "N": [
+   4,
+   8
+  ],
+  "Bc": [
+   1,
+   2,
+   4
+  ],
+  "T": [
+   0.5,
+   1.0,
+   2.0
+  ]
+ },
+ "traces": [
+  "online-softmax-N4-B1-T0p5",
+  "online-softmax-N4-B1-T1",
+  "online-softmax-N4-B1-T2",
+  "online-softmax-N4-B2-T0p5",
+  "online-softmax-N4-B2-T1",
+  "online-softmax-N4-B2-T2",
+  "online-softmax-N4-B4-T0p5",
+  "online-softmax-N4-B4-T1",
+  "online-softmax-N4-B4-T2",
+  "online-softmax-N8-B1-T0p5",
+  "online-softmax-N8-B1-T1",
+  "online-softmax-N8-B1-T2",
+  "online-softmax-N8-B2-T0p5",
+  "online-softmax-N8-B2-T1",
+  "online-softmax-N8-B2-T2",
+  "online-softmax-N8-B4-T0p5",
+  "online-softmax-N8-B4-T1",
+  "online-softmax-N8-B4-T2"
+ ],
+ "labels": {
+  "online-softmax-N4-B1-T0p5": "N=4 · Bc=1 · T=0.5",
+  "online-softmax-N4-B1-T1": "N=4 · Bc=1 · T=1",
+  "online-softmax-N4-B1-T2": "N=4 · Bc=1 · T=2",
+  "online-softmax-N4-B2-T0p5": "N=4 · Bc=2 · T=0.5",
+  "online-softmax-N4-B2-T1": "N=4 · Bc=2 · T=1",
+  "online-softmax-N4-B2-T2": "N=4 · Bc=2 · T=2",
+  "online-softmax-N4-B4-T0p5": "N=4 · Bc=4 · T=0.5",
+  "online-softmax-N4-B4-T1": "N=4 · Bc=4 · T=1",
+  "online-softmax-N4-B4-T2": "N=4 · Bc=4 · T=2",
+  "online-softmax-N8-B1-T0p5": "N=8 · Bc=1 · T=0.5",
+  "online-softmax-N8-B1-T1": "N=8 · Bc=1 · T=1",
+  "online-softmax-N8-B1-T2": "N=8 · Bc=1 · T=2",
+  "online-softmax-N8-B2-T0p5": "N=8 · Bc=2 · T=0.5",
+  "online-softmax-N8-B2-T1": "N=8 · Bc=2 · T=1",
+  "online-softmax-N8-B2-T2": "N=8 · Bc=2 · T=2",
+  "online-softmax-N8-B4-T0p5": "N=8 · Bc=4 · T=0.5",
+  "online-softmax-N8-B4-T1": "N=8 · Bc=4 · T=1",
+  "online-softmax-N8-B4-T2": "N=8 · Bc=4 · T=2"
+ }
+}
