@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>L01 · GEMM 分块与数据搬运 - AIInfraGuide</title>
+    <meta
+      name="description"
+      content="GEMM 的分块回放：从单个输出点的点积，到 8×8 的 C 铺满，再到 A/B 的 tile 在 HBM → SMEM → REG 三层之间搬运。"
+    />
+    <link rel="canonical" href="./01-gemm-tiling.html" />
+    <link rel="stylesheet" href="./assets/vendor/katex/katex.min.css" />
+    <link rel="stylesheet" href="./assets/engine/lab.css" />
+    <link rel="stylesheet" href="./assets/engine/views/tiling-stage.css" />
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        margin: 0;
+        padding: 20px 22px 56px;
+        background: #f9fafb;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+          'Helvetica Neue', 'Noto Sans CJK SC', sans-serif;
+      }
+      @media (prefers-color-scheme: dark) {
+        body { background: #0b1120; }
+      }
+      .lab-back { display: inline-block; margin-bottom: 14px; color: #007aff; font-size: 13.5px; text-decoration: none; }
+      .lab-provenance {
+        margin-top: 22px;
+        padding-top: 14px;
+        border-top: 1px solid rgba(128, 128, 128, 0.25);
+        color: #6b7280;
+        font-size: 12px;
+        line-height: 1.6;
+      }
+      @media (prefers-color-scheme: dark) { .lab-provenance { color: #9ca3af; } }
+      .lab-provenance code {
+        background: rgba(128, 128, 128, 0.14);
+        border-radius: 4px;
+        padding: 1px 5px;
+        font: 0.92em/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .lab-banner {
+        margin: 0 0 14px;
+        padding: 8px 12px;
+        border: 1px solid rgba(0, 122, 255, 0.35);
+        border-radius: 8px;
+        background: rgba(0, 122, 255, 0.07);
+        font-size: 12.5px;
+        color: #1f2937;
+      }
+      @media (prefers-color-scheme: dark) { .lab-banner { color: #e5e7eb; } }
+      /* The stage is the point of this page, so it gets the full width above the
+         engine's two-column block rather than a slot inside it. */
+      .lab-stage-panel { margin-bottom: 14px; }
+      .lab-stage-panel .lab-tensor-host { max-height: 420px; overflow: auto; }
+    </style>
+  </head>
+  <!--
+    Two build-time facts this document depends on, both learned the hard way in
+    the scaffolding ticket:
+
+      * The no-index marker must wrap the whole document. On a bare <meta> tag
+        Pagefind ignores it and indexes the page anyway.
+      * Asset paths are relative to the SERVED location, not to this source
+        file: scripts/build-labs.mjs flattens labs/pages/*.html to
+        public/labs/*.html, so this page lands beside assets/ and must use
+        ./assets/… — a ../ would 404 the whole engine.
+
+    The page holds a trace and a config. Every algorithmic decision — state
+    reconstruction, layout, formula tiers, playback — lives in the engine; the
+    memory-hierarchy stage is one view component under assets/engine/views/.
+  -->
+  <body data-pagefind-ignore>
+    <a class="lab-back" href="./">← 全部实验室</a>
+    <p class="lab-banner" id="lab-banner" hidden></p>
+
+    <main id="lab"></main>
+
+    <p class="lab-provenance">
+      本页每个数字都来自一次真实的 numpy 运行，不是手编的演示数据。
+      trace 由 <code>labs/traces/gemm_tiling.py</code> 生成，它做三件事：
+      ① 用朴素 k 序循环算一遍 C，再用 <b>B_M=B_N=B_K=4 的分块循环</b>算一遍，断言两者
+      <b>逐位相同</b>（分块改变的是搬运顺序，不该改变算术结果）；
+      ② 与 <b>torch</b> 的 float64 matmul 对拍；
+      ③ 用引擎的契约 lint 自查，并跑一组「故意破坏」的对照组 —— 破坏必须被抓到，否则那份
+      「0 gap」不算数。不通过就拒绝写文件。
+      引擎本身在 <code>labs/assets/engine/</code>，内存层级舞台是其中一个视图组件
+      （<code>views/tiling-stage.js</code>），不含任何 GEMM 专属逻辑 ——
+      L06 的 FlashAttention 双层舞台是同一份代码换一份层配置。
+    </p>
+
+    <!-- KaTeX is vendored, never a CDN: a lab page must make zero external requests. -->
+    <script src="./assets/vendor/katex/katex.min.js"></script>
+    <script src="./assets/engine/trace-model.js"></script>
+    <script src="./assets/engine/layout.js"></script>
+    <script src="./assets/engine/formula.js"></script>
+    <script src="./assets/engine/dag.js"></script>
+    <script src="./assets/engine/tensors.js"></script>
+    <script src="./assets/engine/narrow.js"></script>
+    <script src="./assets/engine/views/tiling-stage.js"></script>
+    <script src="./assets/engine/player.js"></script>
+    <script src="./assets/engine/verify.js"></script>
+
+    <!--
+      The trace is substituted here at build time from labs/traces/<name>.json
+      (see the trace-inlining step in scripts/build-labs.mjs). Inlining it —
+      rather than fetching it — is what makes "the lab page is data plus config"
+      literally true, and it makes trace/page drift impossible: the page cannot
+      disagree with the JSON it was built from.
+    -->
+    <!-- trace:gemm-tiling -->
+
+    <script>
+      (function () {
+        'use strict';
+        var traces = window.LabTraces || {};
+        var trace = traces['gemm-tiling'];
+        if (!trace) {
+          document.getElementById('lab').textContent =
+            'trace 未加载：本页的 trace 占位符没有被构建脚本替换。';
+          return;
+        }
+
+        var banner = document.getElementById('lab-banner');
+        var params = new URLSearchParams(location.search);
+        var badStep = params.get('step');
+        if (badStep !== null && (isNaN(parseInt(badStep, 10)) ||
+            parseInt(badStep, 10) < 0 || parseInt(badStep, 10) > trace.steps.length - 1)) {
+          banner.hidden = false;
+          banner.textContent = '深链里的 ?step=' + badStep + ' 超出范围（本 trace 共 ' +
+            trace.steps.length + ' 步），已停在第一步。';
+        }
+
+        /* The stage's layer config. Layer ids are the `at` values the trace's
+         * tensors use; everything else here is presentation. L06's stage is the
+         * same call with two entries — HBM and SRAM — which is the whole reason
+         * the count is configurable. */
+        var stagePanel = LabEngine.tilingStage.panel({
+          id: 'stage',
+          label: '内存层级舞台',
+          layers: [
+            { id: 'HBM', label: 'Global Memory', sub: '容量最大，带宽最低（~900 GB/s）' },
+            { id: 'SMEM', label: 'Shared Memory', sub: '块内共享，带宽高一个数量级（~12 TB/s）' },
+            { id: 'REG', label: 'Register', sub: '线程私有，最快（~20 TB/s）' }
+          ],
+          /* Read as a plain-language caption on each block. The default is the
+           * tensor name, which is the right thing for a GPU-model trace; here
+           * the tensor names are the model's own, so the panel adds nothing. */
+          emptyText: '本步没有数据块在这一层 —— 朴素实现在这里跳过了 SMEM'
+        }, { trace: trace });
+
+        var player = LabEngine.lab(trace, {
+          mount: '#lab',
+          title: 'GEMM 分块与数据搬运',
+          lead: '先把 C 的一个输出点展开成 K 次乘加，再铺满整个 8×8 的 C，然后引入 tiling：' +
+                'A、B 的 tile 沿 K 迭代，从 HBM 搬到 SMEM，再从 SMEM 搬进寄存器做外积。' +
+                '同一份 C，HBM 读取从 1024 个元素降到 256 个。',
+          tier: 'num',
+          speed: 1100,
+          panels: [stagePanel],
+          tutorial: {
+            href: '/AIInfraGuide/cuda/模块二-cuda编程与算子优化/41-cuda-gemm算子性能优化',
+            label: '返回教程正文：4.1 CUDA GEMM算子性能优化'
+          }
+        });
+
+        /* Compact proof panel. It carries the control group, so a green verdict
+           here means something -- see labs/assets/engine/verify.js. */
+        var proof = document.createElement('section');
+        proof.className = 'lab-panel lab-panel-extra';
+        proof.innerHTML = '<div class="lab-panel-hd"><span class="lab-panel-t">自检 · 引擎正确性</span>' +
+          '<span class="lab-panel-sub">在浏览器里真跑，不是预期值</span></div>' +
+          '<div class="lab-panel-bd" style="padding:10px 12px"></div>';
+        document.getElementById('lab').appendChild(proof);
+        LabEngine.verify.panel(proof.querySelector('.lab-panel-bd'), trace, player.index);
+
+        /* The stage panel renders into the engine's container, which the player
+           places after the DAG. On L01 the memory traffic is the subject and
+           the DAG is the index to it, so the stage goes first — the engine's
+           own panels keep their order, this is the page choosing which of its
+           views leads. */
+        var panelEl = document.querySelector('[data-panel="stage"]');
+        if (panelEl) {
+          panelEl.classList.add('lab-stage-panel');
+          document.querySelector('.lab-panel-dag').before(panelEl);
+        }
+
+        /* The player handle, for the acceptance harness in
+         * scripts/verify-tiling-stage.py. Exposing it is harmless in production
+         * and it is the only way the harness can assert against the same object
+         * the page drives, rather than against a re-implementation of it. */
+        window.__p = player;
+        window.__labTrace = trace;
+      })();
+    </script>
+  </body>
+</html>

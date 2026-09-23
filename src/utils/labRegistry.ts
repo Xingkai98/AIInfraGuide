@@ -90,6 +90,26 @@ export const LAB_REGISTRY: Record<string, LabEntry> = {
     ],
     published: true,
   },
+  '模块二-cuda编程与算子优化/41-cuda-gemm算子性能优化': {
+    labId: 'L01',
+    title: 'GEMM 分块与数据搬运',
+    summary:
+      '从单个输出点的点积铺到整个 C，再引入 tiling：A、B 的 tile 沿 K 迭代，在 HBM → SMEM → REG 三层之间搬运。',
+    page: `${LAB_BASE}/01-gemm-tiling.html`,
+    links: [
+      { label: '从第一步开始' },
+      // Step 11 is the first HBM → SMEM load. Steps 0–9 are the single dot
+      // product and the naive cost tally, where the stage's SMEM row is empty
+      // by design — a reader pointed there first would see a missing layer
+      // before seeing why it is missing.
+      { label: '跳到第一次 tile 搬运', search: '?step=11' },
+      // Step 12 is the first mma: it is the only frame where the whole chain is
+      // on screen at once — the tiles just landed in SMEM, and the two rails
+      // below show 8 elements crossing SMEM → REG and 16 FMA staying in REG.
+      { label: '跳到 SMEM → REG 的外积累加', search: '?step=12' },
+    ],
+    published: true,
+  },
 };
 
 /**
