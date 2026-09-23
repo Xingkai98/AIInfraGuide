@@ -1,0 +1,80 @@
+{
+ "set": "gemm-tiling",
+ "lab": "L01",
+ "default": "gemm-tiling-BM4-BN4-BK4",
+ "params": {
+  "B_M": [
+   2,
+   4,
+   8
+  ],
+  "B_N": [
+   2,
+   4,
+   8
+  ],
+  "B_K": [
+   2,
+   4,
+   8
+  ]
+ },
+ "traces": [
+  "gemm-tiling-BM2-BN2-BK2",
+  "gemm-tiling-BM2-BN2-BK4",
+  "gemm-tiling-BM2-BN2-BK8",
+  "gemm-tiling-BM2-BN4-BK2",
+  "gemm-tiling-BM2-BN4-BK4",
+  "gemm-tiling-BM2-BN4-BK8",
+  "gemm-tiling-BM2-BN8-BK2",
+  "gemm-tiling-BM2-BN8-BK4",
+  "gemm-tiling-BM2-BN8-BK8",
+  "gemm-tiling-BM4-BN2-BK2",
+  "gemm-tiling-BM4-BN2-BK4",
+  "gemm-tiling-BM4-BN2-BK8",
+  "gemm-tiling-BM4-BN4-BK2",
+  "gemm-tiling-BM4-BN4-BK4",
+  "gemm-tiling-BM4-BN4-BK8",
+  "gemm-tiling-BM4-BN8-BK2",
+  "gemm-tiling-BM4-BN8-BK4",
+  "gemm-tiling-BM4-BN8-BK8",
+  "gemm-tiling-BM8-BN2-BK2",
+  "gemm-tiling-BM8-BN2-BK4",
+  "gemm-tiling-BM8-BN2-BK8",
+  "gemm-tiling-BM8-BN4-BK2",
+  "gemm-tiling-BM8-BN4-BK4",
+  "gemm-tiling-BM8-BN4-BK8",
+  "gemm-tiling-BM8-BN8-BK2",
+  "gemm-tiling-BM8-BN8-BK4",
+  "gemm-tiling-BM8-BN8-BK8"
+ ],
+ "labels": {
+  "gemm-tiling-BM2-BN2-BK2": "B_M=2 · B_N=2 · B_K=2",
+  "gemm-tiling-BM2-BN2-BK4": "B_M=2 · B_N=2 · B_K=4",
+  "gemm-tiling-BM2-BN2-BK8": "B_M=2 · B_N=2 · B_K=8",
+  "gemm-tiling-BM2-BN4-BK2": "B_M=2 · B_N=4 · B_K=2",
+  "gemm-tiling-BM2-BN4-BK4": "B_M=2 · B_N=4 · B_K=4",
+  "gemm-tiling-BM2-BN4-BK8": "B_M=2 · B_N=4 · B_K=8",
+  "gemm-tiling-BM2-BN8-BK2": "B_M=2 · B_N=8 · B_K=2",
+  "gemm-tiling-BM2-BN8-BK4": "B_M=2 · B_N=8 · B_K=4",
+  "gemm-tiling-BM2-BN8-BK8": "B_M=2 · B_N=8 · B_K=8",
+  "gemm-tiling-BM4-BN2-BK2": "B_M=4 · B_N=2 · B_K=2",
+  "gemm-tiling-BM4-BN2-BK4": "B_M=4 · B_N=2 · B_K=4",
+  "gemm-tiling-BM4-BN2-BK8": "B_M=4 · B_N=2 · B_K=8",
+  "gemm-tiling-BM4-BN4-BK2": "B_M=4 · B_N=4 · B_K=2",
+  "gemm-tiling-BM4-BN4-BK4": "B_M=4 · B_N=4 · B_K=4",
+  "gemm-tiling-BM4-BN4-BK8": "B_M=4 · B_N=4 · B_K=8",
+  "gemm-tiling-BM4-BN8-BK2": "B_M=4 · B_N=8 · B_K=2",
+  "gemm-tiling-BM4-BN8-BK4": "B_M=4 · B_N=8 · B_K=4",
+  "gemm-tiling-BM4-BN8-BK8": "B_M=4 · B_N=8 · B_K=8",
+  "gemm-tiling-BM8-BN2-BK2": "B_M=8 · B_N=2 · B_K=2",
+  "gemm-tiling-BM8-BN2-BK4": "B_M=8 · B_N=2 · B_K=4",
+  "gemm-tiling-BM8-BN2-BK8": "B_M=8 · B_N=2 · B_K=8",
+  "gemm-tiling-BM8-BN4-BK2": "B_M=8 · B_N=4 · B_K=2",
+  "gemm-tiling-BM8-BN4-BK4": "B_M=8 · B_N=4 · B_K=4",
+  "gemm-tiling-BM8-BN4-BK8": "B_M=8 · B_N=4 · B_K=8",
+  "gemm-tiling-BM8-BN8-BK2": "B_M=8 · B_N=8 · B_K=2",
+  "gemm-tiling-BM8-BN8-BK4": "B_M=8 · B_N=8 · B_K=4",
+  "gemm-tiling-BM8-BN8-BK8": "B_M=8 · B_N=8 · B_K=8"
+ }
+}

@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 """Trace generator for L01 · GEMM：索引、分块与访存.
 
-Emits one JSON file:
+Emits one JSON file per configuration of `(B_M, B_N, B_K)`, plus a manifest
+naming the set:
 
-    labs/traces/gemm-tiling.json   M=N=K=8, B_M=B_N=B_K=4 -> 32 steps
+    labs/traces/gemm-tiling-BM<B_M>-BN<B_N>-BK<B_K>.json   one full replay each
+    labs/traces/gemm-tiling.manifest.json                  the set the page inlines
 
-The lab this belongs to (L01) needs a trace, and a trace does not need a lab —
-it is data, the lab is rendering. So the generator lives here, next to the L00
-one, and the L01 page consumes the JSON.
+M=N=K=8 throughout; only the tile shape varies. This is the lab the parameter
+sliders drive, and it is the site's most direct demonstration of *why tiling
+helps*: the same problem, the same arithmetic, only the blocking changes — and
+the HBM traffic, the arithmetic intensity, and the point on the Roofline move
+accordingly. The manifest is written by this script rather than by hand, so a
+slider position can never point at a configuration that was never generated
+(see the `traces:` marker in `scripts/build-labs.mjs`).
 
 WHY THIS FILE IS NOT A CARBON COPY OF online_softmax.py
 ------------------------------------------------------
@@ -39,10 +45,49 @@ Two things are genuinely different, and both are about what can be *proved*.
    independent cross-check: exactness against a second implementation of the
    same loop would prove nothing about the algorithm being right.
 
-Every number quoted in a narration or a formula is computed from M/N/K here —
-the HBM element traffic (2MNK naive against the tiled count), the arithmetic
+Every number quoted in a narration or a formula is computed from M/N/K/B_* here
+— the HBM element traffic (2MNK naive against the tiled count), the arithmetic
 intensity, every accumulator. Only the problem inputs A and B are literals,
 which is the same split online_softmax.py makes for its input vector.
+
+THE ROOFLINE BLOCK, AND WHY THE SLIDERS ARE TRACES RATHER THAN ARITHMETIC
+------------------------------------------------------------------------
+The ticket's fourth criterion is "改变 B_M/B_N/B_K 后，访存次数与算术强度实时重算，
+Roofline 图上的点相应移动". The tempting reading is "recompute in the browser on
+every slider move". That would put arithmetic on the page, and this project's
+first rule is that every number shown comes from a run of one of these scripts —
+so the page would be computing a formula the trace never executed, and the two
+could disagree with nothing to catch it.
+
+The reading this file implements is the one L00 established: a parameterised lab
+ships a *set*, one trace per slider position, and the slider selects among
+already-generated configurations. So `B_M`/`B_N`/`B_K` are applied HERE, in
+`traffic()`, and each configuration publishes its own `meta.roofline` block:
+
+    "roofline": { "peak_flops": …, "bandwidth": …, "ridge": …,
+                  "points": [ {"id": "naive"|"tiled"|"doc", "ai": …, "bytes": …,
+                               "ceiling": …, "bound": …} ] }
+
+Two things about that block are load-bearing rather than decorative:
+
+  * `ai` is not an independent number. It is `2MNK / bytes`, and the lint
+    re-derives it from the byte counts rather than trusting the published
+    float — so the page's two statements about the same quantity ("读取
+    1024 → 256 个元素" and "算术强度 0.25 → 2.0") cannot drift apart.
+  * `ceiling` is `min(peak, bandwidth × ai)`: the performance the Roofline says
+    is the most this kernel could reach AT that intensity, and `bound` names
+    which roof that is. It is explicitly a BOUND, not a measurement — nothing
+    in this lab was timed, and the page labels the axis accordingly. The
+    alternative (inventing a plausible achieved FLOP/s) would be exactly the
+    hand-written demo data the contract forbids.
+
+The grid is the product of {2, 4, 8} per parameter, filtered to combinations
+that divide M/N/K. The filter is not cosmetic: a tile that does not divide the
+matrix leaves a partial block at the edge, and tail handling is a different
+algorithm (FlashAttention's subject, L06) — the naive-against-tiled exactness
+assertion below would still hold, but the *traffic formula* would not, because
+`(M/B_M)(N/B_N)(K/B_K)` counts whole blocks. So impossible tiles are skipped
+rather than silently rounded.
 
 Three replay phases, in the order the design doc states them
 (`docs/plans/interactive-labs.md` §二 L01):
@@ -93,6 +138,7 @@ trace, and reads *flows* because that is not.
 Run: python3 labs/traces/gemm_tiling.py
 """
 
+import copy
 import json
 import math
 import re
@@ -207,7 +253,18 @@ B_DATA = [
 ]
 
 M, N, K = 8, 8, 8
-BM, BN, BK = 4, 4, 4
+
+# The hardware model the Roofline is drawn against: the tutorial's own V100
+# numbers (`4.1-CUDA GEMM算子性能优化.md` §2.1 — 15.7 TFLOP/s FP32, 900 GB/s HBM),
+# and the same pair the summary step's `\region{RIDGE}` note already quotes. They
+# live here rather than on the page because the ridge point is a number the
+# trace publishes, and a trace may not publish a number it did not compute.
+PEAK_FLOPS = 15.7e12
+BW_BYTES = 900e9
+
+# The tile the page opens on, and the configuration the click-through default
+# lands on.
+DEFAULT_TILE = (4, 4, 4)
 
 
 def run_dot(A, B, i, j):
@@ -235,7 +292,7 @@ def run_naive(A, B):
     return C
 
 
-def run_tiled(A, B):
+def run_tiled(A, B, bm, bn, bk):
     """The same C, block by block, in the same k order.
 
     Structure follows the block-tiling kernel in the tutorial (section 4.5),
@@ -244,36 +301,44 @@ def run_tiled(A, B):
     updates the whole TM x TN tile by outer product. The inner k loop is a
     single replay step, so a frame records the last k's fragments and the
     accumulator after all B_K of them.
+
+    `bm/bn/bk` are parameters rather than module state because the tile is what
+    the sliders vary: the loop bounds below are the only place the tiling
+    parameters touch the arithmetic, and every configuration runs this same
+    function. The k order stays 0..K-1 in every configuration — changing the
+    tile changes how the work is BLOCKED, never the order things are summed in —
+    which is what lets the exact-equality assertion hold across the whole grid
+    rather than only at the default.
     """
     C = [[0.0] * N for _ in range(M)]
     frames = []
-    for bi in range(M // BM):
-        r0 = bi * BM
-        for bj in range(N // BN):
-            c0 = bj * BN
-            c_frag = [[0.0] * BN for _ in range(BM)]
-            for bk in range(K // BK):
-                k0 = bk * BK
-                A_smem = [[float(A[r0 + p][k0 + q]) for q in range(BK)]
-                          for p in range(BM)]
-                B_smem = [[float(B[k0 + p][c0 + q]) for q in range(BN)]
-                          for p in range(BK)]
+    for bi in range(M // bm):
+        r0 = bi * bm
+        for bj in range(N // bn):
+            c0 = bj * bn
+            c_frag = [[0.0] * bn for _ in range(bm)]
+            for bki in range(K // bk):
+                k0 = bki * bk
+                A_smem = [[float(A[r0 + p][k0 + q]) for q in range(bk)]
+                          for p in range(bm)]
+                B_smem = [[float(B[k0 + p][c0 + q]) for q in range(bn)]
+                          for p in range(bk)]
                 a_frag, b_frag = None, None
-                for k in range(BK):
-                    a_frag = [A_smem[p][k] for p in range(BM)]
-                    b_frag = [B_smem[k][q] for q in range(BN)]
-                    for p in range(BM):
-                        for q in range(BN):
+                for k in range(bk):
+                    a_frag = [A_smem[p][k] for p in range(bm)]
+                    b_frag = [B_smem[k][q] for q in range(bn)]
+                    for p in range(bm):
+                        for q in range(bn):
                             c_frag[p][q] = c_frag[p][q] + a_frag[p] * b_frag[q]
                 frames.append(dict(
-                    bi=bi, bj=bj, bk=bk, r0=r0, c0=c0, k0=k0, last=(bk == K // BK - 1),
-                    A_smem=[[row[q] for q in range(BK)] for row in A_smem],
-                    B_smem=[[row[q] for q in range(BN)] for row in B_smem],
+                    bi=bi, bj=bj, bk=bki, r0=r0, c0=c0, k0=k0, last=(bki == K // bk - 1),
+                    A_smem=[[row[q] for q in range(bk)] for row in A_smem],
+                    B_smem=[[row[q] for q in range(bn)] for row in B_smem],
                     a_frag=a_frag, b_frag=b_frag,
-                    c_frag=[[c_frag[p][q] for q in range(BN)] for p in range(BM)],
+                    c_frag=[[c_frag[p][q] for q in range(bn)] for p in range(bm)],
                 ))
-            for p in range(BM):
-                for q in range(BN):
+            for p in range(bm):
+                for q in range(bn):
                     C[r0 + p][c0 + q] = c_frag[p][q]
             # Snapshot C once per block, after that block's store, so the store
             # step carries the post-write value the contract asks for.
@@ -296,7 +361,7 @@ def torch_reference(A, B):
     return [[float(C[i][j]) for j in range(N)] for i in range(M)]
 
 
-def traffic(M, N, K, BM, BN, BK):
+def traffic(M, N, K, bm, bn, bk):
     """HBM element traffic for the naive and the tiled kernel.
 
     Naive: every one of the MN outputs reads its own K-row of A and K-column of
@@ -304,26 +369,139 @@ def traffic(M, N, K, BM, BN, BK):
     iterations moves BM*BK + BK*BN elements, and the reuse is exactly the block
     area divided by the tile perimeter. These are the numbers the narration and
     the page quote, computed here so they cannot drift from the algorithm.
+
+    Everything here scales with the tile, which is the point of the lab: growing
+    `bm`/`bn` grows the reuse, and shrinking `bk` grows the number of block
+    iterations and therefore the traffic. Both appear in
+    `blocks * (bm*bk + bk*bn)`, and the page's sliders move exactly that.
     """
-    blocks = (M // BM) * (N // BN) * (K // BK)
+    blocks = (M // bm) * (N // bn) * (K // bk)
     naive_reads = 2 * M * N * K
-    tiled_reads = blocks * (BM * BK + BK * BN)
+    flops = 2 * M * N * K
+    tiled_reads = tiled_read_count(M, N, K, bm, bn, bk)
+    # The same quotient written the tutorial's way — tile area over tile
+    # perimeter, `bm*bn / (2*(bm+bn))`. Published alongside the counted form
+    # precisely so the lint can require them to agree: they are two routes to one
+    # number, and a page quoting both would otherwise be making two independent
+    # claims that nothing keeps in step.
+    closed_ai = (bm * bn) / (2 * (bm + bn))
+    counted_ai = flops / (tiled_reads * 4)
     return dict(
         blocks=blocks,
+        # The number of HBM -> SMEM load OPERATIONS: one per (block, k-step)
+        # iteration, each moving an A-tile and a B-tile. This is the quantity the
+        # tutorial's §4.2 prices ("访问量从 O(MNK) 降到 O(MNK/BK · 常数) 量级"), and
+        # unlike the element count below it DOES depend on B_K: halving B_K
+        # doubles the number of loads. Published separately because the page
+        # shows "访存次数" and "搬运的元素量" as two different numbers, and they
+        # genuinely are two different quantities.
+        load_steps=blocks,
+        # The SMEM footprint of one k-step's tiles, in elements. §4.2's whole
+        # reason for splitting K is that this must fit the SMEM budget, so it is
+        # the number that says what a smaller B_K buys.
+        smem_tile=bm * bk + bk * bn,
         naive_reads=naive_reads,
         tiled_reads=tiled_reads,
         reuse=naive_reads / tiled_reads,
-        naive_flops=2 * M * N * K,
+        naive_flops=flops,
         naive_fma=M * N * K,
         naive_bytes=naive_reads * 4,
         tiled_bytes=tiled_reads * 4,
-        naive_ai=(2 * M * N * K) / (naive_reads * 4),
-        tiled_ai=(2 * M * N * K) / (tiled_reads * 4),
-        # V100's ridge point: 15.7 TFLOP/s / 900 GB/s. The toy tile stays far
-        # below it, which is the honest end to the story rather than a
-        # contradiction of the tutorial's 128x128 example.
-        ridge=15.7e12 / 900e9,
-        doc_ai=(128 * 128) / (2 * (128 + 128)),
+        naive_ai=flops / (naive_reads * 4),
+        tiled_ai=counted_ai,
+        tiled_ai_closed=closed_ai,
+        ridge=PEAK_FLOPS / BW_BYTES,
+        # The tutorial's 128x128 tile, computed rather than quoted: the same
+        # counting helper on a 128-cubed problem with a 128-cubed tile, so the
+        # reference marker on the Roofline is a call of this function and not a
+        # literal transcribed from section 4.3.
+        doc_reads=DOC_READS,
+        doc_ai=(2 * DOC_N ** 3) / (DOC_READS * 4),
+    )
+
+
+def tiled_read_count(M, N, K, bm, bn, bk):
+    """HBM element reads of the tiled kernel: whole blocks times tile perimeter.
+
+    Factored out of `traffic()` so the tutorial's 128x128 reference is a call of
+    the SAME function the live configurations go through, rather than a second
+    transcription of the formula that could drift from it.
+    """
+    blocks = (M // bm) * (N // bn) * (K // bk)
+    return blocks * (bm * bk + bk * bn)
+
+
+# The tutorial's BM=BN=BK=128 example (`4.1-CUDA GEMM算子性能优化.md` §4.3), sized
+# by the counting helper above. Kept as a module constant so `traffic()` can
+# publish it on every configuration without recursing into itself.
+DOC_N = 128
+DOC_READS = tiled_read_count(DOC_N, DOC_N, DOC_N, DOC_N, DOC_N, DOC_N)
+
+
+def roofline(tr):
+    """The Roofline placement of this configuration, as three real points.
+
+    The Roofline's two roofs are the hardware model: `bandwidth * ai` below the
+    ridge, `peak_flops` above it. A kernel at arithmetic intensity `ai` cannot
+    beat `min(peak, bandwidth * ai)` — so that minimum is what gets plotted, and
+    `bound` names which roof is binding. It is a CEILING and the field is named
+    for that: this lab times nothing, and a plotted "achieved FLOP/s" would be a
+    number no script produced.
+
+    Three points rather than one, because the comparison is the lesson:
+
+      * `naive` — the untiled kernel's 0.25 FLOP/Byte. It does not move with the
+        sliders, and that stillness is the control: it is what makes the tiled
+        point's movement mean something.
+      * `tiled` — this configuration. The only point the sliders move.
+      * `doc` — the tutorial's BM=BN=128 tile, 32 FLOP/Byte. Drawn as a
+        reference so a reader can see that the toy tile's whole journey stays on
+        the bandwidth roof, which is the honest end to the story rather than a
+        contradiction of section 4.3.
+    """
+    peak, bw = PEAK_FLOPS, BW_BYTES
+    ridge = peak / bw
+
+    def point(pid, label, elements, flops):
+        """One Roofline dot: a byte count, the FLOPs it bought, and the roof.
+
+        `ai` is DERIVED here from the other two rather than passed in, so the
+        point cannot claim an intensity its own byte and FLOP counts contradict.
+        `flops` is carried so the lint can re-derive it a third time: the chart,
+        the intensity and the traffic counter are then three statements about one
+        number instead of three independent ones.
+        """
+        bytes_ = elements * 4
+        ai = float(flops) / bytes_
+        ceiling = min(peak, bw * ai)
+        return dict(id=pid, label=label, ai=ai, elements=elements,
+                    bytes=bytes_, flops=flops, ceiling=ceiling,
+                    bound="bandwidth" if ai < ridge else "compute")
+
+    return dict(
+        peak_flops=peak,
+        bandwidth=bw,
+        ridge=ridge,
+        x_label="算术强度 (FLOP/Byte)",
+        # The y axis is drawn in TFLOP/s, and the DIVISOR is published beside
+        # the label rather than assumed by the view: a chart whose label reads
+        # TFLOP/s while its ticks are FLOP/s is wrong in a way no reader can
+        # see, and the pair is the only way to keep the two in step. See the
+        # "y_divisor" rule in both lint ports.
+        y_label="可达算力上界 (TFLOP/s)",
+        y_divisor=1e12,
+        y_unit="TFLOP/s",
+        note="点画在 min(峰值算力, 带宽 × 算术强度) 上，是 Roofline 给出的上界，"
+             "不是实测值 —— 本实验室没有对任何 kernel 计时。",
+        points=[
+            # The naive and tiled points are both this configuration's problem:
+            # 2MNK FLOPs each, differing only in the bytes they moved to get
+            # them. The doc point is a DIFFERENT problem (128 cubed), which is
+            # why it carries its own FLOP count rather than borrowing this trace's.
+            point("naive", "朴素（不分块）", tr["naive_reads"], tr["naive_flops"]),
+            point("tiled", "本配置分块", tr["tiled_reads"], tr["naive_flops"]),
+            point("doc", "教程 128×128", tr["doc_reads"], 2 * DOC_N ** 3),
+        ],
     )
 
 
@@ -366,22 +544,27 @@ def step(sid, title, kind, op, phase, formula, bindings, reads, writes, state,
 LAYERS = ("HBM", "SMEM", "REG")
 
 
-def build_trace(title, source):
+def build_trace(title, source, bm, bn, bk):
     A, B = np.array(A_DATA, dtype=np.float64), np.array(B_DATA, dtype=np.float64)
     C_naive = run_naive(A, B)
-    C_tiled, frames = run_tiled(A, B)
+    C_tiled, frames = run_tiled(A, B, bm, bn, bk)
 
     # The load-bearing assertion: tiling moves data differently and must not
     # change the arithmetic. See the module docstring for why this is exact
-    # rather than approximate.
+    # rather than approximate. Run for EVERY configuration, not just the
+    # default: a tile that changed the answer is caught here whichever slider
+    # position produced it, so the claim "the sliders move the traffic and not
+    # the result" is checked 27 times rather than once.
     if not np.array_equal(np.array(C_naive), np.array(C_tiled)):
         bad = [(i, j, C_naive[i][j], C_tiled[i][j])
                for i in range(M) for j in range(N)
                if C_naive[i][j] != C_tiled[i][j]]
-        raise AssertionError(f"tiled != naive at {len(bad)} entries, first {bad[0]}")
+        raise AssertionError(f"tiled({bm},{bn},{bk}) != naive at {len(bad)} entries, "
+                             f"first {bad[0]}")
 
     _, worst = check_against_torch(C_naive)
-    tr = traffic(M, N, K, BM, BN, BK)
+    tr = traffic(M, N, K, bm, bn, bk)
+    roof = roofline(tr)
 
     steps = []
 
@@ -400,14 +583,14 @@ def build_trace(title, source):
          b("M", "M", str(M), str(M)),
          b("N", "N", str(N), str(N)),
          b("K", "K", str(K), str(K)),
-         b("BM", "B_M", str(BM), str(BM)),
-         b("BN", "B_N", str(BN), str(BN)),
-         b("BK", "B_K", str(BK), str(BK)),
+         b("BM", "B_M", str(bm), str(bm)),
+         b("BN", "B_N", str(bn), str(bn)),
+         b("BK", "B_K", str(bk), str(bk)),
          b("NB", r"(M/B_M)(N/B_N)(K/B_K)",
-           f"({M}/{BM})({N}/{BN})({K}/{BK})", str(tr["blocks"]))],
+           f"({M}/{bm})({N}/{bn})({K}/{bk})", str(tr["blocks"]))],
         [], ["C"], {"C": mat(np.zeros((M, N)))},
-        f"A 和 B 已经在 HBM 里，C 先清零。{M}×{N}×{K} 的矩阵按 {BM}×{BN}×{BK} 分块，"
-        f"C 是 {M // BM}×{N // BN} 个块，每个块沿 K 要迭代 {K // BK} 次。",
+        f"A 和 B 已经在 HBM 里，C 先清零。{M}×{N}×{K} 的矩阵按 {bm}×{bn}×{bk} 分块，"
+        f"C 是 {M // bm}×{N // bn} 个块，每个块沿 K 要迭代 {K // bk} 次。",
     ))
 
     # ------------------------------------------- phase 1: 单点积 C_00
@@ -487,13 +670,13 @@ def build_trace(title, source):
 
     # ------------------------------------------- phase 3: 分块搬运
     for f in frames:
-        bi, bj, bk = f["bi"], f["bj"], f["bk"]
+        bi, bj, bki = f["bi"], f["bj"], f["bk"]
         r0, c0, k0 = f["r0"], f["c0"], f["k0"]
-        tag = f"{bi}{bj}{bk}"
-        moved = (BM * BK + BK * BN) * 4
+        tag = f"{bi}{bj}{bki}"
+        moved = (bm * bk + bk * bn) * 4
 
         steps.append(step(
-            f"ld{tag}", f"块({bi},{bj})·K{bk + 1}：A、B 的 tile 载入 SMEM",
+            f"ld{tag}", f"块({bi},{bj})·K{bki + 1}：A、B 的 tile 载入 SMEM",
             "comm", "load", "分块搬运",
             {
                 "sym": r"A^{\mathrm{sm}} \leftarrow \mathrm{HBM}[A]\left[\slot{R0}:\slot{R1},\ \slot{K0}:\slot{K1}\right],"
@@ -503,31 +686,31 @@ def build_trace(title, source):
                 "num": r"\region{MOVE}{A^{\mathrm{sm}},\; B^{\mathrm{sm}} \leftarrow \slot{BYTES}\ \mathrm{B}}",
             },
             [b("R0", r"(b_i)B_M", str(r0), str(r0)),
-             b("R1", r"(b_i+1)B_M", str(r0 + BM), str(r0 + BM)),
+             b("R1", r"(b_i+1)B_M", str(r0 + bm), str(r0 + bm)),
              b("K0", r"(b_k)B_K", str(k0), str(k0)),
-             b("K1", r"(b_k+1)B_K", str(k0 + BK), str(k0 + BK)),
+             b("K1", r"(b_k+1)B_K", str(k0 + bk), str(k0 + bk)),
              b("C0", r"(b_j)B_N", str(c0), str(c0)),
-             b("C1", r"(b_j+1)B_N", str(c0 + BN), str(c0 + BN)),
+             b("C1", r"(b_j+1)B_N", str(c0 + bn), str(c0 + bn)),
              b("BYTES", r"4(B_MB_K + B_KB_N)",
-               f"4\\times({BM * BK} + {BK * BN})", str(moved))],
+               f"4\\times({bm * bk} + {bk * bn})", str(moved))],
             ["A", "B"], ["A_smem", "B_smem"],
             {"A_smem": mat(np.array(f["A_smem"])),
              "B_smem": mat(np.array(f["B_smem"]))},
-            f"块({bi},{bj}) 的第 {bk + 1} 个 K 迭代：A 的 [{r0}:{r0 + BM}, {k0}:{k0 + BK}] 和 "
-            f"B 的 [{k0}:{k0 + BK}, {c0}:{c0 + BN}] 从 HBM 搬进 SMEM，"
-            f"共 {BM * BK + BK * BN} 个 float（{moved} 字节）。"
-            f"这一对 tile 接下来会被块内 {BM * BN} 个输出点复用。",
-            {"MOVE": f"这次搬运把 A、B 各一个 {BM}×{BK} 的 tile 送进 SMEM，"
-                     f"合计 {BM * BK + BK * BN} 个 float，即 {moved} 字节。"
-                     f"朴素实现算这 {BM * BN} 个输出点要读 {BM * BN * 2 * K} 个元素。"},
-            {"A": [[r0, r0 + BM], [k0, k0 + BK]],
-             "B": [[k0, k0 + BK], [c0, c0 + BN]]},
-            flows=[{"from": "HBM", "to": "SMEM", "elements": BM * BK + BK * BN,
-                    "note": f"A 的 {BM}×{BK} tile 与 B 的 {BK}×{BN} tile，一次搬完"}],
+            f"块({bi},{bj}) 的第 {bk + 1} 个 K 迭代：A 的 [{r0}:{r0 + bm}, {k0}:{k0 + bk}] 和 "
+            f"B 的 [{k0}:{k0 + bk}, {c0}:{c0 + bn}] 从 HBM 搬进 SMEM，"
+            f"共 {bm * bk + bk * bn} 个 float（{moved} 字节）。"
+            f"这一对 tile 接下来会被块内 {bm * bn} 个输出点复用。",
+            {"MOVE": f"这次搬运把 A、B 各一个 {bm}×{bk} 的 tile 送进 SMEM，"
+                     f"合计 {bm * bk + bk * bn} 个 float，即 {moved} 字节。"
+                     f"朴素实现算这 {bm * bn} 个输出点要读 {bm * bn * 2 * K} 个元素。"},
+            {"A": [[r0, r0 + bm], [k0, k0 + bk]],
+             "B": [[k0, k0 + bk], [c0, c0 + bn]]},
+            flows=[{"from": "HBM", "to": "SMEM", "elements": bm * bk + bk * bn,
+                    "note": f"A 的 {bm}×{bk} tile 与 B 的 {bk}×{bn} tile，一次搬完"}],
         ))
 
         steps.append(step(
-            f"mma{tag}", f"块({bi},{bj})·K{bk + 1}：SMEM → REG 外积累加",
+            f"mma{tag}", f"块({bi},{bj})·K{bki + 1}：SMEM → REG 外积累加",
             "op", "fma", "分块搬运",
             {
                 "sym": r"C^{\mathrm{frag}}_{pq} \mathrel{+}= \sum_{\slot{P}} "
@@ -538,14 +721,14 @@ def build_trace(title, source):
                        r"\slot{BV} \leftarrow B^{\mathrm{sm}}\left[\slot{PL},:\right],\qquad "
                        r"\region{OUTER}{\slot{FRAG}}",
             },
-            [b("P", "p", str(BK - 1), str(BK - 1)),
+            [b("P", "p", str(bk - 1), str(bk - 1)),
              b("P0", "0", "0", "0"),
-             b("P1", "B_K-1", str(BK - 1), str(BK - 1)),
-             b("PL", "B_K-1", str(BK - 1), str(BK - 1)),
+             b("P1", "B_K-1", str(bk - 1), str(bk - 1)),
+             b("PL", "B_K-1", str(bk - 1), str(bk - 1)),
              b("AV", r"A^{\mathrm{sm}}[:,B_K-1]",
-               f"A^{{\\mathrm{{sm}}}}[:,{BK - 1}]", vec_tex(f["a_frag"])),
+               f"A^{{\\mathrm{{sm}}}}[:,{bk - 1}]", vec_tex(f["a_frag"])),
              b("BV", r"B^{\mathrm{sm}}[B_K-1,:]",
-               f"B^{{\\mathrm{{sm}}}}[{BK - 1},:]", vec_tex(f["b_frag"])),
+               f"B^{{\\mathrm{{sm}}}}[{bk - 1},:]", vec_tex(f["b_frag"])),
              # The outer product reads the same at every tier -- what the num
              # tier substitutes is the operands, not this line. The accumulator
              # it produces is rendered by the stage as a REG-resident block.
@@ -555,22 +738,22 @@ def build_trace(title, source):
             ["A_smem", "B_smem", "c_frag"], ["a_frag", "b_frag", "c_frag"],
             {"a_frag": vec(f["a_frag"]), "b_frag": vec(f["b_frag"]),
              "c_frag": mat(np.array(f["c_frag"]))},
-            f"线程把 A_smem 的第 {BK} 列 {BM} 个数、B_smem 的第 {BK} 行 {BN} 个数搬进寄存器，"
-            f"然后做外积。本块的 {BK} 个 k 里，每轮读 {BM} + {BN} = {BM + BN} 个 float，"
-            f"完成 {BM * BN} 次 FMA —— 这就是 SMEM 这一级买到的复用。",
-            {"OUTER": f"每轮 SMEM 读 {BM + BN} 个 float 做 {BM * BN} 次 FMA，"
-                      f"比例 {BM * BN} / {BM + BN} = {BM * BN // (BM + BN)} : 1，"
+            f"线程把 A_smem 的第 {bk} 列 {bm} 个数、B_smem 的第 {bk} 行 {bn} 个数搬进寄存器，"
+            f"然后做外积。本块的 {bk} 个 k 里，每轮读 {bm} + {bn} = {bm + bn} 个 float，"
+            f"完成 {bm * bn} 次 FMA —— 这就是 SMEM 这一级买到的复用。",
+            {"OUTER": f"每轮 SMEM 读 {bm + bn} 个 float 做 {bm * bn} 次 FMA，"
+                      f"比例 {bm * bn} / {bm + bn} = {bm * bn // (bm + bn)} : 1，"
                       f"而朴素实现是每读 2 个 float 做 1 次 FMA。"},
-            {"A_smem": [[0, BM], [BK - 1, BK]],
-             "B_smem": [[BK - 1, BK], [0, BN]]},
+            {"A_smem": [[0, bm], [bk - 1, bk]],
+             "B_smem": [[bk - 1, bk], [0, bn]]},
             # Two flows, not three, and the count is the point: a_frag and
-            # b_frag crossed SMEM -> REG (BM + BN elements). c_frag did not --
+            # b_frag crossed SMEM -> REG (bm + bn elements). c_frag did not --
             # it is an accumulator that stays in REG -- which is why deriving
             # the flow from `writes` would be wrong here.
-            flows=[{"from": "SMEM", "to": "REG", "elements": BM + BN,
-                    "note": f"A_smem 的 {BM} 个 + B_smem 的 {BN} 个，共 {BM + BN} 个进寄存器"},
-                   {"from": "REG", "to": "REG", "elements": BM * BN,
-                    "note": f"寄存器内的 {BM * BN} 次 FMA，c_frag 原地累加，不跨层"}],
+            flows=[{"from": "SMEM", "to": "REG", "elements": bm + bn,
+                    "note": f"A_smem 的 {bm} 个 + B_smem 的 {bn} 个，共 {bm + bn} 个进寄存器"},
+                   {"from": "REG", "to": "REG", "elements": bm * bn,
+                    "note": f"寄存器内的 {bm * bn} 次 FMA，c_frag 原地累加，不跨层"}],
         ))
 
         # The store comes once per block, after its last k iteration.
@@ -587,20 +770,20 @@ def build_trace(title, source):
                            r"\leftarrow C^{\mathrm{frag}},\qquad C_{\slot{SI}\slot{SJ}} = \slot{SV}",
                 },
                 [b("R0", r"(b_i)B_M", str(r0), str(r0)),
-                 b("R1", r"(b_i+1)B_M", str(r0 + BM), str(r0 + BM)),
+                 b("R1", r"(b_i+1)B_M", str(r0 + bm), str(r0 + bm)),
                  b("C0", r"(b_j)B_N", str(c0), str(c0)),
-                 b("C1", r"(b_j+1)B_N", str(c0 + BN), str(c0 + BN)),
+                 b("C1", r"(b_j+1)B_N", str(c0 + bn), str(c0 + bn)),
                  b("SI", "i", str(r0), str(r0)),
                  b("SJ", "j", str(c0), str(c0)),
                  b("SV", r"C_{ij}", f"C_{{{r0}{c0}}}", fmt(C_tiled[r0][c0]))],
                 ["c_frag"], ["C"],
                 {"C": mat(np.array(f["C_after"]))},
-                f"块({bi},{bj}) 的 {BM}×{BN} 个结果从寄存器写回 HBM。这 {BM * BN} 个输出点"
-                f"一共从 HBM 读了 {(K // BK) * (BM * BK + BK * BN)} 个元素，"
-                f"朴素实现要读 {BM * BN * 2 * K} 个。算出来的值两者逐位相同。",
-                spans={"C": [[r0, r0 + BM], [c0, c0 + BN]]},
-                flows=[{"from": "REG", "to": "HBM", "elements": BM * BN,
-                        "note": f"{BM}×{BN} 个输出点从寄存器写回 HBM"}],
+                f"块({bi},{bj}) 的 {bm}×{bn} 个结果从寄存器写回 HBM。这 {bm * bn} 个输出点"
+                f"一共从 HBM 读了 {(K // bk) * (bm * bk + bk * bn)} 个元素，"
+                f"朴素实现要读 {bm * bn * 2 * K} 个。算出来的值两者逐位相同。",
+                spans={"C": [[r0, r0 + bm], [c0, c0 + bn]]},
+                flows=[{"from": "REG", "to": "HBM", "elements": bm * bn,
+                        "note": f"{bm}×{bn} 个输出点从寄存器写回 HBM"}],
             ))
 
     # ------------------------------------------- 收尾：把账算清楚
@@ -617,7 +800,7 @@ def build_trace(title, source):
         },
         [b("RD", r"2MNK", f"2\\times{M}\\times{N}\\times{K}", str(tr["naive_reads"])),
          b("TD", r"\frac{MNK}{B_MB_NB_K}(B_MB_K+B_KB_N)",
-           f"{tr['blocks']}\\times({BM * BK}+{BK * BN})", str(tr["tiled_reads"])),
+           f"{tr['blocks']}\\times({bm * bk}+{bk * bn})", str(tr["tiled_reads"])),
          b("RDI", r"2MNK", str(tr["naive_reads"]), str(tr["naive_reads"])),
          b("TDI", r"\mathrm{reads}_{\mathrm{tiled}}",
            str(tr["tiled_reads"]), str(tr["tiled_reads"])),
@@ -628,7 +811,7 @@ def build_trace(title, source):
          b("RIDGE", r"\mathrm{peak}/\mathrm{bw}", "17.4", "17.4")],
         ["A", "B"], [], {},
         f"同样一个 C，朴素实现从 HBM 读 {tr['naive_reads']} 个元素，"
-        f"按 {BM}×{BN}×{BK} 分块只要 {tr['tiled_reads']} 个，少了 {tr['reuse']:.0f} 倍。"
+        f"按 {bm}×{bn}×{bk} 分块只要 {tr['tiled_reads']} 个，少了 {tr['reuse']:.0f} 倍。"
         f"算术强度从 {disp(tr['naive_ai'])} 抬到 {disp(tr['tiled_ai'])} FLOP/Byte —— "
         f"方向和教程里说的一致，但离 V100 的平衡点 {disp(tr['ridge'])} 还差得远："
         f"这个 8×8 的例子是为了把搬运过程看清楚，真要把算力打满，tile 得大到 "
@@ -638,7 +821,7 @@ def build_trace(title, source):
         flows=[{"from": "HBM", "to": "SMEM", "elements": tr["tiled_reads"],
                 "note": f"整趟回放的 HBM → SMEM 总搬运量：{tr['tiled_reads']} 个元素"},
                {"from": "SMEM", "to": "REG",
-                "elements": tr["blocks"] * (BM + BN) * BK,
+                "elements": tr["blocks"] * (bm + bn) * bk,
                 "note": "整趟回放的 SMEM → REG 总搬运量"}],
     ))
 
@@ -660,17 +843,17 @@ def build_trace(title, source):
         edges.append({"from": f"d{k}", "to": f"d{k + 1}", "tensor": "acc"})
     edges.append({"from": f"d{K - 1}", "to": "d8", "tensor": "acc"})
     edges.append({"from": "init", "to": "naive", "tensor": "A"})
-    for bi in range(M // BM):
-        for bj in range(N // BN):
-            for bk in range(K // BK):
-                tag = f"{bi}{bj}{bk}"
+    for bi in range(M // bm):
+        for bj in range(N // bn):
+            for bki in range(K // bk):
+                tag = f"{bi}{bj}{bki}"
                 edges.append({"from": "init", "to": f"ld{tag}", "tensor": "A"})
                 edges.append({"from": f"ld{tag}", "to": f"mma{tag}", "tensor": "A_smem"})
-                if bk > 0:
+                if bki > 0:
                     # The K loop carries the accumulator across block iterations.
-                    edges.append({"from": f"mma{bi}{bj}{bk - 1}", "to": f"mma{tag}",
+                    edges.append({"from": f"mma{bi}{bj}{bki - 1}", "to": f"mma{tag}",
                                   "tensor": "c_frag"})
-            edges.append({"from": f"mma{bi}{bj}{K // BK - 1}", "to": f"st{bi}{bj}",
+            edges.append({"from": f"mma{bi}{bj}{K // bk - 1}", "to": f"st{bi}{bj}",
                           "tensor": "c_frag"})
 
     return {
@@ -678,14 +861,16 @@ def build_trace(title, source):
             "lab": "L01",
             "title": title,
             "source": source,
-            "config": {"M": M, "N": N, "K": K, "B_M": BM, "B_N": BN, "B_K": BK},
+            "config": {"M": M, "N": N, "K": K, "B_M": bm, "B_N": bn, "B_K": bk},
             "reference": (
                 f"C = A·B，torch float64 matmul 对拍最大绝对偏差 {worst:.3g}"
                 f"（相对容差 {_CHECK_REL_TOL:g}）；朴素 k 序循环与 "
-                f"B_M=B_N=B_K={BM} 分块逐位相同（np.array_equal）；"
-                f"HBM 读取 {tr['naive_reads']} → {tr['tiled_reads']} 个元素"
+                f"B_M={bm}、B_N={bn}、B_K={bk} 分块逐位相同（np.array_equal）；"
+                f"HBM 读取 {tr['naive_reads']} → {tr['tiled_reads']} 个元素，"
+                f"算术强度 {tr['naive_ai']:.4g} → {tr['tiled_ai']:.4g} FLOP/B"
             ),
             "traffic": tr,
+            "roofline": roof,
         },
         "tensors": {
             # A and B are inputs: no step ever writes them, so they carry `init`
@@ -706,15 +891,15 @@ def build_trace(title, source):
             "acc": {"shape": [], "dtype": "fp32", "at": "REG", "role": "state",
                     "init": 0.0, "note": "点积累加器，标量"},
             # The tiled phase's three hops.
-            "A_smem": {"shape": [BM, BK], "dtype": "fp32", "at": "SMEM", "role": "staging",
+            "A_smem": {"shape": [bm, bk], "dtype": "fp32", "at": "SMEM", "role": "staging",
                        "note": "A 的当前 tile，块内所有线程共享"},
-            "B_smem": {"shape": [BK, BN], "dtype": "fp32", "at": "SMEM", "role": "staging",
+            "B_smem": {"shape": [bk, bn], "dtype": "fp32", "at": "SMEM", "role": "staging",
                        "note": "B 的当前 tile，块内所有线程共享"},
-            "a_frag": {"shape": [BM], "dtype": "fp32", "at": "REG", "role": "staging",
+            "a_frag": {"shape": [bm], "dtype": "fp32", "at": "REG", "role": "staging",
                        "note": "线程私有：A_smem 的一列"},
-            "b_frag": {"shape": [BN], "dtype": "fp32", "at": "REG", "role": "staging",
+            "b_frag": {"shape": [bn], "dtype": "fp32", "at": "REG", "role": "staging",
                        "note": "线程私有：B_smem 的一行"},
-            "c_frag": {"shape": [BM, BN], "dtype": "fp32", "at": "REG", "role": "state",
+            "c_frag": {"shape": [bm, bn], "dtype": "fp32", "at": "REG", "role": "state",
                        "note": "线程私有的累加器，跨 K 迭代保持"},
         },
         "graph": {"nodes": nodes, "edges": edges},
@@ -879,8 +1064,143 @@ def lint(trace):
                 gaps.append(f'步骤 "{sid}" 的 flows 搬运量为 {fl.get("elements")!r}，'
                             f"应为正整数")
 
+    # ---- meta.roofline: the points the sliders move -----------------------
+    #
+    # Every field here is re-derived from something else in the trace rather than
+    # trusted, because the page's parameter story is two statements about the
+    # same quantity: "读取 1024 → 256 个元素" and "算术强度 0.25 → 2.0". If those
+    # could be written independently they could disagree, and the reader would
+    # have no way to tell which one the picture was drawn from.
+    roof = (trace.get("meta") or {}).get("roofline")
+    if not isinstance(roof, dict):
+        gaps.append("meta.roofline 缺失 —— 参数滑杆的 Roofline 图没有数据")
+    else:
+        required = ("peak_flops", "bandwidth", "ridge", "points",
+                    "x_label", "y_label", "y_divisor", "y_unit", "note")
+        for key in required:
+            if key not in roof:
+                gaps.append(f"meta.roofline 缺 {key}")
+        peak, bw = roof.get("peak_flops"), roof.get("bandwidth")
+        # `have_model` gates every check below that divides by, multiplies by or
+        # compares against the ridge. A trace that is MISSING the ridge has
+        # already been reported once, in the required-keys loop above; walking on
+        # regardless would turn that report into a KeyError from the middle of
+        # the function, which reads as a broken lint rather than as a broken trace.
+        have_model = (isinstance(peak, (int, float)) and isinstance(bw, (int, float))
+                      and bw > 0 and isinstance(roof.get("ridge"), (int, float)))
+        yd = roof.get("y_divisor")
+        if not isinstance(yd, (int, float)) or not (yd > 0) or not math.isfinite(yd):
+            gaps.append(f'meta.roofline.y_divisor = {yd!r} 应为正数 —— '
+                        f"纵轴刻度按它换算")
+        else:
+            # The label and the divisor are the two halves of one statement about
+            # what the y axis means; naming a unit in the label and dividing the
+            # ticks by something else would make the chart unreadable by exactly
+            # the factor between them.
+            unit = roof.get("y_unit")
+            if not isinstance(unit, str) or not unit:
+                gaps.append(f'meta.roofline.y_unit = {unit!r} 应为非空字符串')
+            elif unit not in (roof.get("y_label") or ""):
+                gaps.append(f'meta.roofline.y_label 里没有写明单位 "{unit}" —— '
+                            f"刻度按 {yd:g} 换算，读者无从知道单位是什么")
+        if have_model:
+            if not math.isclose(roof["ridge"], peak / bw, rel_tol=1e-12):
+                gaps.append(f'meta.roofline.ridge = {roof.get("ridge")!r} 应为 '
+                            f"峰值算力 / 带宽 = {peak / bw!r}")
+            # The hardware model must be the one `traffic()` priced the kernel
+            # against, or the chart and the summary step would draw two ridges.
+            if not (math.isclose(peak, PEAK_FLOPS, rel_tol=1e-12)
+                    and math.isclose(bw, BW_BYTES, rel_tol=1e-12)):
+                gaps.append(f"meta.roofline 的硬件模型 ({peak!r}, {bw!r}) 与生成器里的 "
+                            f"V100 常数 ({PEAK_FLOPS!r}, {BW_BYTES!r}) 不一致")
+        elif "ridge" in roof:
+            gaps.append("meta.roofline 有 ridge 却没有像样的 peak_flops / bandwidth —— "
+                        "平衡点无从核对")
+        pts = roof.get("points")
+        ids = [p.get("id") for p in pts] if isinstance(pts, list) else []
+        # Everything below re-derives a point's numbers from the point's own
+        # counts, so it needs the list to be the right three things first; a
+        # missing key is reported once above rather than crashing the walk.
+        if ids != ["naive", "tiled", "doc"]:
+            gaps.append(f"meta.roofline.points 的 id 是 {ids!r}，应该是 "
+                        f"['naive', 'tiled', 'doc']（顺序也参与渲染）")
+        elif not have_model:
+            pass
+        else:
+            cfg_ = trace["meta"]["config"]
+            flops = 2 * cfg_["M"] * cfg_["N"] * cfg_["K"]
+            by_id = {p["id"]: p for p in pts}
+            for pid, p in by_id.items():
+                bs, ai = p.get("bytes"), p.get("ai")
+                pf = p.get("flops")
+                if not isinstance(bs, int) or bs <= 0:
+                    gaps.append(f'meta.roofline.points["{pid}"].bytes = {bs!r} 应为正整数')
+                    continue
+                if p.get("elements", 0) * 4 != bs:
+                    gaps.append(f'meta.roofline.points["{pid}"] 的 elements 与 bytes 不符')
+                # The point's intensity must be its OWN flops over its OWN bytes.
+                # This is the rule that keeps "读取 1024 → 256 个元素" and "算术强度
+                # 0.25 → 2.0" from becoming two unrelated claims.
+                if not isinstance(pf, (int, float)):
+                    gaps.append(f'meta.roofline.points["{pid}"].flops = {pf!r} 不是数')
+                    continue
+                if not math.isclose(ai, pf / bs, rel_tol=1e-12):
+                    gaps.append(f'meta.roofline.points["{pid}"].ai = {ai!r} 与它自己的 '
+                                f"flops / bytes = {pf} / {bs} = {pf / bs!r} 不一致 —— "
+                                f"图上的点和它标称的访存量是两套说法")
+                    continue
+                want = "bandwidth" if ai < roof["ridge"] else "compute"
+                if p.get("bound") != want:
+                    gaps.append(f'meta.roofline.points["{pid}"].bound = '
+                                f'{p.get("bound")!r}，而在 AI = {ai!r} 上起作用的是 '
+                                f'"{want}" 的屋顶')
+                want_ceiling = min(peak, bw * ai)
+                if not math.isclose(p.get("ceiling", -1), want_ceiling, rel_tol=1e-12):
+                    gaps.append(f'meta.roofline.points["{pid}"].ceiling = '
+                                f'{p.get("ceiling")!r} 应为 min(峰值, 带宽×AI) = '
+                                f"{want_ceiling!r}")
+            # The naive and tiled points are THIS configuration's problem, so
+            # their element counts are the traffic counts and their FLOPs are
+            # 2MNK. The doc point is the tutorial's 128-cubed example and is
+            # deliberately not tied to this trace's sizes.
+            tr_ = trace["meta"]["traffic"]
+            for pid, key in (("tiled", "tiled_reads"), ("naive", "naive_reads")):
+                if by_id[pid].get("elements") != tr_[key]:
+                    gaps.append(f'meta.roofline 的 {pid} 点用了 '
+                                f'{by_id[pid].get("elements")!r} 个元素，'
+                                f'而 meta.traffic.{key} = {tr_[key]!r}')
+                if by_id[pid].get("flops") != flops:
+                    gaps.append(f'meta.roofline 的 {pid} 点用了 '
+                                f'{by_id[pid].get("flops")!r} FLOPs，而本配置是 '
+                                f"2MNK = {flops}")
+            if not math.isclose(tr_["tiled_ai"], tr_["tiled_ai_closed"], rel_tol=1e-12):
+                gaps.append(f'meta.traffic 的两种算法不一致：计数式 {tr_["tiled_ai"]!r} vs '
+                            f'闭式 B_MB_N/(2(B_M+B_N)) = {tr_["tiled_ai_closed"]!r}')
+            if not math.isclose(by_id["tiled"]["ai"], tr_["tiled_ai"], rel_tol=1e-12):
+                gaps.append(f'meta.roofline 的 tiled 点 AI = {by_id["tiled"]["ai"]!r} 与 '
+                            f'meta.traffic.tiled_ai = {tr_["tiled_ai"]!r} 不一致')
+            # Where the reading starts: the naive kernel has no tile at all, so
+            # its point must be the same one on every configuration. That
+            # stillness is the control the tiled point's movement is read
+            # against, and it is checkable here because the naive intensity falls
+            # out of the problem size alone: 2MNK FLOPs over 2MNK fp32 reads.
+            naive_ai = flops / (2 * cfg_["M"] * cfg_["N"] * cfg_["K"] * 4)
+            if not math.isclose(by_id["naive"]["ai"], naive_ai, rel_tol=1e-12):
+                gaps.append(f'meta.roofline 的 naive 点 AI = {by_id["naive"]["ai"]!r} '
+                            f"应恒为 2MNK/8MNK = {naive_ai!r}，与分块参数无关")
+
     infos.append(f'共 {len(trace["steps"])} 步 / {len(trace["graph"]["nodes"])} 节点 / '
                  f'{len(trace["graph"]["edges"])} 数据边')
+    # The info line is built from whatever survived; a trace broken by a sabotage
+    # must produce GAPs, not an exception from the reporting that follows them.
+    if isinstance(roof, dict) and isinstance(roof.get("points"), list) \
+            and isinstance(roof.get("ridge"), (int, float)):
+        tiled_pt = next((p for p in roof["points"] if p.get("id") == "tiled"), None)
+        if isinstance(tiled_pt, dict) and isinstance(tiled_pt.get("ceiling"), (int, float)):
+            infos.append(f'Roofline：AI {tiled_pt["ai"]:.4g} FLOP/B（ridge '
+                         f'{roof["ridge"]:.4g}）· 上界 '
+                         f'{tiled_pt["ceiling"] / 1e12:.4g} TFLOP/s · '
+                         f'{tiled_pt["bound"]}-bound')
     infos.append(f'state 写过的张量：{", ".join(sorted(written))}')
     return gaps, warns, infos
 
@@ -912,7 +1232,38 @@ SABOTAGE_CASES = {
         {"flows": [{"from": "HBM", "to": "L2CACHE", "elements": 4}]}),
     "flow with a non-positive element count": lambda t: t["steps"][2].update(
         {"flows": [{"from": "HBM", "to": "REG", "elements": 0}]}),
+    # --- meta.roofline: the parameter sliders' chart ------------------------
+    # Tagged with a "roofline " prefix so a parity harness can tell which cases
+    # belong to the new contract without hard-coding an index.
+    "roofline block missing": lambda t: t["meta"].pop("roofline"),
+    "roofline missing the ridge point": lambda t: t["meta"]["roofline"].pop("ridge"),
+    "roofline ridge not peak/bandwidth": lambda t: t["meta"]["roofline"].update({"ridge": 5.0}),
+    "roofline points in the wrong order": lambda t: t["meta"]["roofline"].update(
+        {"points": list(reversed(t["meta"]["roofline"]["points"]))}),
+    "roofline point with no counterpart in traffic": lambda t: _roof_point(
+        t, "tiled").update({"elements": 7}),
+    "roofline ai disagreeing with its own bytes": lambda t: _roof_point(
+        t, "tiled").update({"ai": 99.0}),
+    "roofline ceiling not min(peak, bandwidth*ai)": lambda t: _roof_point(
+        t, "naive").update({"ceiling": 1.0}),
+    "roofline naming the wrong roof": lambda t: _roof_point(
+        t, "tiled").update({"bound": "compute"}),
+    "roofline hardware model diverging from the generator's": lambda t: t["meta"][
+        "roofline"].update({"peak_flops": 1.0}),
+    "roofline y-axis divisor missing": lambda t: t["meta"]["roofline"].pop("y_divisor"),
+    "roofline y-axis unit not named in the label": lambda t: t["meta"]["roofline"].update(
+        {"y_label": "可达算力上界"}),
 }
+
+
+def _roof_point(trace, pid):
+    """The one point in `meta.roofline.points` with this id.
+
+    Addressed by id rather than by index so a case keeps pointing at the point it
+    means if the list order ever changes -- and so the "points in the wrong
+    order" case above cannot silently retarget the others.
+    """
+    return next(p for p in trace["meta"]["roofline"]["points"] if p["id"] == pid)
 
 
 def sabotage_checks(trace):
@@ -942,40 +1293,247 @@ def sabotage_checks(trace):
     return failures
 
 
+# The non-finite tagging `--js-lint` needs. Nothing in an L01 trace is
+# non-finite -- no sentinels are used at all -- but two sabotages put a bare
+# `Infinity` in, and `json.dumps` writes that as the token `Infinity`, which is
+# legal JavaScript and ILLEGAL JSON: a payload carrying one could not be parsed
+# by the probe at all, and the harness would fail before either lint ran. The
+# tags keep the payload valid while delivering the same value; the probe decodes
+# `{"__nonfinite__": "inf"}` back into `Infinity`. Same device, and the same
+# reason, as flash_attention.py's -- that is where the case needing it appeared.
+_NONFINITE_TAGS = {float("nan"): "nan", float("inf"): "inf", float("-inf"): "-inf"}
+
+
+def _tag_nonfinite(value):
+    if isinstance(value, float):
+        for probe, tag in _NONFINITE_TAGS.items():
+            # `probe == value` is False for every NaN, so identity is the only
+            # test that works for the NaN case.
+            if probe != probe:
+                if value != value:
+                    return {"__nonfinite__": tag}
+            elif value == probe and math.copysign(1, value) == math.copysign(1, probe):
+                return {"__nonfinite__": tag}
+        return value
+    if isinstance(value, dict):
+        return {k: _tag_nonfinite(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_tag_nonfinite(v) for v in value]
+    return value
+
+
+def _payload_json(payload):
+    return json.dumps(_tag_nonfinite(payload), ensure_ascii=False)
+
+
 # ------------------------------------------------------------------------ main
 SOURCE = ("docs/guides/模块二-CUDA编程与算子优化/4.1-CUDA GEMM算子性能优化.md"
           " + 模块一-前置知识/第2章-数学基础.md §3")
-FILENAME = "gemm-tiling.json"
+SET = "gemm-tiling"
+
+# The parameter grid the page's sliders walk. A full product of {2, 4, 8} per
+# parameter, filtered to combinations that divide M=N=K=8 -- all 27 of them,
+# which is why 8 is the problem size the lab picked. A tile that did not divide
+# would leave a partial block, and tail handling is L06's subject, not L01's
+# (see the module docstring); the filter is here so the grid stays correct if
+# the problem size ever moves.
+#
+# A full product rather than a hand-picked list, because that is what makes the
+# sliders three independent controls instead of three positions of one knob: a
+# reader can hold B_K fixed and watch B_M move, which is exactly the comparison
+# the tutorial's §4.3 closed form is about.
+GRID_VALUES = (2, 4, 8)
+
+
+def grid():
+    out = []
+    for bm in GRID_VALUES:
+        for bn in GRID_VALUES:
+            for bk in GRID_VALUES:
+                if M % bm or N % bn or K % bk:
+                    continue
+                out.append((bm, bn, bk))
+    return out
+
+
+def cfg_id(bm, bn, bk):
+    return f"{SET}-BM{bm}-BN{bn}-BK{bk}"
+
+
+def label(bm, bn, bk):
+    return f"B_M={bm} · B_N={bn} · B_K={bk}"
 
 
 def main():
-    trace = build_trace("GEMM 分块与数据搬运（M=N=K=8，B_M=B_N=B_K=4）", SOURCE)
-    gaps, warns, infos = lint(trace)
+    only_json = "--js-lint" in sys.argv
+    real_stdout = sys.stdout
+    if only_json:
+        # Every human-readable line goes to stderr so stdout carries the JSON
+        # payload and nothing else -- the parity harness pipes it straight into
+        # `node`. A stray progress line would make the payload unparseable, which
+        # reads as a harness bug rather than as this mode's own contract.
+        sys.stdout = sys.stderr
 
-    # Lint and the sabotage control group run BEFORE the file is touched: a
-    # trace that does not pass must not be able to reach labs/.
-    sabotages = sabotage_checks(trace)
-    for line in gaps:
-        print(f"  GAP   {line}")
-    if gaps or sabotages:
-        for line in sabotages:
-            print(f"  LINT-DEAD  {line}")
-        print("lint or its control group failed -- nothing written", file=sys.stderr)
+    fails, written, built = [], [], {}
+    for (bm, bn, bk) in grid():
+        name = cfg_id(bm, bn, bk)
+        trace = build_trace(f"GEMM 分块与数据搬运（M=N=K=8，{label(bm, bn, bk)}）",
+                            SOURCE, bm, bn, bk)
+        gaps, warns, infos = lint(trace)
+        # Every configuration's control group runs, not just the default's: the
+        # grid is 27 traces, and a rule that only bit at B_M=4 would otherwise be
+        # reported live on the strength of a trace it never saw.
+        sabotages = sabotage_checks(trace)
+
+        tr = trace["meta"]["traffic"]
+        roof = trace["meta"]["roofline"]
+        tiled_pt = next(p for p in roof["points"] if p["id"] == "tiled")
+        print(f"\n{name}: {len(trace['steps'])} 步 / {len(trace['graph']['nodes'])} 节点, "
+              f"{len(json.dumps(trace, ensure_ascii=False))} bytes")
+        print(f"  分块 {bm}×{bn}×{bk} · {tr['blocks']} 个块 · HBM 读取 "
+              f"{tr['naive_reads']} → {tr['tiled_reads']} 个元素"
+              f"（复用 {tr['reuse']:.4g}×）")
+        print(f"  AI {tr['naive_ai']:.4g} → {tr['tiled_ai']:.4g} FLOP/B"
+              f"（闭式 {tr['tiled_ai_closed']:.4g}）· ridge {roof['ridge']:.4g} · "
+              f"{tiled_pt['bound']}-bound，上界 {tiled_pt['ceiling'] / 1e12:.4g} TFLOP/s")
+        print(f"  {trace['meta']['reference']}")
+        for line in infos:
+            print(f"  info  {line}")
+        for line in warns:
+            print(f"  warn  {line}")
+        for line in gaps:
+            print(f"  GAP   {line}")
+            fails.append(f"{name}: {line}")
+        if sabotages:
+            fails.append(f"{name}: lint 对照组失效")
+            for line in sabotages:
+                print(f"  LINT-DEAD  {line}")
+        else:
+            print(f"  lint: {len(gaps)} gap / {len(warns)} warn；"
+                  f"对照 {len(SABOTAGE_CASES)} 种破坏全部被抓到")
+        built[name] = trace
+
+    # The cross-configuration claim a single-trace lint cannot make: the sliders
+    # must actually MOVE something. A grid in which every tile produced the same
+    # traffic would lint perfectly and teach nothing, so it is asserted here --
+    # and the naive point's stillness is asserted alongside it, because that is
+    # what makes the tiled point's movement readable as a comparison rather than
+    # as a chart that redraws itself arbitrarily.
+    if not only_json and not fails:
+        tiled_ais = {n: next(p for p in t["meta"]["roofline"]["points"]
+                             if p["id"] == "tiled")["ai"] for n, t in built.items()}
+        naive_ais = {next(p for p in t["meta"]["roofline"]["points"]
+                          if p["id"] == "naive")["ai"] for t in built.values()}
+        if len(set(tiled_ais.values())) < 2:
+            fails.append("整张网格的 tiled 点 AI 完全相同 —— 滑杆什么也移动不了")
+            print("  GAP   滑杆移动不了 Roofline 上的点：整张网格 AI 相同")
+        if len(naive_ais) != 1:
+            fails.append(f"朴素点的 AI 随分块参数变了：{sorted(naive_ais)}")
+            print(f"  GAP   朴素点本该与分块参数无关，却有 {len(naive_ais)} 个值")
+
+        # ---- what B_K does and does not move, asserted in both directions ----
+        #
+        # This is the one place the lab has to be careful, because the honest
+        # answer is asymmetric. Under this traffic model each output block walks
+        # the whole K range, so chunking K changes only how the loads are
+        # GROUPED: total element traffic is `MNK(1/B_M + 1/B_N)` and `B_K`
+        # cancels — which is exactly why the tutorial's §4.3 closed form,
+        # `B_M·B_N/(2(B_M+B_N))`, has no B_K in it at all.
+        #
+        # What B_K does move is the number of load operations (halving B_K
+        # doubles them) and the SMEM tile `B_M·B_K + B_K·B_N` — the quantity
+        # §4.2 says is the reason to split K in the first place. Both are
+        # published, both are shown, and both are asserted here.
+        #
+        # Asserting the INVARIANCE as well as the sensitivity is the point: a
+        # future edit that quietly made B_K change the traffic would break the
+        # closed form the page prints, and one that made it change nothing at all
+        # would leave a dead slider. Neither can pass this.
+        by_params = {}
+        for name, t in built.items():
+            c = t["meta"]["config"]
+            key = (c["B_M"], c["B_N"])
+            by_params.setdefault(key, []).append(
+                (c["B_K"], t["meta"]["traffic"]["tiled_reads"],
+                 t["meta"]["traffic"]["tiled_ai"],
+                 t["meta"]["traffic"]["load_steps"],
+                 t["meta"]["traffic"]["smem_tile"]))
+        bad_inv, bad_sens = [], []
+        for key, rows in sorted(by_params.items()):
+            rows.sort()
+            if len({r[1] for r in rows}) != 1 or len({r[2] for r in rows}) != 1:
+                bad_inv.append((key, [(r[0], r[1], r[2]) for r in rows]))
+            # Across the B_K values, both the load count and the SMEM tile must
+            # actually differ -- otherwise the B_K slider would be inert.
+            if len(rows) > 1 and (len({r[3] for r in rows}) < 2 or len({r[4] for r in rows}) < 2):
+                bad_sens.append((key, [(r[0], r[3], r[4]) for r in rows]))
+        if bad_inv:
+            fails.append(f"B_K 改变了元素搬运量 —— 与 §4.3 闭式矛盾：{bad_inv[:1]}")
+            print(f"  GAP   B_K 只该改变分组，不该改变元素量，却有 {len(bad_inv)} 组在变")
+        if bad_sens:
+            fails.append(f"B_K 什么也没改变（滑杆是死的）：{bad_sens[:1]}")
+            print(f"  GAP   B_K 滑杆没有可移动的量：{len(bad_sens)} 组")
+        if not fails:
+            bk_rows = sorted({(c["B_K"], t["meta"]["traffic"]["load_steps"],
+                               t["meta"]["traffic"]["smem_tile"])
+                              for t in built.values()
+                              for c in [t["meta"]["config"]]})
+            print(f"\n滑杆确实有东西可移动：B_M / B_N 把 tiled 点 AI 从 "
+                  f"{min(tiled_ais.values()):.4g} 拉到 {max(tiled_ais.values()):.4g} "
+                  f"FLOP/B（{len(set(tiled_ais.values()))} 个不同值）；对照的朴素点恒为 "
+                  f"{naive_ais.pop():.4g}")
+            print("  B_K 的作用相反且同样已验证：元素搬运量与 AI 对它完全不变"
+                  "（§4.3 的闭式里没有 B_K），但它把载入次数与 SMEM tile 的大小"
+                  f"按 1/B_K 缩放 —— {len({r[0] for r in bk_rows})} 个 B_K 值给出 "
+                  f"{sorted({r[1] for r in bk_rows})} 种载入次数")
+
+    if only_json:
+        # `base` names which trace the sabotages were cut from, so the JS side can
+        # tell "the lint missed this" from "the mutation changed nothing".
+        base_name = cfg_id(*DEFAULT_TILE)
+        base = built[base_name]
+        payload = {"traces": built, "base": base_name, "sabotages": {}}
+        for name, mutate in SABOTAGE_CASES.items():
+            broken = copy.deepcopy(base)
+            try:
+                mutate(broken)
+            except Exception as exc:
+                payload["sabotages"][name] = {"error": repr(exc)}
+                continue
+            payload["sabotages"][name] = {
+                "trace": broken,
+                "changed": json.dumps(broken, sort_keys=True)
+                           != json.dumps(base, sort_keys=True),
+            }
+        real_stdout.write(_payload_json(payload))
+        return 0
+
+    if fails:
+        print("\nlint / 断言未通过，拒绝写文件：", file=sys.stderr)
+        for line in fails:
+            print(f"  {line}", file=sys.stderr)
         return 1
 
-    out = HERE / FILENAME
-    out.write_text(json.dumps(trace, indent=1, ensure_ascii=False) + "\n")
+    for name, trace in built.items():
+        out = HERE / f"{name}.json"
+        out.write_text(json.dumps(trace, indent=1, ensure_ascii=False) + "\n")
+        written.append(name)
 
-    print(f"{out.name}: {len(trace['steps'])} 步 / {len(trace['graph']['nodes'])} 节点, "
-          f"{out.stat().st_size} bytes")
-    print(f"  {trace['meta']['reference']}")
-    for line in infos:
-        print(f"  info  {line}")
-    for line in warns:
-        print(f"  warn  {line}")
-    print(f"  lint: {len(gaps)} gap / {len(warns)} warn")
-    print(f"  lint 对照组：{len(SABOTAGE_CASES)} 种破坏全部被抓到"
-          f"（证明上面的 0 不是 lint 永远报 0）")
+    manifest = {
+        "set": SET,
+        "lab": "L01",
+        "default": cfg_id(*DEFAULT_TILE),
+        "params": {
+            "B_M": sorted({bm for (bm, _, _) in grid()}),
+            "B_N": sorted({bn for (_, bn, _) in grid()}),
+            "B_K": sorted({bk for (_, _, bk) in grid()}),
+        },
+        "traces": written,
+        "labels": {cfg_id(bm, bn, bk): label(bm, bn, bk) for (bm, bn, bk) in grid()},
+    }
+    (HERE / f"{SET}.manifest.json").write_text(
+        json.dumps(manifest, indent=1, ensure_ascii=False) + "\n")
+    print(f"{SET}.manifest.json: {len(written)} 个配置，默认 {manifest['default']}")
     return 0
 
 
