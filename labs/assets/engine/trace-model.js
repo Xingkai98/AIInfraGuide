@@ -560,6 +560,21 @@
       });
       var byId = {};
       methods.forEach(function (m) { byId[m.id] = m; });
+
+      /* One axis is shared across all three rows, so it has to span the widest
+       * method. Understating it clips the other rows' bars, with no other
+       * symptom — so it is a gap, not a warning. */
+      if (methods.length) {
+        var widest = Math.max.apply(null, methods.map(function (m) { return m.reads || 0; }));
+        if (cmp.axis_max !== widest) {
+          gaps.push({
+            what: 'compare.axis_max = ' + JSON.stringify(cmp.axis_max) +
+                  '，应该是三条轨迹里最大的 reads = ' + widest,
+            why: '横轴共用，取小了会把其它轨迹的条裁掉。'
+          });
+        }
+      }
+
       if ((byId.naive || {}).final === SENTINEL.POS_INF) {
         warns.push({
           what: 'compare 的朴素版最终值是 +∞ 而不是 NaN',

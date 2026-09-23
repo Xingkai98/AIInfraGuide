@@ -235,6 +235,11 @@
       safe.reads = 2 * t.meta.config.N;
     },
     'compare 带裸 NaN': function (t) { t.compare.methods[0].frames[1].out = NaN; },
+    /* The axis is shared across all three methods, so it has to span the
+     * widest one. Understating it silently clips the other tracks' bars. */
+    'compare.axis_max 不是最宽的方法': function (t) {
+      t.compare.axis_max = 1;
+    },
     'shift_invariance 缺失': function (t) { delete t.compare.shift_invariance; },
     'shift_invariance 报了个有限值': function (t) {
       t.compare.shift_invariance.shifted_final = 1.0;
