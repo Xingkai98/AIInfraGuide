@@ -90,6 +90,33 @@ export const LAB_REGISTRY: Record<string, LabEntry> = {
     ],
     published: true,
   },
+  '模块二-cuda编程与算子优化/61-flashattention-v1详解': {
+    labId: 'L06',
+    title: 'FlashAttention V1 回放',
+    summary:
+      '外层 K/V 块 × 内层 Q 块，在 HBM / SRAM 双层舞台上逐帧走一遍：抬 m、用 α = e^(m_old − m_new) 重缩放 ℓ 与 O。' +
+      'S 和 P 从头到尾没进过 HBM —— 这一点是访问日志数出来的，旁边挂着与标准 Attention 的实测 IO 对照曲线。',
+    page: `${LAB_BASE}/04-flash-attention.html`,
+    requires: ['L00'],
+    links: [
+      { label: '从第一步开始' },
+      // Step 3 is the first `s00`: S_ij lands in SRAM and nothing at all moves
+      // in HBM. Steps 0–2 are the init and the K/V load, where the SRAM row is
+      // still filling up and the claim this lab is about has nothing to show.
+      { label: '跳到 S_ij 在 SRAM 里生成那一步', search: '?step=3' },
+      // Step 8 is the first write-back: O_i, m_i and ℓ_i leaving SRAM for HBM
+      // is V1's redundant traffic made visible, and it is what L07 (V2) removes.
+      // (Step 7 is the output update that produces those values.)
+      { label: '跳到第一次把 O_i、m_i、ℓ_i 写回 HBM', search: '?step=8' },
+      // The M=128 cell gives B_c=2 -- the smallest blocks the page replays, and
+      // the one where the SRAM account visibly exceeds the tutorial's 4·B_c·d
+      // bound, because the S/P buffer and the row statistics that bound omits
+      // stop being negligible once the blocks are small.
+      { label: '跳到最小分块（B_c=2，占用账超出公式主导项）',
+        search: '?cfg=flash-attention-N8-d16-M128&step=3' },
+    ],
+    published: true,
+  },
   '模块二-cuda编程与算子优化/41-cuda-gemm算子性能优化': {
     labId: 'L01',
     title: 'GEMM 分块与数据搬运',

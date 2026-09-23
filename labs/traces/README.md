@@ -46,15 +46,27 @@ literally true for a parameterised lab: `T` is applied as `x/T` here, not on the
 page, and a configuration with no trace behind it is unreachable by construction.
 
 The generators that have landed so far: `online_softmax.py` (L00),
-`gemm_tiling.py` (L01), `kv_cache.py` (L05), `continuous_batching.py` (L10).
+`gemm_tiling.py` (L01), `kv_cache.py` (L05), `continuous_batching.py` (L10),
+`ring_allreduce.py` (L13), `flash_attention.py` (L06).
 
-Two of them double as the fixture their view component is validated against,
-which is why they carry a block on top of the usual trace: `kv_cache.py` has
-`ledger` for the memory-ledger view (`labs/assets/engine/views/ledger.js`,
-ticket #45), and `continuous_batching.py` has `gantt` for the gantt view
-(ticket #46). Writing that fixture is how a view ticket breaks the circular
-dependency — the lab that would consume it is blocked by the view, but trace
-generation does not depend on the view.
+Several of them double as the fixture their view component is validated
+against, which is why they carry a block on top of the usual trace: `kv_cache.py`
+has `ledger` for the memory-ledger view (`labs/assets/engine/views/ledger.js`,
+ticket #45), `continuous_batching.py` has `gantt` for the gantt view (ticket
+#46), `ring_allreduce.py` has the ring contract (ticket #47), and
+`flash_attention.py` drives the memory-hierarchy stage
+(`labs/assets/engine/views/tiling-stage.js`, ticket #20). Writing that fixture
+is how a view ticket breaks the circular dependency — the lab that would consume
+it is blocked by the view, but trace generation does not depend on the view.
+
+The other half of that coin is what a shared component must NOT do. Because
+`tiling-stage.js` is driven by four different labs, every rule its lint carries
+is gated on the trace declaring the corresponding field (`step.occ` → the
+occupancy account, `step.io` → the counter, `meta.sram`/`meta.io`/
+`meta.exposure` → the summaries). A rule that fired unconditionally would turn
+L01's three-layer GEMM replay red for not having FlashAttention's fields. The
+gates are derived from a field one level DOWN from what they gate, so the
+sabotage that deletes a `meta` block can still be caught.
 
 ## Two optional step fields a trace may use
 
@@ -69,6 +81,41 @@ on the step, so `resolve(trace, i)` stays a pure function of the cursor.
   accumulator update and a block store both look like a write, and only one of
   them moves anything. The generator's docstring works through the two cases
   that make the derivation wrong.
+
+## The `occ` / `io` step fields and the `sram` / `io` / `exposure` blocks (added by ticket #20)
+
+Three more step fields and three trace-level summaries, all optional and all
+consumed by the memory-hierarchy stage and L06's panels. Like `ledger` below,
+each is inert on a trace that does not declare it — which is what lets four
+different labs share one view component.
+
+- **`step.occ`** — the occupancy account: `{elements, parts: [{name, label,
+  shape, elements, covers?}]}`. `parts` must name **exactly** the tensors the
+  pure reconstruction says are resident in that layer at that step, so the lint
+  re-derives the resident set from `state` rather than trusting the account to
+  describe itself. `covers` is how a merged buffer is spelled: one allocation
+  named for two tensors (L06's `S`/`P`, where `P = exp(S - m_new)` is computed in
+  place) lists the tensors on it, and the rule is that those are exactly the ones
+  currently resident — so an account cannot claim a shared buffer holds both
+  members before the second exists, and the component needs to know nothing about
+  which lab merges what.
+- **`step.io`** — `{step, cum}`: HBM elements accessed by this step, and the
+  running total. `cum` must equal the previous `cum` plus this `step`, so the
+  per-frame numbers and the total cannot drift apart.
+- **`meta.sram`** — the peak of that account, its `peak_step`, and the parts
+  broken out. The lint requires `used` to equal the maximum over the steps and
+  `dominant` to equal `4·B_c·d`, which is the term the tutorial's `B_c = ⌈M/4d⌉`
+  bound constrains.
+- **`meta.io`** — the measured totals for both implementations, the formulas that
+  PREDICT them, and the curves. The lint's requirement is that measured equals
+  predicted, so the page's two statements about the same quantity cannot
+  disagree; the prediction is written separately from the counter precisely so
+  that assertion has two sides.
+- **`meta.exposure`** — the headline claim as a measurement: which tensors the
+  forbidden set contains, which of them each implementation actually touched, and
+  how many times. `flash_forbidden_accesses` must be 0 and
+  `standard_forbidden_accesses` must NOT be — the second half is the control that
+  makes the first mean anything, and the lint enforces both.
 
 ## The `ledger` block (added by ticket #45)
 
