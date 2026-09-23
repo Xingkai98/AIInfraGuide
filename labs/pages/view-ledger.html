@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>视图组件 · 显存账本 - AIInfraGuide</title>
+    <meta
+      name="description"
+      content="显存账本视图组件的验收页：以 L05 的真实 KV Cache trace 驱动堆叠条，并演示 L14 要复用的二维矩阵布局。"
+    />
+    <link rel="canonical" href="./view-ledger.html" />
+    <link rel="stylesheet" href="./assets/vendor/katex/katex.min.css" />
+    <link rel="stylesheet" href="./assets/engine/lab.css" />
+    <link rel="stylesheet" href="./assets/engine/views/ledger.css" />
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        margin: 0;
+        padding: 20px 22px 56px;
+        background: #f9fafb;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+          'Helvetica Neue', 'Noto Sans CJK SC', sans-serif;
+      }
+      @media (prefers-color-scheme: dark) { body { background: #0b1120; } }
+      .lab-back { display: inline-block; margin-bottom: 14px; color: #007aff; font-size: 13.5px; text-decoration: none; }
+      .lab-provenance {
+        margin-top: 22px;
+        padding-top: 14px;
+        border-top: 1px solid rgba(128, 128, 128, 0.25);
+        color: #6b7280;
+        font-size: 12px;
+        line-height: 1.6;
+      }
+      @media (prefers-color-scheme: dark) { .lab-provenance { color: #9ca3af; } }
+      .lab-provenance code {
+        background: rgba(128, 128, 128, 0.14);
+        border-radius: 4px;
+        padding: 1px 5px;
+        font: 0.92em/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .lab-banner {
+        margin: 0 0 14px;
+        padding: 8px 12px;
+        border: 1px solid rgba(0, 122, 255, 0.35);
+        border-radius: 8px;
+        background: rgba(0, 122, 255, 0.07);
+        font-size: 12.5px;
+        color: #1f2937;
+      }
+      @media (prefers-color-scheme: dark) { .lab-banner { color: #e5e7eb; } }
+      .demo-panel { margin-top: 12px; }
+      .demo-ctl { display: flex; flex-wrap: wrap; gap: 16px; padding: 10px 12px; align-items: center; }
+      .demo-ctl label { display: flex; align-items: center; gap: 7px; font-size: 12px; color: #6b7280; }
+      @media (prefers-color-scheme: dark) { .demo-ctl label { color: #9ca3af; } }
+      .demo-ctl input[type="range"] { width: 128px; accent-color: #007aff; }
+      .demo-ctl .demo-val { font: 650 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace; color: #007aff; min-width: 62px; }
+    </style>
+  </head>
+  <!--
+    This page is the acceptance harness for the ledger view component, not a
+    lab. It exists so the component can be verified against a real trace and
+    screenshotted; L05 (#19) will mount the same component inside its own lab
+    page with the roofline and the attention-shape comparison alongside.
+
+    Two build-time facts it inherits from the engine's scaffolding: the
+    no-index marker must wrap <body>, and asset paths are relative to the
+    SERVED location (scripts/build-labs.mjs flattens labs/pages/*.html to
+    public/labs/*.html), so `./assets/…`, never `../assets/…`.
+  -->
+  <body data-pagefind-ignore>
+    <a class="lab-back" href="./">← 全部实验室</a>
+    <p class="lab-banner">
+      <b>这是视图组件的验收页，不是 lab 页。</b>
+      它用 L05 的真实 trace（<code>labs/traces/kv_cache.py</code> 生成）驱动显存账本组件，
+      并演示 L14 要复用的二维矩阵布局。L05 的正式页面（含 Roofline 与 attention shape 对比）
+      由 #19 在此组件之上搭建。
+    </p>
+
+    <main id="lab"></main>
+
+    <section class="lab-root demo-panel" id="matrix-demo">
+      <section class="lab-panel">
+        <div class="lab-panel-hd">
+          <span class="lab-panel-t">二维矩阵布局（供 L14 复用）</span>
+          <span class="lab-panel-sub">同一份模型参数，按 ZeRO 各阶段的切分公式重算</span>
+        </div>
+        <div class="lab-panel-bd" id="matrix-host" style="padding:10px 12px"></div>
+      </section>
+    </section>
+
+    <p class="lab-provenance">
+      本页每个数字都来自一次真实的计算。<b>账本分项</b>来自
+      <code>labs/traces/kv_cache.py</code>：它用 numpy 跑一遍逐 token 生成，
+      <b>先用真实数组的元素个数</b>（<code>arr.size</code>）数出每一步的显存账，
+      再用两种独立的参照核对 —— 一是 torch 的无缓存全前缀重算（每一步的 32 维 logits 逐元素对拍，
+      实测最大偏差 2.2e-15），二是两条闭式公式（参数 <code>Σ numel(Wᵢ)·b</code>、
+      KV <code>2·L·H_kv·d_h·N·B·b</code>）。
+      视图组件在 <code>labs/assets/engine/views/ledger.js</code>，不含任何 lab 专属的显存公式 ——
+      公式由页面作为「代价模型」传入，所以 L14 的 ZeRO 公式和 L05 的 KV 公式共用同一个渲染器。
+    </p>
+
+    <!-- KaTeX is vendored, never a CDN: a lab page must make zero external requests. -->
+    <script src="./assets/vendor/katex/katex.min.js"></script>
+    <script src="./assets/engine/trace-model.js"></script>
+    <script src="./assets/engine/layout.js"></script>
+    <script src="./assets/engine/formula.js"></script>
+    <script src="./assets/engine/dag.js"></script>
+    <script src="./assets/engine/tensors.js"></script>
+    <script src="./assets/engine/narrow.js"></script>
+    <script src="./assets/engine/player.js"></script>
+    <script src="./assets/engine/verify.js"></script>
+    <script src="./assets/engine/views/ledger.js"></script>
+
+    <!-- The trace is substituted here at build time from labs/traces/<name>.json. -->
+    <!-- trace:kv-cache -->
+
+    <script>
+      (function () {
+        'use strict';
+        var trace = (window.LabTraces || {})['kv-cache'];
+        if (!trace) {
+          document.getElementById('lab').textContent =
+            'trace 未加载：本页的 trace 占位符没有被构建脚本替换。';
+          return;
+        }
+
+        /* ============================================================ the cost model
+         *
+         * This lab's memory formulas, as a PURE function of config. It lives on
+         * the page rather than in the component because it is lab content: L14
+         * supplies its own ZeRO model and the renderer does not change.
+         *
+         * Every branch below is the closed form the two tutorial guides state
+         * (1.1 §2.3 and 3.8 §6.4 for the KV cache; 3.1 for the parameter count),
+         * ported from `labs/traces/kv_cache.py`. The trace's own bytes were
+         * counted from real arrays, so agreement between the two is a genuine
+         * cross-check and not the same code evaluated twice.
+         */
+        /* Model shapes default to the shared example model, so a scaling
+         * property below can pass a two-key config (`{seq_len: 256}`) and get a
+         * meaningful answer instead of NaN. The byte widths default to fp16 —
+         * the deployment dtype the trace prices in. */
+        var MODEL_DEFAULTS = {
+          L: 2, d_model: 64, H: 4, d_head: 16, d_ff: 176, vocab: 32, B: 1,
+          n_q: 1, q: 0, weight_bytes: 2, kv_bytes: 2, act_bytes: 2
+        };
+
+        var MODEL = {
+          id: 'kv-cache',
+          segments: trace.ledger.segments,
+          unit: trace.ledger.unit,
+
+          /* The working set of one sub-step. There is no textbook closed form
+           * for activations — the enumeration *is* the definition — so it is
+           * spelled out shape by shape and the Python side does the same. */
+          liveSpecs: function (phase, c, n, t) {
+            var d = c.d_model, dff = c.d_ff, H = c.H;
+            var byPhase = {
+              kv: [n * d, n * d, n * H * (d / H), n * H * (d / H)],
+              attn: [n * d, n * d, H * n * t, H * n * t, n * d, n * d, n * d],
+              ffn: [n * d, n * d, n * dff, n * dff, n * dff, n * d, n * d],
+              head: [n * d, n * d, c.vocab]
+            };
+            var shapes = byPhase[phase];
+            if (!shapes) throw new Error('unknown ledger phase: ' + phase);
+            return shapes.reduce(function (a, b) { return a + b; }, 0);
+          },
+
+          predict: function (cfg) {
+            var c = {};
+            Object.keys(MODEL_DEFAULTS).forEach(function (k) { c[k] = MODEL_DEFAULTS[k]; });
+            Object.keys(cfg || {}).forEach(function (k) { c[k] = cfg[k]; });
+            /* `layers` is the per-step truth; `L` is the same number on
+             * meta.config. Either alone would work, but taking `layers` first
+             * means the step's own config always wins. */
+            var L = c.layers !== undefined ? c.layers : c.L;
+
+            var perLayer = 4 * c.d_model * c.d_model + 3 * c.d_model * c.d_ff +
+                           4 * c.d_model;                    // Wq,Wk,Wv,Wo + Wg,Wu,Wd + ln1/ln2
+            var paramsElems = c.vocab * c.d_model + L * perLayer + 2 * c.d_model +
+                              c.vocab * c.d_model;              // embed + layers + ln_f + lm_head
+            /* 2 × L × H_kv × d_h × N × B — the guide's KV formula, transcribed
+             * literally: L is the layer count and N the positions per layer.
+             *
+             * It is written with `seq_len` for N rather than with the trace's
+             * `kv_rows_total`, because the latter is *already* L × N — putting
+             * both in would count the layers twice and inflate the cache by a
+             * factor of L. (That is not hypothetical: it is what the first
+             * version of this model did, and the self-check caught it on the
+             * first run.) `kv_rows_total` is instead used where it belongs, as
+             * the invariant the ledger lint checks: kv_rows_total == L × N. */
+            var kvElems = 2 * L * c.H * c.d_head * c.seq_len * c.B;
+            var actElems = MODEL.liveSpecs(c.phase, c, c.n_q, c.seq_len);
+            return {
+              params: paramsElems * c.weight_bytes,
+              kv_cache: kvElems * c.kv_bytes,
+              activations: actElems * c.act_bytes
+            };
+          },
+
+          /* Properties of the formulas, not of one evaluation. A formula that
+           * is merely self-consistent while being wrong passes the per-step
+           * check and fails here — or vice versa, which is why both run. */
+          properties: [
+            {
+              name: '上下文长度翻倍 → KV Cache 精确翻倍，参数不动',
+              run: function (p) {
+                var a = p({ seq_len: 128, n_q: 1, phase: 'head', kv_rows_total: 2 * 128 });
+                var b = p({ seq_len: 256, n_q: 1, phase: 'head', kv_rows_total: 2 * 256 });
+                return {
+                  ok: b.kv_cache === 2 * a.kv_cache && b.params === a.params,
+                  detail: a.kv_cache.toLocaleString() + ' → ' + b.kv_cache.toLocaleString() + ' B'
+                };
+              }
+            },
+            {
+              /* Each property names the phase it is asking about, like every
+               * other config key. The model could default one, but a phase is
+               * what decides the working-set formula — silently assuming one
+               * would mean a property could pass while measuring a different
+               * quantity than its name says. */
+              name: '层数翻倍 → KV Cache 精确翻倍',
+              run: function (p) {
+                var a = p({ phase: 'head', n_q: 1, layers: 2, L: 2, seq_len: 7, kv_rows_total: 14 });
+                var b = p({ phase: 'head', n_q: 1, layers: 4, L: 4, seq_len: 7, kv_rows_total: 28 });
+                return {
+                  ok: b.kv_cache === 2 * a.kv_cache,
+                  detail: a.kv_cache.toLocaleString() + ' → ' + b.kv_cache.toLocaleString() + ' B'
+                };
+              }
+            },
+            {
+              name: '精度 fp16 → fp8 → KV Cache 字节数精确减半',
+              run: function (p) {
+                var a = p({ phase: 'head', n_q: 1, kv_bytes: 2, seq_len: 7, kv_rows_total: 14 });
+                var b = p({ phase: 'head', n_q: 1, kv_bytes: 1, seq_len: 7, kv_rows_total: 14 });
+                return {
+                  ok: a.kv_cache === 2 * b.kv_cache && b.kv_cache > 0,
+                  detail: b.kv_cache.toLocaleString() + ' → ' + a.kv_cache.toLocaleString() + ' B'
+                };
+              }
+            },
+            {
+              name: 'KV 头减半（MHA → GQA）→ KV Cache 精确减半，参数不动',
+              run: function (p) {
+                var a = p({ phase: 'head', n_q: 1, H: 4, seq_len: 7, kv_rows_total: 14 });
+                var b = p({ phase: 'head', n_q: 1, H: 2, seq_len: 7, kv_rows_total: 14 });
+                return {
+                  ok: a.kv_cache === 2 * b.kv_cache && b.kv_cache > 0 && a.params === b.params,
+                  detail: b.kv_cache.toLocaleString() + ' → ' + a.kv_cache.toLocaleString() + ' B'
+                };
+              }
+            },
+            {
+              name: '各分项之和 == 该配置下的总显存预测值',
+              run: function (p) {
+                var b = p({ seq_len: 8, n_q: 1, phase: 'head', kv_rows_total: 16 });
+                var direct = b.params + b.kv_cache + b.activations;
+                var sum = 0;
+                MODEL.segments.forEach(function (s) { sum += b[s.id]; });
+                return {
+                  ok: sum === direct,
+                  detail: sum.toLocaleString() + ' B'
+                };
+              }
+            }
+          ]
+        };
+
+        /* ============================================================ the replay
+         * The ledger rides on the player's documented extra-panel hook, so it is
+         * driven by the same render(trace, i) the DAG and the tensor grid are.
+         * Nothing here advances the ledger on its own — the panel's `render` is
+         * called from the player's single paint path.
+         */
+        var ledgerView = null;
+        var player = LabEngine.lab(trace, {
+          mount: '#lab',
+          title: '显存账本视图 · 以 L05 的 KV Cache trace 驱动',
+          lead: '逐 token 生成过程中，账本随上下文长度增长：参数一动不动，KV Cache 每步加宽。' +
+                '下方滑杆直接改配置，账本按公式重算 —— 不是换一张预先画好的图。',
+          tier: 'num',
+          tutorial: {
+            href: '/AIInfraGuide/prerequisites/transformer/38-从transformer到llm自回归生成深入理解',
+            label: '返回教程正文：3.8 从 Transformer 到 LLM 自回归生成'
+          },
+          panels: [{
+            id: 'ledger',
+            label: '显存账本',
+            render: function (step, ctx) {
+              /* The ledger is mounted BESIDE the engine's panel body, not into
+               * it. The engine assigns `host.innerHTML = render(...)` on every
+               * paint, which would detach a live view — and this view is stateful
+               * on purpose (hover highlighting, CSS transitions on the segment
+               * widths, so the reader watches the KV block grow rather than
+               * seeing it jump).
+               *
+               * `[data-panel="ledger"]` is the section the engine created and
+               * never touches again, so appending a sibling body to it survives
+               * every repaint. The first render happens before `lab()` has
+               * returned, but buildChrome has already run, so the section is in
+               * the DOM by the time this runs. */
+              if (!ledgerView) {
+                var section = document.querySelector('[data-panel="ledger"]');
+                var mount = document.createElement('div');
+                mount.className = 'lab-panel-bd';
+                mount.setAttribute('data-ledger-mount', '1');
+                section.appendChild(mount);
+                ledgerView = LabEngine.ledger.bar(mount, {
+                  segments: MODEL.segments,
+                  unit: MODEL.unit,
+                  caption: function (bytes, cfg) {
+                    if (!cfg) {
+                      var k = step.ledger.config;
+                      return '第 ' + ctx.cursor + ' 步 · ' + step.title +
+                        ' — 上下文 ' + k.seq_len + ' 个 token，KV Cache ' +
+                        k.layers + ' 层 × ' + k.seq_len + ' 行 = ' + k.kv_rows_total + ' 行。';
+                    }
+                    return '';
+                  }
+                });
+              }
+              /* The numbers come from the trace, not from the model: this is
+               * the replay, and the model's job is only to be *checked*
+               * against them (see the panel below). */
+              ledgerView.update(step.ledger.bytes);
+              ledgerView.root.setAttribute('data-step-id', step.id);
+              return '';
+            }
+          }]
+        });
+
+        /* ------------------------------------------------- the config sliders
+         * These DO go through the model, because their whole purpose is to show
+         * a configuration the trace never ran. Anything they produce is a
+         * prediction from the formula, and the self-check below is what says
+         * the formula is the same one the trace was counted with.
+         */
+        var baseConfig = (function () {
+          var c = {};
+          Object.keys(trace.meta.config).forEach(function (k) { c[k] = trace.meta.config[k]; });
+          return c;
+        })();
+
+        var ctl = document.createElement('section');
+        ctl.className = 'lab-panel lab-panel-extra';
+        ctl.innerHTML =
+          '<div class="lab-panel-hd"><span class="lab-panel-t">改配置，账本重算</span>' +
+            '<span class="lab-panel-sub">纯函数 predict(config) → 字节数，滑杆每动一次就重算一次</span>' +
+          '</div>' +
+          '<div class="demo-ctl" id="ctl-row"></div>' +
+          '<div class="lab-panel-bd" id="ctl-ledger" style="padding:0 12px 12px"></div>';
+        document.getElementById('lab').appendChild(ctl);
+
+        var sliders = [
+          { key: 'seq_len', label: '上下文长度', min: 1, max: 4096, step: 1, value: 8 },
+          { key: 'layers', label: '层数', min: 1, max: 80, step: 1, value: 2 },
+          { key: 'kv_bytes', label: 'KV 精度（字节/元素）', min: 1, max: 2, step: 1, value: 2 },
+          { key: 'H', label: 'KV 头数', min: 1, max: 32, step: 1, value: 4 }
+        ];
+        var controls = {};
+        var row = ctl.querySelector('#ctl-row');
+        sliders.forEach(function (s) {
+          var el = document.createElement('label');
+          el.innerHTML = s.label + ' <input type="range" min="' + s.min + '" max="' + s.max +
+            '" step="' + s.step + '" value="' + s.value + '"> <span class="demo-val"></span>';
+          row.appendChild(el);
+          var input = el.querySelector('input');
+          controls[s.key] = { input: input, out: el.querySelector('.demo-val') };
+          input.addEventListener('input', recompute);
+        });
+
+        var sliderLedger = LabEngine.ledger.bar(ctl.querySelector('#ctl-ledger'), {
+          segments: MODEL.segments,
+          unit: MODEL.unit
+        });
+
+        function recompute() {
+          var cfg = {};
+          Object.keys(baseConfig).forEach(function (k) { cfg[k] = baseConfig[k]; });
+          cfg.phase = 'head';
+          cfg.n_q = 1;
+          Object.keys(controls).forEach(function (k) {
+            cfg[k] = Number(controls[k].input.value);
+            controls[k].out.textContent = cfg[k];
+          });
+          /* The slide is a *deployment* configuration, so the layer count drives
+           * both the weights and the cache; the cache holds one row per layer
+           * per position, which is the invariant the trace's lint also checks. */
+          cfg.L = cfg.layers;
+          cfg.kv_rows_total = cfg.layers * cfg.seq_len;
+          var bytes = MODEL.predict(cfg);
+          sliderLedger.update(bytes);
+          var host = ctl.querySelector('#ctl-ledger');
+          var cap = host.querySelector('.lab-ledger-caption');
+          if (!cap) {
+            cap = document.createElement('div');
+            cap.className = 'lab-ledger-caption';
+            host.appendChild(cap);
+          }
+          var share = bytes.kv_cache / (bytes.params + bytes.kv_cache + bytes.activations);
+          cap.innerHTML = '这是 <b>预测值</b>，不是 trace 里跑过的配置：' +
+            cfg.layers + ' 层、上下文 ' + cfg.seq_len + '、每元素 ' + cfg.kv_bytes + ' 字节 → ' +
+            'KV Cache 占总显存 <b>' + (share * 100).toFixed(1) + '%</b>。' +
+            (share > 0.5 ? ' 到这个量级，KV Cache 已经比权重更占地方了。'
+                         : ' 权重仍是主体 —— 把上下文拉长，比例会翻过来。');
+          window.__ledgerDemo = bytes;
+        }
+        recompute();
+
+        /* ------------------------------------------------------ self-check panel
+         * Carries the control group, so a green verdict here means something.
+         * See labs/assets/engine/views/ledger.js.
+         */
+        var proof = document.createElement('section');
+        proof.className = 'lab-panel lab-panel-extra';
+        proof.innerHTML = '<div class="lab-panel-hd"><span class="lab-panel-t">自检 · 账本数值与契约</span>' +
+          '<span class="lab-panel-sub">在浏览器里真跑，不是预期值</span></div>' +
+          '<div class="lab-panel-bd" style="padding:10px 12px"></div>';
+        document.getElementById('lab').appendChild(proof);
+        var ledgerVerdict = LabEngine.ledger.panel(proof.querySelector('.lab-panel-bd'), trace, MODEL);
+
+        /* The engine's *jump* check, called directly rather than through
+         * `LabEngine.verify.panel`, because that panel's other half is not
+         * trace-generic: its lint control group is a fixed list of mutations
+         * written against L00's trace (`delete tensors.x`,
+         * `delete steps[2].bindings.MOLD.idx`, …), and this trace has no `x` and
+         * no `MOLD` on step 2. Two of its ten mutations are therefore no-ops
+         * here, and mounting the panel would paint a red "lint 对照组漏掉 2 种"
+         * verdict that says nothing about this trace or this component.
+         *
+         * The jump check below IS generic — it derives its ground truth from
+         * whatever trace it is handed — so it is used as-is. Reported to the
+         * tracker as a follow-up rather than fixed here: `labs/assets/engine/`
+         * is frozen for the duration of the view-component tickets. */
+        var engineProof = document.createElement('section');
+        engineProof.className = 'lab-panel lab-panel-extra';
+        engineProof.innerHTML = '<div class="lab-panel-hd">' +
+          '<span class="lab-panel-t">自检 · 引擎任意跳转</span>' +
+          '<span class="lab-panel-sub">账本数据所依附的纯函数重建，在这份 trace 上同样成立</span>' +
+          '</div><div class="lab-panel-bd" style="padding:10px 12px"></div>';
+        document.getElementById('lab').appendChild(engineProof);
+        (function () {
+          var j = LabEngine.verify.runJumpCheck(trace, player.index);
+          var host = engineProof.querySelector('.lab-panel-bd');
+          host.innerHTML = '<div class="lab-verdict ' + (j.passed ? 'lab-ok' : 'lab-bad') + '">' +
+            '<b>任意跳转 · 纯函数重建：</b>' + j.total + ' 次跳转，' +
+            (j.pureFailures === 0 ? '<b>0 次不一致</b>' : '<b>' + j.pureFailures + ' 次不一致</b>') +
+            '；对照组（故意做错的有状态播放器）<b>' + j.controlFailures + ' 次不一致</b>。' +
+            (j.conclusive ? ' 对照组确实翻车，说明这个 0 不是测试写错。'
+                          : ' <b>⚠️ 对照组也全过了 —— 这组跳转没有区分力。</b>') +
+            '</div>';
+          window.__labJump = { total: j.total, pureFailures: j.pureFailures,
+                               controlFailures: j.controlFailures, passed: j.passed,
+                               conclusive: j.conclusive };
+        })();
+
+        /* --------------------------------------------------- the 2-D matrix demo
+         *
+         * The layout L14 (#28) will fill in. The numbers are real: the parameter
+         * count comes from the same model, and ZeRO's sharding rules and AdamW's
+         * 12 bytes per parameter are the ones 模块三 3.1 and 第5章-ZeRO系列 state
+         * — optimizer state (fp32 master + m + v) sharded at Z1, gradients added
+         * at Z2, parameters added at Z3. They are NOT from a trace, and the panel
+         * heading says so; L14 will drive this same component from its own.
+         */
+        (function () {
+          function withBase(over) {
+            var c = {};
+            Object.keys(baseConfig).forEach(function (k) { c[k] = baseConfig[k]; });
+            Object.keys(over).forEach(function (k) { c[k] = over[k]; });
+            return c;
+          }
+          var P = MODEL.predict(withBase({
+            phase: 'head', n_q: 1, seq_len: 8,
+            kv_rows_total: baseConfig.L * 8
+          })).params / baseConfig.weight_bytes;     // parameter count, not bytes
+          var N = 4;                                // data-parallel ranks
+          var act = MODEL.predict(withBase({
+            phase: 'attn', n_q: 8, seq_len: 8,
+            kv_rows_total: baseConfig.L * 8
+          })).activations;
+
+          var rows = [
+            { id: 'params', label: '参数', color: MODEL.segments[0].color,
+              formula: MODEL.segments[0].formula },
+            { id: 'grads', label: '梯度', color: '#8b5cf6',
+              formula: '2\\times P\\times b_g' },
+            { id: 'optimizer', label: '优化器状态', color: '#0f9d8a',
+              formula: '12\\times P\\ \\text{(fp32 主权重 + } m + v\\text{)}' },
+            { id: 'activations', label: '激活', color: MODEL.segments[2].color,
+              formula: MODEL.segments[2].formula }
+          ];
+          var cols = [
+            { id: 'baseline', label: 'baseline', note: '全复制' },
+            { id: 'z1', label: 'ZeRO-1', note: '切优化器状态' },
+            { id: 'z2', label: 'ZeRO-2', note: '+ 切梯度' },
+            { id: 'z3', label: 'ZeRO-3', note: '+ 切参数' }
+          ];
+          var P16 = 2 * P;
+          var cells = {
+            params: { baseline: P16, z1: P16, z2: P16, z3: Math.round(P16 / N) },
+            grads: { baseline: P16, z1: P16, z2: Math.round(P16 / N), z3: Math.round(P16 / N) },
+            optimizer: { baseline: 12 * P, z1: Math.round(12 * P / N),
+                         z2: Math.round(12 * P / N), z3: Math.round(12 * P / N) },
+            activations: { baseline: act, z1: act, z2: act, z3: act }
+          };
+          var mx = LabEngine.ledger.matrix(document.getElementById('matrix-host'), {
+            rows: rows, cols: cols, unit: MODEL.unit, totalLabel: '单卡合计'
+          });
+          mx.update(cells);
+          window.__ledgerMatrix = mx;
+          window.__matrixCells = cells;
+        })();
+
+        window.__p = player;
+        window.__labTrace = trace;
+        window.__ledgerModel = MODEL;
+        window.__ledgerVerdict = ledgerVerdict;
+      })();
+    </script>
+  </body>
+</html>
