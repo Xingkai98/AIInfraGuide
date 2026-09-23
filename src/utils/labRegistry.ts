@@ -83,9 +83,12 @@ export const LAB_REGISTRY: Record<string, LabEntry> = {
     page: `${LAB_BASE}/00-online-softmax.html`,
     links: [
       { label: '从第一步开始' },
-      { label: '跳到修正因子被触发的一步', search: '?step=3' },
+      // Step 7 is the second block's ℓ update, where the correction factor is
+      // 0.5655 — the first block's factor is 0 by construction (no history to
+      // rescale), so pointing at step 3 would show a reader a zero.
+      { label: '跳到修正因子被触发的一步', search: '?step=7' },
     ],
-    published: false,
+    published: true,
   },
 };
 

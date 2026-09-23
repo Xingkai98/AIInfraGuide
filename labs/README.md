@@ -7,11 +7,40 @@
 ```
 labs/
 ├── assets/            所有 lab 页面共享（方案 A：共享 assets 目录）
-│   ├── engine/        通用播放器（**尚未落地**，P0 引擎 ticket 建）
+│   ├── engine/        通用播放器（见下）
 │   └── vendor/katex/  本地 KaTeX（由 scripts/vendor-katex.mjs 生成，勿手改）
 ├── traces/            每个 lab 一个 Python 轨迹生成器（**不会**被发布）
 └── pages/             每个 lab 一个自包含 HTML
 ```
+
+## 引擎
+
+`labs/assets/engine/` 是一份通用播放器，**不含任何 lab 专属逻辑**。lab 页面只提供 trace 与配置，
+调用 `LabEngine.lab(trace, config)`。按加载顺序：
+
+| 文件 | 职责 |
+|---|---|
+| `trace-model.js` | 契约：哨兵解析、`resolve()` 纯函数重建、`lint()` |
+| `layout.js` | DAG 分层布局（顺序边 + 折行） |
+| `formula.js` | KaTeX 三档渲染（`\slot` / `\region` 预处理） |
+| `dag.js` | SVG DAG，增量改 class 重绘 |
+| `tensors.js` | 张量检查器（网格 + 热力图） |
+| `narrow.js` | 统一的窄屏降级组件 |
+| `player.js` | 时间轴 / 深链 / 键盘 / 播放 —— 入口 `LabEngine.lab()` |
+| `verify.js` | 自检：任意跳转对照实验、lint 对照实验 |
+| `lab.css` | 全部样式（含亮/暗色） |
+
+页面配置项见 `player.js` 顶部的 `DEFAULTS`。额外面板用 `panels: [{id, label, render(step, ctx)}]`，
+引擎负责容器，`render` 返回 HTML 字符串。
+
+**trace 由 `scripts/build-labs.mjs` 在构建期内联**：页面里写 `<!-- trace:NAME -->`，
+构建时替换成 `labs/traces/NAME.json` 的内容（包在 `window.LabTraces.NAME` 里）。
+这样页面与 JSON 不可能漂移 —— 它们就是同一份数据。JSON 缺失会直接构建失败。
+
+**引擎的验收脚本**：`python3 labs/pages/verify.py`（需先 `npm run build:labs`）。
+它在真 Chromium 里跑完整条验收清单并出截图到 `labs/pages/shots/`。
+其中「任意跳转」同时跑纯函数重建与**故意做错的有状态对照组** —— 只有对照组确实失败，
+纯函数的「0 次不一致」才算数。
 
 `labs/pages/*.html` 会被 `scripts/build-labs.mjs` **拍平**拷进 `public/labs/`，再由 Astro 原样复制到 `dist/`。所以：
 
@@ -20,8 +49,10 @@ labs/
 
 ## 加一个 lab
 
-1. 写 `traces/<name>.py`，跑出 trace JSON（必须带与 PyTorch 参考实现的对拍断言）。
-2. 写 `pages/<name>.html`，内联 trace，用 `./assets/` 下的共享引擎与 KaTeX。
+1. 写 `traces/<name>.py`，跑出 `traces/<name>.json`（必须带与 PyTorch 参考实现的对拍断言，
+   并跑一遍 lint；`online_softmax.py` 是范本——它同时演示了 lint 与 lint 的对照组）。
+2. 写 `pages/<name>.html`：放一个 `<!-- trace:<name> -->` 占位符，用 `./assets/`
+   下的共享引擎与 KaTeX，末尾调 `LabEngine.lab(trace, config)`。页面本身不写算法逻辑。
 3. 在 `src/utils/labRegistry.ts` 加一条映射，让对应教程正文顶部出现入口卡片；把 `published` 置 `true`。
 4. 在 `src/utils/labRoadmap.ts` 把对应节点的「已上线」点亮（`labId` 已在表中）。
 5. `npm run build`。构建期会校验：guide id 真实存在、依赖边不悬空、页面资源可解析。

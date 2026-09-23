@@ -22,7 +22,7 @@
  *
  * Run via `npm run build:labs`, which `npm run build` chains before Astro.
  */
-import { cp, mkdir, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { cp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -51,6 +51,56 @@ for (const [from, to] of STAGED) {
 }
 
 console.log(`Staged ${staged} file(s) labs/ -> public/labs/`);
+
+// ---------------------------------------------------------------------------
+// Inline traces into the pages that declare them.
+//
+// A lab page carries a `<!-- trace:NAME -->` marker where its trace belongs;
+// this replaces the marker with the JSON from `labs/traces/NAME.json`. Two
+// things this buys, both deliberate:
+//
+//   - The trace becomes part of the page rather than a fetch, so a lab is
+//     genuinely "one HTML + shared assets" with no request of its own.
+//   - Drift is impossible by construction. The page cannot show numbers that
+//     differ from the JSON, because there is no second copy to disagree with.
+//     (A lab must still be regenerated from its Python source for the numbers
+//     to change, which is the property that keeps them real.)
+//
+// `labs/traces/` itself is still never staged: only the substituted result
+// ships, and the generators and their JSON stay source-side.
+const traceDir = path.join(srcRoot, 'traces');
+let inlined = 0;
+for (const file of await readdir(path.join(srcRoot, 'pages')).catch(() => [])) {
+  if (!file.endsWith('.html')) continue;
+  const pagePath = path.join(destRoot, file);
+  let html = await readFile(pagePath, 'utf8');
+  let changed = false;
+  for (const [marker, name] of [...html.matchAll(/<!--\s*trace:([A-Za-z0-9_-]+)\s*-->/g)].map(
+    (m) => [m[0], m[1]]
+  )) {
+    const jsonPath = path.join(traceDir, `${name}.json`);
+    if (!existsSync(jsonPath)) {
+      console.error(
+        `labs/pages/${file} declares trace "${name}" but labs/traces/${name}.json does not exist.\n` +
+          `Generate it with the matching labs/traces/*.py script.`
+      );
+      process.exit(1);
+    }
+    const json = JSON.parse(await readFile(jsonPath, 'utf8'));
+    // `</` would close the <script> early if a trace ever contained it in a
+    // string. Escaping the slash keeps the JSON byte-identical when parsed.
+    const payload = JSON.stringify(json).replace(/<\//g, '<\\/');
+    html = html.replace(
+      marker,
+      `<script>window.LabTraces=window.LabTraces||{};` +
+        `window.LabTraces[${JSON.stringify(name)}]=${payload};</script>`
+    );
+    changed = true;
+    inlined += 1;
+  }
+  if (changed) await writeFile(pagePath, html);
+}
+console.log(`Inlined ${inlined} trace(s) into staged pages`);
 
 // The /labs landing page belongs to Astro (src/pages/labs/index.astro), not to
 // this staged tree. Both would emit dist/labs/index.html, and Astro wins — so a
