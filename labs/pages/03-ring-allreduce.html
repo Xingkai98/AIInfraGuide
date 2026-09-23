@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>L13 · Ring AllReduce 逐帧回放 - AIInfraGuide</title>
+    <meta
+      name="description"
+      content="N 卡环形 AllReduce 的逐步回放：ReduceScatter 与 AllGather 各 N−1 步，每步看哪几条链路在传、每张卡的缓冲区里哪一块攒到了几份，以及通信量累计曲线与朴素中心化、Tree 两条对照的差距。"
+    />
+    <link rel="canonical" href="./03-ring-allreduce.html" />
+    <link rel="stylesheet" href="./assets/vendor/katex/katex.min.css" />
+    <link rel="stylesheet" href="./assets/engine/lab.css" />
+    <link rel="stylesheet" href="./assets/engine/views/ring.css" />
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        margin: 0;
+        padding: 20px 22px 56px;
+        background: #f9fafb;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+          'Helvetica Neue', 'Noto Sans CJK SC', sans-serif;
+      }
+      @media (prefers-color-scheme: dark) { body { background: #0b1120; } }
+      .lab-back { display: inline-block; margin-bottom: 14px; color: #007aff; font-size: 13.5px; text-decoration: none; }
+      .lab-provenance {
+        margin-top: 22px; padding-top: 14px;
+        border-top: 1px solid rgba(128, 128, 128, 0.25);
+        color: #6b7280; font-size: 12px; line-height: 1.6;
+      }
+      @media (prefers-color-scheme: dark) { .lab-provenance { color: #9ca3af; } }
+      .lab-provenance code {
+        background: rgba(128, 128, 128, 0.14); border-radius: 4px;
+        padding: 1px 5px;
+        font: 0.92em/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .lab-banner {
+        margin: 0 0 14px; padding: 8px 12px;
+        border: 1px solid rgba(0, 122, 255, 0.35); border-radius: 8px;
+        background: rgba(0, 122, 255, 0.07); font-size: 12.5px; color: #1f2937;
+      }
+      @media (prefers-color-scheme: dark) { .lab-banner { color: #e5e7eb; } }
+
+      /* The ring panel is the subject, not a side panel, so it leads the page
+         — above the engine's own two-column block. */
+      .lab-ring-panel .lab-panel-bd { padding: 10px 12px; max-height: 720px; overflow: auto; }
+
+      .l13-ctl { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
+      .l13-ctl-btn {
+        padding: 5px 12px; border-radius: 8px; cursor: pointer;
+        border: 1px solid var(--lab-line, #e3e6ec);
+        background: var(--lab-panel, #fff);
+        color: var(--lab-fg, #1f2937); font-size: 12.5px;
+      }
+      .l13-ctl-btn.lab-on { background: #007aff; border-color: #007aff; color: #fff; }
+      .l13-ctl-note { color: var(--lab-faint, #9ca3af); font-size: 11.5px; margin-left: 4px; }
+      .l13-readout { display: flex; flex-wrap: wrap; gap: 16px; margin: 0 0 10px; }
+      .l13-readout-item { color: var(--lab-dim, #6b7280); font-size: 11.5px; }
+      .l13-readout-item b {
+        display: block; color: var(--lab-fg, #1f2937);
+        font: 650 17px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .l13-verdict {
+        margin-top: 10px; padding: 8px 11px; border-radius: 8px;
+        border: 1px solid color-mix(in srgb, #0f7b52 45%, transparent);
+        background: color-mix(in srgb, #0f7b52 10%, transparent);
+        font-size: 12px; color: var(--lab-fg, #1f2937); line-height: 1.65;
+      }
+      .l13-verdict b { color: #0f7b52; }
+      @media (prefers-color-scheme: dark) { .l13-verdict b { color: #5fd39a; } }
+
+      /* The communication-volume comparison, as a plain table: this is the
+       * lab's quantitative conclusion and it should be readable without
+       * reading a chart. */
+      .l13-cmp { width: 100%; border-collapse: collapse; font-size: 12px; }
+      .l13-cmp th, .l13-cmp td { text-align: right; padding: 3px 8px; }
+      .l13-cmp th:first-child, .l13-cmp td:first-child { text-align: left; }
+      .l13-cmp th { color: var(--lab-dim, #6b7280); font-weight: 500; font-size: 11px; }
+      .l13-cmp tr.l13-win td { color: #0f7b52; font-weight: 650; }
+      @media (prefers-color-scheme: dark) { .l13-cmp tr.l13-win td { color: #5fd39a; } }
+      .l13-cmp td { color: var(--lab-fg, #1f2937); }
+      .l13-cmp .l13-sub { color: var(--lab-faint, #9ca3af); font-size: 10.5px; }
+    </style>
+  </head>
+  <!--
+    Two build-time facts this document depends on, both learned the hard way in
+    the scaffolding ticket:
+
+      * The no-index marker must wrap the whole document. On a bare <meta> tag
+        Pagefind ignores it and indexes the page anyway.
+      * Asset paths are relative to the SERVED location, not to this source
+        file: scripts/build-labs.mjs flattens labs/pages/*.html to
+        public/labs/*.html, so this page lands beside assets/ and must use
+        ./assets/… — a ../ would 404 the whole engine.
+
+    The page holds a trace set and a config. Every algorithmic decision is in
+    labs/traces/ring_allreduce.py; every drawing decision is in
+    assets/engine/views/ring.js. This file is the wiring between them.
+  -->
+  <body data-pagefind-ignore>
+    <a class="lab-back" href="./">← 全部实验室</a>
+    <p class="lab-banner" id="lab-banner" hidden></p>
+
+    <div id="lab-params"></div>
+    <!-- The readout lives OUTSIDE the player's mount on purpose: the player
+         replaces a panel's innerHTML on every paint, so anything the page
+         injects into a panel body is wiped by the next frame. This is
+         per-config text, not per-step text. -->
+    <div id="lab-readout"></div>
+    <div id="lab-stage"></div>
+
+    <p class="lab-provenance" id="lab-provenance"></p>
+
+    <!-- KaTeX is vendored, never a CDN: a lab page must make zero external requests. -->
+    <script src="./assets/vendor/katex/katex.min.js"></script>
+    <script src="./assets/engine/trace-model.js"></script>
+    <script src="./assets/engine/layout.js"></script>
+    <script src="./assets/engine/formula.js"></script>
+    <script src="./assets/engine/dag.js"></script>
+    <script src="./assets/engine/tensors.js"></script>
+    <script src="./assets/engine/narrow.js"></script>
+    <script src="./assets/engine/views/ring.js"></script>
+    <script src="./assets/engine/player.js"></script>
+    <script src="./assets/engine/verify.js"></script>
+
+    <!--
+      The whole trace set — the manifest plus every configuration it names — is
+      substituted here at build time (see the trace-set step in
+      scripts/build-labs.mjs). The manifest is written by the generator, so the
+      selector's positions and the traces behind them are defined in one place
+      and cannot drift apart.
+    -->
+    <!-- traces:ring-allreduce -->
+
+    <script>
+      (function () {
+        'use strict';
+
+        var SET = 'ring-allreduce';
+        var traces = window.LabTraces || {};
+        var manifest = (window.LabTraceSets || {})[SET];
+        var esc = LabEngine.formula.escapeText;
+
+        var paramsHost = document.getElementById('lab-params');
+        var stage = document.getElementById('lab-stage');
+        var banner = document.getElementById('lab-banner');
+
+        if (!manifest || !traces[manifest.default]) {
+          stage.textContent = 'trace 未加载：本页的 trace 占位符没有被构建脚本替换。';
+          return;
+        }
+
+        /* -------------------------------------------------------------- ids
+         *
+         * Config ids are `<set>-N<n>`. The page never builds one by hand
+         * outside `configId`, and every id it does build is looked up in the
+         * manifest first — a rank count the generator did not produce has to be
+         * unreachable, or the selector would be offering a configuration with
+         * no trace behind it. */
+        function configId(n) { return SET + '-N' + n; }
+
+        var player = null;
+        var current = null;
+
+        /* ---------------------------------------------------- the readout
+         *
+         * The counters the ticket asks for, read from the trace's own
+         * meta.metrics. Nothing is computed here — the generator's own account
+         * of the traffic is what these numbers are, and the page only prints
+         * them. */
+        function readout(trace) {
+          var m = trace.meta.metrics;
+          var n = trace.ring.n;
+          var items = [
+            ['环形 · 每卡收发', m.ring_total_bytes + ' B'],
+            ['朴素 · 瓶颈链路', m.naive_link_bytes + ' B'],
+            ['Tree · 单链路', m.tree_link_bytes + ' B'],
+            ['朴素 / 环形', m.naive_over_ring.toFixed(2) + '×（理论 N = ' + n + '）'],
+            ['步数', m.ring_steps + ' 步 = 2(N−1)']
+          ];
+          return '<div class="l13-readout">' + items.map(function (it) {
+            return '<span class="l13-readout-item"><b>' + esc(it[1]) + '</b>' +
+                   esc(it[0]) + '</span>';
+          }).join('') + '</div>';
+        }
+
+        /* The quantitative comparison as a table. The bar chart in the view
+         * shows its shape over time; this states it once, in the unit the
+         * tutorial's formula is written in, so the two can be read against each
+         * other. Everything comes from the trace. */
+        function comparison(trace) {
+          var t = trace.meta.traffic;
+          var m = trace.meta.metrics;
+          var n = trace.ring.n;
+          var rows = [
+            { key: 'ring', label: 'Ring AllReduce', cls: 'l13-win',
+              note: '每卡每步 S/N，' + n + ' 条链路各担一份' },
+            { key: 'naive', label: '朴素中心化', note: '一张卡扛下全部进出' },
+            { key: 'tree', label: 'Tree AllReduce', note: '每层归约一次，延迟 O(log N)' }
+          ];
+          var html = '<table class="l13-cmp"><thead><tr>' +
+            '<th>拓扑</th><th>单链路负载</th><th>总量</th><th>步数</th>' +
+            '<th>闭式</th></tr></thead><tbody>';
+          rows.forEach(function (r) {
+            var e = t[r.key];
+            html += '<tr class="' + (r.cls || '') + '"><td>' + esc(r.label) +
+              '<div class="l13-sub">' + esc(r.note) + '</div></td>' +
+              '<td><b>' + e.link_load_bytes + ' B</b></td>' +
+              '<td>' + m[r.key + '_total_bytes'] + ' B</td>' +
+              '<td>' + e.steps + '</td>' +
+              '<td class="l13-sub">' + esc(e.closed_form) + '</td></tr>';
+          });
+          html += '</tbody></table>';
+          return html;
+        }
+
+        /* The timing model, labelled as a model. It is the only place on the
+         * page where a number is not a measurement, so it says so. */
+        function timing(trace) {
+          var tm = trace.meta.timing;
+          var html = '<table class="l13-cmp"><thead><tr><th>拓扑</th>' +
+            '<th>耗时</th><th>algbw</th><th>busbw</th><th>单链路 @' +
+            Math.round(tm.nominal_bytes / 1024 / 1024) + ' MiB</th></tr></thead><tbody>';
+          tm.rows.forEach(function (r) {
+            html += '<tr' + (r.schedule === 'ring' ? ' class="l13-win"' : '') + '><td>' +
+              esc(r.schedule) + '</td><td>' + r.time_us.toFixed(1) + ' µs</td>' +
+              '<td>' + r.algbw_gbs.toFixed(1) + ' GB/s</td>' +
+              '<td>' + r.busbw_gbs.toFixed(1) + ' GB/s</td>' +
+              '<td>' + r.per_link_bytes_at_nominal + ' B</td></tr>';
+          });
+          html += '</tbody></table>';
+          html += '<div class="l13-sub" style="margin-top:5px;color:var(--lab-faint)">' +
+            esc(tm.note);
+          if (tm.crossover_bytes) {
+            html += ' 交叉点：约 ' + (tm.crossover_bytes / 1024 / 1024).toFixed(2) +
+              ' MiB —— 比它小 Tree 省延迟，比它大 Ring 省带宽，NCCL 就是按这个分界' +
+              '自动切换的。';
+          }
+          html += '</div>';
+          return html;
+        }
+
+        /* ------------------------------------------------------ the mounting */
+        function mount(n) {
+          var id = configId(n);
+          if (manifest.traces.indexOf(id) === -1) {
+            stage.textContent = '缺少配置 ' + id + '（manifest 与 trace 不同步）。';
+            return;
+          }
+          var trace = traces[id];
+
+          if (player) { try { player.destroy(); } catch (e) { /* already gone */ } }
+          stage.innerHTML = '';
+          var slot = document.createElement('main');
+          stage.appendChild(slot);
+          current = n;
+
+          player = LabEngine.lab(trace, {
+            mount: slot,
+            title: 'Ring AllReduce 逐帧回放 · ' + n + ' 卡',
+            lead: '整个 AllReduce 是 ' + (2 * (n - 1)) + ' 步：先 ReduceScatter ' +
+                  (n - 1) + ' 步，让每张卡各攒出一块完整的归约结果；再 AllGather ' +
+                  (n - 1) + ' 步，把那些块传遍全环。每步每张卡同时收一块、发一块，' +
+                  n + ' 条链路没有一条闲着 —— 这就是它带宽最优的原因。',
+            tier: 'num',
+            speed: 900,
+            panels: [
+              { id: 'ring', label: '环形拓扑 · 缓冲区状态 · 通信量累计',
+                render: LabEngine.ring.panel(
+                  { id: 'ring', size: 300 }, { trace: trace }).render }
+            ],
+            tutorial: {
+              href: '/AIInfraGuide/distributed-training/模块三-分布式训练/第2章-分布式训练基础/21-集合通信原语详解',
+              label: '返回教程正文：2.1 集合通信原语详解'
+            }
+          });
+
+          var proof = document.createElement('section');
+          proof.className = 'lab-panel lab-panel-extra';
+          proof.innerHTML = '<div class="lab-panel-hd"><span class="lab-panel-t">' +
+            '自检 · 引擎正确性</span><span class="lab-panel-sub">在浏览器里真跑，' +
+            '不是预期值</span></div>' +
+            '<div class="lab-panel-bd" style="padding:10px 12px"></div>';
+          slot.appendChild(proof);
+          /* The component's own self-check, not `LabEngine.verify.panel`.
+           *
+           * Two reasons, both of which cost a debugging session on the pages
+           * before this one:
+           *
+           *   - `verify.panel` carries sabotage cases written against L00's
+           *     fixture (`delete tensors.x`, `MOLD`), which are no-ops on any
+           *     other trace and paint a red verdict for a perfectly good one.
+           *   - more interestingly for this lab, its control group operates on
+           *     TENSOR STATE, and every step of a ring rewrites every buffer in
+           *     full. A stateful player that applies only the target step's
+           *     state therefore lands on the right answer, so that control
+           *     group has no discriminating power here — it would report a
+           *     green "no failures" that proves nothing. `verified` below is
+           *     the assertion that this is the reason, not an assumption.
+           *
+           * `ring.check` folds the transfer list instead, where a stateful
+           * version does fail, and it runs the view's own sabotage table. */
+          var selfCheck = LabEngine.ring.panelSelfCheck(
+            proof.querySelector('.lab-panel-bd'), trace);
+          window.__labRingSelfCheck = selfCheck;
+
+          /* The ring leads: it is the lab's subject and it needs the width, so
+           * it goes above the engine's own two-column block. */
+          var ringEl = document.querySelector('[data-panel="ring"]');
+          if (ringEl) {
+            ringEl.classList.add('lab-ring-panel');
+            document.querySelector('.lab-panel-dag').before(ringEl);
+          }
+
+          document.getElementById('lab-readout').innerHTML =
+            readout(trace) +
+            '<div class="l13-verdict">把 S 切成 N 块之后，每步只搬 S/N —— ' +
+            '<b>所以每张卡搬的总量是 2(N−1)·S/N，而不是 2(N−1)·S。</b>' +
+            '注意三条拓扑搬的<b>总</b>字节数完全相同（都是 2(N−1)S）：' +
+            '区别不在搬了多少，而在摊到几条链路上 —— 下面是这张对照。</div>' +
+            comparison(trace) +
+            '<details style="margin-top:10px"><summary style="cursor:pointer;' +
+            'color:var(--lab-dim);font-size:11.5px">耗时模型（α = 每步延迟、' +
+            'β = 链路带宽；数量级取自 NVLink + NCCL，不是实测）</summary>' +
+            '<div style="margin-top:6px">' + timing(trace) + '</div></details>';
+
+          window.__p = player;
+          window.__labTrace = trace;
+          window.__labTraces = traces;
+          window.__labConfig = id;
+          window.__labRing = trace.ring;
+          return player;
+        }
+
+        /* ------------------------------------------------------ the selector */
+        function buildSelector() {
+          var ns = manifest.params.N;
+          var html = '<div class="l13-ctl"><span class="l13-readout-item">卡数</span>';
+          ns.forEach(function (n) {
+            html += '<button class="l13-ctl-btn" data-n="' + n + '">' + n +
+                    ' 卡</button>';
+          });
+          html += '<span class="l13-ctl-note" data-note></span></div>';
+          paramsHost.innerHTML = html;
+          Array.prototype.forEach.call(paramsHost.querySelectorAll('[data-n]'),
+            function (btn) {
+              btn.addEventListener('click', function () {
+                apply(parseInt(btn.dataset.n, 10));
+              });
+            });
+        }
+
+        function paintSelector() {
+          Array.prototype.forEach.call(paramsHost.querySelectorAll('[data-n]'),
+            function (btn) {
+              btn.classList.toggle('lab-on', parseInt(btn.dataset.n, 10) === current);
+            });
+          var note = paramsHost.querySelector('[data-note]');
+          if (note) note.textContent = (manifest.notes || {})[configId(current)] || '';
+        }
+
+        function apply(n, keepStep) {
+          if (manifest.params.N.indexOf(n) === -1) return;
+          var url = new URL(location.href);
+          url.searchParams.set('n', String(n));
+          if (!keepStep) url.searchParams.set('step', '0');
+          try { history.replaceState(null, '', url); } catch (e) { /* file:// */ }
+          mount(n);
+          paintSelector();
+        }
+
+        /* Deep links: ?n= and ?step=, each announced when out of range rather
+           than silently ignored — the same terms the player uses. */
+        var query = new URLSearchParams(location.search);
+        var messages = [];
+        var asked = parseInt(query.get('n'), 10);
+        var start = manifest.params.N.indexOf(asked) === -1
+          ? 4 : asked;
+        if (query.get('n') !== null && manifest.params.N.indexOf(asked) === -1) {
+          messages.push('深链里的 ?n=' + query.get('n') + ' 不在本页的 ' +
+            manifest.params.N.join(' / ') + ' 里，已载入 ' + start + ' 卡。');
+        }
+        buildSelector();
+        apply(start, true);
+        var requestedStep = query.get('step');
+        if (requestedStep !== null) {
+          var v = parseInt(requestedStep, 10);
+          var len = traces[configId(start)].steps.length;
+          if (isNaN(v) || v < 0) {
+            messages.push('深链里的 ?step=' + requestedStep +
+                          ' 不是合法的步号，已停在第一步。');
+            player.setCursor(0);
+          } else if (v > len - 1) {
+            messages.push('深链里的 ?step=' + requestedStep + ' 超出范围（本配置共 ' +
+                          len + ' 步），已停在最后一步。');
+            player.setCursor(len - 1);
+          } else {
+            player.setCursor(v);
+          }
+        }
+        if (messages.length) {
+          banner.hidden = false;
+          banner.textContent = messages.join(' ');
+        }
+
+        document.getElementById('lab-provenance').innerHTML =
+          '本页每个数字都来自一次真实的环形 AllReduce，不是手编的时间线。三份 trace ' +
+          '（2 / 4 / 8 卡）由 <code>labs/traces/ring_allreduce.py</code> 用 <b>torch</b> ' +
+          '真跑出来，它做四件事：' +
+          '① 在真张量上逐卡执行 send/recv，ReduceScatter 累加、AllGather 覆盖，' +
+          '每步先把所有源值取出来再写目标（一步是一次<b>同时</b>交换）；' +
+          '② 与「按环形累加顺序」的独立参考实现<b>逐位相同</b>（<code>torch.equal</code>，' +
+          '零容差）—— 断言的是调度；再与 <code>x.sum(0)</code> 在 fp32 容差 1e-6 下一致，' +
+          '并用整数取值输入（两种求和顺序都必须逐位相同）把这点残差坐实成「求和顺序」；' +
+          '③ 朴素中心化与 Tree 两条对照调度真跑一遍，结果必须一致，' +
+          '并断言三者的总通信量相同、只有单链路负载差一个 N 倍；' +
+          '④ 用契约 lint 自查，并跑一组「故意破坏」的对照组 —— 破坏必须真的改变了 trace ' +
+          '且必须被抓到，否则那份「0 gap」不算数。不通过就拒绝写文件。' +
+          '环形组件本身在 <code>labs/assets/engine/views/ring.js</code>，' +
+          '不含任何算法逻辑 —— 「一次归约作用于一个梯度张量」由 <code>trace.ring.op</code> ' +
+          '声明（哪个张量、多少元素、多少字节），L17 的 DDP 梯度分桶复用同一套语义。';
+      })();
+    </script>
+  </body>
+</html>

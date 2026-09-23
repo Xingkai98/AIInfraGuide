@@ -1,0 +1,331 @@
+/* L00 engine · view: ring topology — styles.
+ *
+ * A separate file from lab.css on purpose: lab.css belongs to the engine core
+ * (issue #13) and is shared by every lab, while this is one view component's
+ * own chrome. Keeping them apart means a change here cannot regress the
+ * player, the DAG or the tensor inspector, and a lab that does not use the
+ * ring never downloads it.
+ *
+ * Colours come from lab.css's custom properties, which are declared on
+ * .lab-root and therefore already in scope — so the ring is theme-aware
+ * without restating either palette.
+ *
+ * The one thing worth knowing before editing: the topology is an SVG whose
+ * geometry is COMPUTED in ring.js (ringPoint), not laid out by CSS. Nothing
+ * here may move a node, an arc or a buffer strip — this file colours and
+ * sizes them and nothing else. The buffer strips hang off the circle at an
+ * angle that depends on N, which no static rule could express.
+ */
+
+.lab-ring {
+  padding: 10px 12px 14px;
+  font-size: 12px;
+}
+
+/* ---- the step timeline ---- */
+.lab-ring-tl {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-bottom: 12px;
+}
+.lab-ring-tl-hd {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--lab-dim);
+  font-size: 11.5px;
+  margin-bottom: 5px;
+}
+.lab-ring-tl-n {
+  color: var(--lab-faint);
+  font-size: 10px;
+}
+.lab-ring-tl-ticks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+.lab-ring-tl-tick {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 17px;
+  border: 1px solid var(--lab-line);
+  border-radius: 4px;
+  background: var(--lab-panel-2);
+  color: var(--lab-faint);
+  font: 500 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  cursor: default;
+}
+.lab-ring-tl-tick i { font-style: normal; }
+/* A finished step keeps a record: the reader needs to see how far the
+ * algorithm has got, not only where it is. */
+.lab-ring-tl-past {
+  background: color-mix(in srgb, var(--lab-accent) 12%, var(--lab-panel-2));
+  border-color: color-mix(in srgb, var(--lab-accent) 35%, var(--lab-line));
+  color: var(--lab-dim);
+}
+.lab-ring-tl-on {
+  background: var(--lab-accent);
+  border-color: var(--lab-accent);
+  color: #fff;
+  font-weight: 700;
+}
+/* The two phases get their own accent so the strip says which half of the
+ * algorithm the cursor is in — the two halves look identical otherwise. */
+.lab-ring-tl-phase[data-phase="gather"] .lab-ring-tl-past {
+  background: color-mix(in srgb, var(--lab-accent-2) 14%, var(--lab-panel-2));
+  border-color: color-mix(in srgb, var(--lab-accent-2) 38%, var(--lab-line));
+}
+.lab-ring-tl-phase[data-phase="gather"] .lab-ring-tl-on {
+  background: var(--lab-accent-2);
+  border-color: var(--lab-accent-2);
+}
+
+/* ---- main: topology (+ tree) side by side ---- */
+.lab-ring-main {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: flex-start;
+  margin-bottom: 12px;
+}
+
+.lab-ring-svg,
+.lab-ring-tree {
+  display: block;
+}
+.lab-ring-svg .lab-ring-arc {
+  fill: none;
+  stroke: var(--lab-line);
+  stroke-width: 1.4;
+  transition: stroke 0.15s, stroke-width 0.15s;
+}
+/* The links carrying data THIS step. Every arc is live on every step of a
+ * ring (that is the bandwidth-optimality claim), so this is not a highlight
+ * of an unusual event — it is the picture of "all links busy at once". */
+.lab-ring-svg .lab-ring-arc-live {
+  stroke: var(--lab-accent);
+  stroke-width: 2.6;
+}
+.lab-ring-svg .lab-ring-arrowhead { fill: var(--lab-line); }
+.lab-ring-svg .lab-ring-node-disc {
+  fill: var(--lab-panel);
+  stroke: var(--lab-line);
+  stroke-width: 1.4;
+}
+.lab-ring-svg .lab-ring-node-send .lab-ring-node-disc {
+  stroke: var(--lab-accent);
+  stroke-width: 2.2;
+}
+.lab-ring-svg .lab-ring-node-recv .lab-ring-node-disc {
+  fill: color-mix(in srgb, var(--lab-accent) 10%, var(--lab-panel));
+}
+/* How many of this rank's chunks are fully reduced, as a sweep. It is the
+ * one-node summary of the whole algorithm: flat at 1/N through ReduceScatter,
+ * filling to N/N through AllGather. */
+.lab-ring-svg .lab-ring-node-prog {
+  fill: none;
+  stroke: var(--lab-ok);
+  stroke-width: 2.6;
+  stroke-linecap: round;
+}
+.lab-ring-svg .lab-ring-node-id {
+  text-anchor: middle;
+  fill: var(--lab-fg);
+  font: 600 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.lab-ring-svg .lab-ring-buf-bg {
+  fill: var(--lab-panel-2);
+  stroke: var(--lab-line);
+  stroke-width: 0.8;
+}
+.lab-ring-svg .lab-ring-cell rect {
+  fill: var(--lab-panel);
+  stroke: var(--lab-line);
+  stroke-width: 1;
+}
+/* The three states of a chunk: only this rank's data (empty), some ranks
+ * (part), all N (done). The tints are the whole point of the strip — a reader
+ * watches cells go from blank to amber to green across the 2(N-1) steps. */
+.lab-ring-svg .lab-ring-cell-part rect {
+  fill: color-mix(in srgb, var(--lab-accent-2) 26%, var(--lab-panel));
+  stroke: color-mix(in srgb, var(--lab-accent-2) 55%, var(--lab-line));
+}
+.lab-ring-svg .lab-ring-cell-full rect {
+  fill: color-mix(in srgb, var(--lab-ok) 30%, var(--lab-panel));
+  stroke: var(--lab-ok);
+}
+.lab-ring-svg .lab-ring-cell text {
+  text-anchor: middle;
+  fill: var(--lab-fg);
+  font: 600 9.5px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.lab-ring-treewrap {
+  border: 1px solid var(--lab-line);
+  border-radius: 10px;
+  background: var(--lab-panel-2);
+  padding: 8px 10px 10px;
+}
+.lab-ring-treehd {
+  color: var(--lab-dim);
+  font-size: 11.5px;
+  margin-bottom: 4px;
+}
+.lab-ring-tree .lab-ring-tedge {
+  stroke: var(--lab-line);
+  stroke-width: 1.4;
+}
+.lab-ring-tree .lab-ring-tnode {
+  fill: var(--lab-panel);
+  stroke: var(--lab-line);
+  stroke-width: 1.2;
+}
+.lab-ring-tree .lab-ring-tlabel {
+  text-anchor: middle;
+  fill: var(--lab-fg);
+  font: 600 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.lab-ring-treenote {
+  color: var(--lab-faint);
+  font-size: 10.5px;
+  margin-top: 4px;
+  max-width: 260px;
+  line-height: 1.5;
+}
+
+/* ---- the buffer table ---- */
+.lab-ring-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 12px;
+}
+.lab-ring-table th {
+  color: var(--lab-dim);
+  font-weight: 500;
+  font-size: 10.5px;
+  text-align: center;
+  padding: 2px 4px 5px;
+  white-space: nowrap;
+}
+.lab-ring-table th .lab-ring-th-b {
+  display: block;
+  color: var(--lab-faint);
+  font-size: 9px;
+}
+.lab-ring-th-rank, .lab-ring-th-act { text-align: left !important; }
+.lab-ring-td-rank {
+  color: var(--lab-fg);
+  font: 600 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding-right: 8px;
+  white-space: nowrap;
+}
+.lab-ring-td-cell {
+  text-align: center;
+  padding: 3px 5px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  font: 600 11px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--lab-dim);
+}
+.lab-ring-td-cell .lab-ring-td-n {
+  color: var(--lab-faint);
+  font-size: 9px;
+  font-weight: 400;
+}
+.lab-ring-td-cell.lab-ring-part {
+  background: color-mix(in srgb, var(--lab-accent-2) 16%, transparent);
+  color: var(--lab-fg);
+}
+.lab-ring-td-cell.lab-ring-full {
+  background: color-mix(in srgb, var(--lab-ok) 20%, transparent);
+  border-color: color-mix(in srgb, var(--lab-ok) 45%, transparent);
+  color: var(--lab-fg);
+}
+.lab-ring-td-act {
+  color: var(--lab-dim);
+  font-size: 10.5px;
+  padding-left: 10px;
+  white-space: nowrap;
+}
+
+/* ---- the traffic accumulator ---- */
+.lab-ring-acc {
+  border: 1px solid var(--lab-line);
+  border-radius: 10px;
+  background: var(--lab-panel-2);
+  padding: 8px 10px 10px;
+}
+.lab-ring-acc-hd {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--lab-fg);
+  font-size: 11.5px;
+  margin-bottom: 2px;
+}
+.lab-ring-acc-sub { color: var(--lab-faint); font-size: 10px; }
+.lab-ring-acc-svg { display: block; overflow: visible; }
+.lab-ring-acc-axis { stroke: var(--lab-line); stroke-width: 1; }
+.lab-ring-acc-cursor {
+  stroke: var(--lab-accent);
+  stroke-width: 1.2;
+  stroke-dasharray: 3 3;
+  opacity: 0.75;
+}
+.lab-ring-acc-line {
+  fill: none;
+  stroke-width: 2;
+  stroke-linejoin: round;
+}
+/* Ring is the subject, so it gets the strongest colour; the two controls are
+ * distinguished from each other as well as from it, because they say
+ * different things (the hub: worst case; the tree: low latency, worse
+ * bandwidth) and must not read as one baseline. */
+.lab-ring-acc-line-ring { stroke: var(--lab-accent); }
+.lab-ring-acc-line-naive { stroke: var(--lab-bad); stroke-dasharray: 5 3; }
+.lab-ring-acc-line-tree { stroke: var(--lab-accent-2); stroke-dasharray: 2 3; }
+.lab-ring-acc-ylab {
+  fill: var(--lab-faint);
+  font-size: 9px;
+}
+.lab-ring-acc-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 4px;
+}
+.lab-ring-acc-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--lab-dim);
+  font-size: 10.5px;
+}
+.lab-ring-acc-sw {
+  display: inline-block;
+  width: 14px;
+  height: 0;
+  border-top-width: 2px;
+  border-top-style: solid;
+}
+.lab-ring-acc-sw.lab-ring-acc-line-ring { border-top-color: var(--lab-accent); border-top-style: solid; }
+.lab-ring-acc-sw.lab-ring-acc-line-naive { border-top-color: var(--lab-bad); border-top-style: dashed; }
+.lab-ring-acc-sw.lab-ring-acc-line-tree { border-top-color: var(--lab-accent-2); border-top-style: dotted; }
+.lab-ring-acc-note {
+  margin-top: 7px;
+  color: var(--lab-dim);
+  font-size: 11px;
+  line-height: 1.6;
+}
+.lab-ring-acc-note b { color: var(--lab-fg); }
+
+/* ---- narrow screens ---- */
+@media (max-width: 720px) {
+  .lab-ring-main { flex-direction: column; }
+  .lab-ring-table { font-size: 10px; }
+  .lab-ring-td-act { white-space: normal; }
+}

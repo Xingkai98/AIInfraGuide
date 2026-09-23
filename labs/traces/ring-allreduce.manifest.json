@@ -1,0 +1,27 @@
+{
+ "set": "ring-allreduce",
+ "lab": "L13",
+ "default": "ring-allreduce-N4",
+ "params": {
+  "N": [
+   2,
+   4,
+   8
+  ]
+ },
+ "traces": [
+  "ring-allreduce-N2",
+  "ring-allreduce-N4",
+  "ring-allreduce-N8"
+ ],
+ "labels": {
+  "ring-allreduce-N2": "2 卡环形",
+  "ring-allreduce-N4": "4 卡环形",
+  "ring-allreduce-N8": "8 卡环形"
+ },
+ "notes": {
+  "ring-allreduce-N2": "ReduceScatter 1 步 + AllGather 1 步，每步搬 S/2 个元素",
+  "ring-allreduce-N4": "ReduceScatter 3 步 + AllGather 3 步，每步搬 S/4 个元素",
+  "ring-allreduce-N8": "ReduceScatter 7 步 + AllGather 7 步，每步搬 S/8 个元素"
+ }
+}
