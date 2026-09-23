@@ -27,7 +27,14 @@ from playwright.sync_api import sync_playwright
 
 REPO = Path(__file__).resolve().parent.parent
 PAGE = REPO / "public" / "labs" / "01-gemm-tiling.html"
-TRACE = REPO / "labs" / "traces" / "gemm-tiling.json"
+# L01 became a parameterised lab in ticket #15: the stage harness still asserts
+# the view component's contract, and now drives it through the DEFAULT
+# configuration of the trace set (B_M=B_N=B_K=4 — the shape it always used).
+# The parameter feature itself has its own harness, scripts/verify-l01-params.py;
+# this one keeps its subject, which is the shared component.
+MANIFEST = REPO / "labs" / "traces" / "gemm-tiling.manifest.json"
+DEFAULT_CFG = "gemm-tiling-BM4-BN4-BK4"
+TRACE = REPO / "labs" / "traces" / f"{DEFAULT_CFG}.json"
 SHOTS = REPO / "labs" / "pages" / "shots"
 SHOTS.mkdir(parents=True, exist_ok=True)
 
@@ -56,8 +63,19 @@ def main():
     if not TRACE.exists():
         print(f"missing {TRACE} — run labs/traces/gemm_tiling.py first", file=sys.stderr)
         return 2
+    if not MANIFEST.exists():
+        print(f"missing {MANIFEST} — run labs/traces/gemm_tiling.py first", file=sys.stderr)
+        return 2
 
     trace = json.loads(TRACE.read_text(encoding="utf-8"))
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    # The page opens on the manifest's default; if that ever stopped being the
+    # configuration this harness asserts against, the two would be measuring
+    # different traces while both reporting green.
+    if manifest["default"] != DEFAULT_CFG:
+        print(f"manifest default is {manifest['default']}, but this harness "
+              f"drives {DEFAULT_CFG} — update DEFAULT_CFG to match", file=sys.stderr)
+        return 2
     url = PAGE.as_uri()
 
     with sync_playwright() as p:
@@ -81,7 +99,7 @@ def main():
         # The same component with a different layer list must produce a
         # two-layer stage -- this is L06's requirement, not a thought experiment.
         two = page.evaluate("""() => {
-            const T = window.LabTraces['gemm-tiling'];
+            const T = window.LabTraces[window.__labConfig];
             const idx = LabEngine.traceModel.index(T);
             // A two-layer config in the shape L06 will use: HBM + a single
             // on-chip layer, with every non-HBM tensor folded into it by
@@ -265,7 +283,7 @@ def main():
             const P = window.__p, last = P.index.lastStep;
             // A deliberately wrong view: holds one snapshot object and, on a
             // jump, applies only the target step's writes on top of it.
-            const T = window.LabTraces['gemm-tiling'];
+            const T = window.LabTraces[window.__labConfig];
             const names = Object.keys(T.tensors);
             let acc = {};
             names.forEach(n => { if ('init' in T.tensors[n]) acc[n] = T.tensors[n].init; });

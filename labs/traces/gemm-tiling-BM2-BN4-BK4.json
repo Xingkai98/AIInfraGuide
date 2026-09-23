@@ -1,0 +1,7699 @@
+{
+ "meta": {
+  "lab": "L01",
+  "title": "GEMM 分块与数据搬运（M=N=K=8，B_M=2 · B_N=4 · B_K=4）",
+  "source": "docs/guides/模块二-CUDA编程与算子优化/4.1-CUDA GEMM算子性能优化.md + 模块一-前置知识/第2章-数学基础.md §3",
+  "config": {
+   "M": 8,
+   "N": 8,
+   "K": 8,
+   "B_M": 2,
+   "B_N": 4,
+   "B_K": 4
+  },
+  "reference": "C = A·B，torch float64 matmul 对拍最大绝对偏差 0（相对容差 1e-12）；朴素 k 序循环与 B_M=2、B_N=4、B_K=4 分块逐位相同（np.array_equal）；HBM 读取 1024 → 384 个元素，算术强度 0.25 → 0.6667 FLOP/B",
+  "traffic": {
+   "blocks": 16,
+   "load_steps": 16,
+   "smem_tile": 24,
+   "naive_reads": 1024,
+   "tiled_reads": 384,
+   "reuse": 2.6666666666666665,
+   "naive_flops": 1024,
+   "naive_fma": 512,
+   "naive_bytes": 4096,
+   "tiled_bytes": 1536,
+   "naive_ai": 0.25,
+   "tiled_ai": 0.6666666666666666,
+   "tiled_ai_closed": 0.6666666666666666,
+   "ridge": 17.444444444444443,
+   "doc_reads": 32768,
+   "doc_ai": 32.0
+  },
+  "roofline": {
+   "peak_flops": 15700000000000.0,
+   "bandwidth": 900000000000.0,
+   "ridge": 17.444444444444443,
+   "x_label": "算术强度 (FLOP/Byte)",
+   "y_label": "可达算力上界 (TFLOP/s)",
+   "y_divisor": 1000000000000.0,
+   "y_unit": "TFLOP/s",
+   "note": "点画在 min(峰值算力, 带宽 × 算术强度) 上，是 Roofline 给出的上界，不是实测值 —— 本实验室没有对任何 kernel 计时。",
+   "points": [
+    {
+     "id": "naive",
+     "label": "朴素（不分块）",
+     "ai": 0.25,
+     "elements": 1024,
+     "bytes": 4096,
+     "flops": 1024,
+     "ceiling": 225000000000.0,
+     "bound": "bandwidth"
+    },
+    {
+     "id": "tiled",
+     "label": "本配置分块",
+     "ai": 0.6666666666666666,
+     "elements": 384,
+     "bytes": 1536,
+     "flops": 1024,
+     "ceiling": 600000000000.0,
+     "bound": "bandwidth"
+    },
+    {
+     "id": "doc",
+     "label": "教程 128×128",
+     "ai": 32.0,
+     "elements": 32768,
+     "bytes": 131072,
+     "flops": 4194304,
+     "ceiling": 15700000000000.0,
+     "bound": "compute"
+    }
+   ]
+  }
+ },
+ "tensors": {
+  "A": {
+   "shape": [
+    8,
+    8
+   ],
+   "dtype": "fp32",
+   "at": "HBM",
+   "role": "input",
+   "init": [
+    [
+     0.25,
+     0.79,
+     0.55,
+     -0.55,
+     -0.4,
+     0.75,
+     -0.99,
+     0.64
+    ],
+    [
+     0.59,
+     -0.06,
+     -0.39,
+     -0.44,
+     -0.49,
+     -0.11,
+     0.01,
+     0.11
+    ],
+    [
+     0.99,
+     0.59,
+     0.24,
+     0.98,
+     -0.57,
+     -0.68,
+     0.23,
+     -0.91
+    ],
+    [
+     -0.93,
+     0.03,
+     -0.07,
+     0.83,
+     0.26,
+     0.03,
+     -0.01,
+     -0.5
+    ],
+    [
+     -0.98,
+     -0.62,
+     0.38,
+     -0.6,
+     -0.26,
+     -0.99,
+     0.66,
+     -0.69
+    ],
+    [
+     -0.46,
+     0.76,
+     0.02,
+     0.69,
+     0.28,
+     0.48,
+     -0.82,
+     0.08
+    ],
+    [
+     0.02,
+     0.74,
+     -0.28,
+     0.2,
+     -0.88,
+     -0.22,
+     -0.35,
+     -0.7
+    ],
+    [
+     0.63,
+     -0.24,
+     0.96,
+     0.18,
+     0.21,
+     0.28,
+     0.35,
+     -0.7
+    ]
+   ],
+   "note": "左矩阵，全程驻留 HBM"
+  },
+  "B": {
+   "shape": [
+    8,
+    8
+   ],
+   "dtype": "fp32",
+   "at": "HBM",
+   "role": "input",
+   "init": [
+    [
+     -0.12,
+     -0.52,
+     -0.2,
+     -0.81,
+     0.94,
+     -0.57,
+     0.34,
+     -0.4
+    ],
+    [
+     0.75,
+     0.32,
+     -0.74,
+     0.69,
+     0.89,
+     0.81,
+     0.14,
+     -0.71
+    ],
+    [
+     -0.62,
+     0.86,
+     0.1,
+     -0.64,
+     0.77,
+     0.28,
+     0.14,
+     -0.25
+    ],
+    [
+     -0.18,
+     -0.52,
+     -0.92,
+     0.75,
+     -0.06,
+     0.1,
+     -0.36,
+     0.5
+    ],
+    [
+     -0.95,
+     -0.26,
+     -0.94,
+     -0.75,
+     0.93,
+     0.32,
+     -0.14,
+     0.05
+    ],
+    [
+     0.75,
+     -0.31,
+     0.18,
+     0.37,
+     -0.29,
+     0.04,
+     0.53,
+     0.82
+    ],
+    [
+     -0.7,
+     0.87,
+     -0.99,
+     0.51,
+     0.62,
+     -0.73,
+     -0.16,
+     0.63
+    ],
+    [
+     -0.97,
+     0.26,
+     0.59,
+     0.03,
+     0.45,
+     -0.55,
+     -0.6,
+     -0.27
+    ]
+   ],
+   "note": "右矩阵，全程驻留 HBM"
+  },
+  "C": {
+   "shape": [
+    8,
+    8
+   ],
+   "dtype": "fp32",
+   "at": "HBM",
+   "role": "output",
+   "note": "输出矩阵，逐块写回"
+  },
+  "a_val": {
+   "shape": [],
+   "dtype": "fp32",
+   "at": "REG",
+   "role": "staging",
+   "note": "朴素实现里 A 的元素直接从 HBM 进寄存器"
+  },
+  "b_val": {
+   "shape": [],
+   "dtype": "fp32",
+   "at": "REG",
+   "role": "staging",
+   "note": "朴素实现里 B 的元素直接从 HBM 进寄存器"
+  },
+  "acc": {
+   "shape": [],
+   "dtype": "fp32",
+   "at": "REG",
+   "role": "state",
+   "init": 0.0,
+   "note": "点积累加器，标量"
+  },
+  "A_smem": {
+   "shape": [
+    2,
+    4
+   ],
+   "dtype": "fp32",
+   "at": "SMEM",
+   "role": "staging",
+   "note": "A 的当前 tile，块内所有线程共享"
+  },
+  "B_smem": {
+   "shape": [
+    4,
+    4
+   ],
+   "dtype": "fp32",
+   "at": "SMEM",
+   "role": "staging",
+   "note": "B 的当前 tile，块内所有线程共享"
+  },
+  "a_frag": {
+   "shape": [
+    2
+   ],
+   "dtype": "fp32",
+   "at": "REG",
+   "role": "staging",
+   "note": "线程私有：A_smem 的一列"
+  },
+  "b_frag": {
+   "shape": [
+    4
+   ],
+   "dtype": "fp32",
+   "at": "REG",
+   "role": "staging",
+   "note": "线程私有：B_smem 的一行"
+  },
+  "c_frag": {
+   "shape": [
+    2,
+    4
+   ],
+   "dtype": "fp32",
+   "at": "REG",
+   "role": "state",
+   "note": "线程私有的累加器，跨 K 迭代保持"
+  }
+ },
+ "graph": {
+  "nodes": [
+   {
+    "id": "init",
+    "title": "初始化：问题规模与分块参数",
+    "kind": "state",
+    "op": "init",
+    "phase": "准备"
+   },
+   {
+    "id": "d0",
+    "title": "点积 C00：第 1 个 k",
+    "kind": "op",
+    "op": "fma",
+    "phase": "点积展开"
+   },
+   {
+    "id": "d1",
+    "title": "点积 C00：第 2 个 k",
+    "kind": "op",
+    "op": "fma",
+    "phase": "点积展开"
+   },
+   {
+    "id": "d2",
+    "title": "点积 C00：第 3 个 k",
+    "kind": "op",
+    "op": "fma",
+    "phase": "点积展开"
+   },
+   {
+    "id": "d3",
+    "title": "点积 C00：第 4 个 k",
+    "kind": "op",
+    "op": "fma",
+    "phase": "点积展开"
+   },
+   {
+    "id": "d4",
+    "title": "点积 C00：第 5 个 k",
+    "kind": "op",
+    "op": "fma",
+    "phase": "点积展开"
+   },
+   {
+    "id": "d5",
+    "title": "点积 C00：第 6 个 k",
+    "kind": "op",
+    "op": "fma",
+    "phase": "点积展开"
+   },
+   {
+    "id": "d6",
+    "title": "点积 C00：第 7 个 k",
+    "kind": "op",
+    "op": "fma",
+    "phase": "点积展开"
+   },
+   {
+    "id": "d7",
+    "title": "点积 C00：第 8 个 k",
+    "kind": "op",
+    "op": "fma",
+    "phase": "点积展开"
+   },
+   {
+    "id": "d8",
+    "title": "点积结束：写回 C00",
+    "kind": "op",
+    "op": "store",
+    "phase": "点积展开"
+   },
+   {
+    "id": "naive",
+    "title": "朴素铺满：同样的事做 64 遍",
+    "kind": "op",
+    "op": "cost",
+    "phase": "朴素铺满"
+   },
+   {
+    "id": "ld000",
+    "title": "块(0,0)·K1：A、B 的 tile 载入 SMEM",
+    "kind": "comm",
+    "op": "load",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "mma000",
+    "title": "块(0,0)·K1：SMEM → REG 外积累加",
+    "kind": "op",
+    "op": "fma",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "ld001",
+    "title": "块(0,0)·K2：A、B 的 tile 载入 SMEM",
+    "kind": "comm",
+    "op": "load",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "mma001",
+    "title": "块(0,0)·K2：SMEM → REG 外积累加",
+    "kind": "op",
+    "op": "fma",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "st00",
+    "title": "块(0,0)：累加器写回 C",
+    "kind": "comm",
+    "op": "store",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "ld010",
+    "title": "块(0,1)·K1：A、B 的 tile 载入 SMEM",
+    "kind": "comm",
+    "op": "load",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "mma010",
+    "title": "块(0,1)·K1：SMEM → REG 外积累加",
+    "kind": "op",
+    "op": "fma",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "ld011",
+    "title": "块(0,1)·K2：A、B 的 tile 载入 SMEM",
+    "kind": "comm",
+    "op": "load",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "mma011",
+    "title": "块(0,1)·K2：SMEM → REG 外积累加",
+    "kind": "op",
+    "op": "fma",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "st01",
+    "title": "块(0,1)：累加器写回 C",
+    "kind": "comm",
+    "op": "store",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "ld100",
+    "title": "块(1,0)·K1：A、B 的 tile 载入 SMEM",
+    "kind": "comm",
+    "op": "load",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "mma100",
+    "title": "块(1,0)·K1：SMEM → REG 外积累加",
+    "kind": "op",
+    "op": "fma",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "ld101",
+    "title": "块(1,0)·K2：A、B 的 tile 载入 SMEM",
+    "kind": "comm",
+    "op": "load",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "mma101",
+    "title": "块(1,0)·K2：SMEM → REG 外积累加",
+    "kind": "op",
+    "op": "fma",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "st10",
+    "title": "块(1,0)：累加器写回 C",
+    "kind": "comm",
+    "op": "store",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "ld110",
+    "title": "块(1,1)·K1：A、B 的 tile 载入 SMEM",
+    "kind": "comm",
+    "op": "load",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "mma110",
+    "title": "块(1,1)·K1：SMEM → REG 外积累加",
+    "kind": "op",
+    "op": "fma",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "ld111",
+    "title": "块(1,1)·K2：A、B 的 tile 载入 SMEM",
+    "kind": "comm",
+    "op": "load",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "mma111",
+    "title": "块(1,1)·K2：SMEM → REG 外积累加",
+    "kind": "op",
+    "op": "fma",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "st11",
+    "title": "块(1,1)：累加器写回 C",
+    "kind": "comm",
+    "op": "store",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "ld200",
+    "title": "块(2,0)·K1：A、B 的 tile 载入 SMEM",
+    "kind": "comm",
+    "op": "load",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "mma200",
+    "title": "块(2,0)·K1：SMEM → REG 外积累加",
+    "kind": "op",
+    "op": "fma",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "ld201",
+    "title": "块(2,0)·K2：A、B 的 tile 载入 SMEM",
+    "kind": "comm",
+    "op": "load",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "mma201",
+    "title": "块(2,0)·K2：SMEM → REG 外积累加",
+    "kind": "op",
+    "op": "fma",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "st20",
+    "title": "块(2,0)：累加器写回 C",
+    "kind": "comm",
+    "op": "store",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "ld210",
+    "title": "块(2,1)·K1：A、B 的 tile 载入 SMEM",
+    "kind": "comm",
+    "op": "load",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "mma210",
+    "title": "块(2,1)·K1：SMEM → REG 外积累加",
+    "kind": "op",
+    "op": "fma",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "ld211",
+    "title": "块(2,1)·K2：A、B 的 tile 载入 SMEM",
+    "kind": "comm",
+    "op": "load",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "mma211",
+    "title": "块(2,1)·K2：SMEM → REG 外积累加",
+    "kind": "op",
+    "op": "fma",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "st21",
+    "title": "块(2,1)：累加器写回 C",
+    "kind": "comm",
+    "op": "store",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "ld300",
+    "title": "块(3,0)·K1：A、B 的 tile 载入 SMEM",
+    "kind": "comm",
+    "op": "load",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "mma300",
+    "title": "块(3,0)·K1：SMEM → REG 外积累加",
+    "kind": "op",
+    "op": "fma",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "ld301",
+    "title": "块(3,0)·K2：A、B 的 tile 载入 SMEM",
+    "kind": "comm",
+    "op": "load",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "mma301",
+    "title": "块(3,0)·K2：SMEM → REG 外积累加",
+    "kind": "op",
+    "op": "fma",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "st30",
+    "title": "块(3,0)：累加器写回 C",
+    "kind": "comm",
+    "op": "store",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "ld310",
+    "title": "块(3,1)·K1：A、B 的 tile 载入 SMEM",
+    "kind": "comm",
+    "op": "load",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "mma310",
+    "title": "块(3,1)·K1：SMEM → REG 外积累加",
+    "kind": "op",
+    "op": "fma",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "ld311",
+    "title": "块(3,1)·K2：A、B 的 tile 载入 SMEM",
+    "kind": "comm",
+    "op": "load",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "mma311",
+    "title": "块(3,1)·K2：SMEM → REG 外积累加",
+    "kind": "op",
+    "op": "fma",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "st31",
+    "title": "块(3,1)：累加器写回 C",
+    "kind": "comm",
+    "op": "store",
+    "phase": "分块搬运"
+   },
+   {
+    "id": "sum",
+    "title": "收尾：分块买到了什么",
+    "kind": "op",
+    "op": "summary",
+    "phase": "收尾"
+   }
+  ],
+  "edges": [
+   {
+    "from": "init",
+    "to": "d0",
+    "tensor": "acc"
+   },
+   {
+    "from": "d0",
+    "to": "d1",
+    "tensor": "acc"
+   },
+   {
+    "from": "d1",
+    "to": "d2",
+    "tensor": "acc"
+   },
+   {
+    "from": "d2",
+    "to": "d3",
+    "tensor": "acc"
+   },
+   {
+    "from": "d3",
+    "to": "d4",
+    "tensor": "acc"
+   },
+   {
+    "from": "d4",
+    "to": "d5",
+    "tensor": "acc"
+   },
+   {
+    "from": "d5",
+    "to": "d6",
+    "tensor": "acc"
+   },
+   {
+    "from": "d6",
+    "to": "d7",
+    "tensor": "acc"
+   },
+   {
+    "from": "d7",
+    "to": "d8",
+    "tensor": "acc"
+   },
+   {
+    "from": "init",
+    "to": "naive",
+    "tensor": "A"
+   },
+   {
+    "from": "init",
+    "to": "ld000",
+    "tensor": "A"
+   },
+   {
+    "from": "ld000",
+    "to": "mma000",
+    "tensor": "A_smem"
+   },
+   {
+    "from": "init",
+    "to": "ld001",
+    "tensor": "A"
+   },
+   {
+    "from": "ld001",
+    "to": "mma001",
+    "tensor": "A_smem"
+   },
+   {
+    "from": "mma000",
+    "to": "mma001",
+    "tensor": "c_frag"
+   },
+   {
+    "from": "mma001",
+    "to": "st00",
+    "tensor": "c_frag"
+   },
+   {
+    "from": "init",
+    "to": "ld010",
+    "tensor": "A"
+   },
+   {
+    "from": "ld010",
+    "to": "mma010",
+    "tensor": "A_smem"
+   },
+   {
+    "from": "init",
+    "to": "ld011",
+    "tensor": "A"
+   },
+   {
+    "from": "ld011",
+    "to": "mma011",
+    "tensor": "A_smem"
+   },
+   {
+    "from": "mma010",
+    "to": "mma011",
+    "tensor": "c_frag"
+   },
+   {
+    "from": "mma011",
+    "to": "st01",
+    "tensor": "c_frag"
+   },
+   {
+    "from": "init",
+    "to": "ld100",
+    "tensor": "A"
+   },
+   {
+    "from": "ld100",
+    "to": "mma100",
+    "tensor": "A_smem"
+   },
+   {
+    "from": "init",
+    "to": "ld101",
+    "tensor": "A"
+   },
+   {
+    "from": "ld101",
+    "to": "mma101",
+    "tensor": "A_smem"
+   },
+   {
+    "from": "mma100",
+    "to": "mma101",
+    "tensor": "c_frag"
+   },
+   {
+    "from": "mma101",
+    "to": "st10",
+    "tensor": "c_frag"
+   },
+   {
+    "from": "init",
+    "to": "ld110",
+    "tensor": "A"
+   },
+   {
+    "from": "ld110",
+    "to": "mma110",
+    "tensor": "A_smem"
+   },
+   {
+    "from": "init",
+    "to": "ld111",
+    "tensor": "A"
+   },
+   {
+    "from": "ld111",
+    "to": "mma111",
+    "tensor": "A_smem"
+   },
+   {
+    "from": "mma110",
+    "to": "mma111",
+    "tensor": "c_frag"
+   },
+   {
+    "from": "mma111",
+    "to": "st11",
+    "tensor": "c_frag"
+   },
+   {
+    "from": "init",
+    "to": "ld200",
+    "tensor": "A"
+   },
+   {
+    "from": "ld200",
+    "to": "mma200",
+    "tensor": "A_smem"
+   },
+   {
+    "from": "init",
+    "to": "ld201",
+    "tensor": "A"
+   },
+   {
+    "from": "ld201",
+    "to": "mma201",
+    "tensor": "A_smem"
+   },
+   {
+    "from": "mma200",
+    "to": "mma201",
+    "tensor": "c_frag"
+   },
+   {
+    "from": "mma201",
+    "to": "st20",
+    "tensor": "c_frag"
+   },
+   {
+    "from": "init",
+    "to": "ld210",
+    "tensor": "A"
+   },
+   {
+    "from": "ld210",
+    "to": "mma210",
+    "tensor": "A_smem"
+   },
+   {
+    "from": "init",
+    "to": "ld211",
+    "tensor": "A"
+   },
+   {
+    "from": "ld211",
+    "to": "mma211",
+    "tensor": "A_smem"
+   },
+   {
+    "from": "mma210",
+    "to": "mma211",
+    "tensor": "c_frag"
+   },
+   {
+    "from": "mma211",
+    "to": "st21",
+    "tensor": "c_frag"
+   },
+   {
+    "from": "init",
+    "to": "ld300",
+    "tensor": "A"
+   },
+   {
+    "from": "ld300",
+    "to": "mma300",
+    "tensor": "A_smem"
+   },
+   {
+    "from": "init",
+    "to": "ld301",
+    "tensor": "A"
+   },
+   {
+    "from": "ld301",
+    "to": "mma301",
+    "tensor": "A_smem"
+   },
+   {
+    "from": "mma300",
+    "to": "mma301",
+    "tensor": "c_frag"
+   },
+   {
+    "from": "mma301",
+    "to": "st30",
+    "tensor": "c_frag"
+   },
+   {
+    "from": "init",
+    "to": "ld310",
+    "tensor": "A"
+   },
+   {
+    "from": "ld310",
+    "to": "mma310",
+    "tensor": "A_smem"
+   },
+   {
+    "from": "init",
+    "to": "ld311",
+    "tensor": "A"
+   },
+   {
+    "from": "ld311",
+    "to": "mma311",
+    "tensor": "A_smem"
+   },
+   {
+    "from": "mma310",
+    "to": "mma311",
+    "tensor": "c_frag"
+   },
+   {
+    "from": "mma311",
+    "to": "st31",
+    "tensor": "c_frag"
+   }
+  ]
+ },
+ "steps": [
+  {
+   "id": "init",
+   "title": "初始化：问题规模与分块参数",
+   "kind": "state",
+   "op": "init",
+   "phase": "准备",
+   "formula": {
+    "sym": "C^{(0)}_{ij} = 0,\\qquad \\mathrm{tile} = \\slot{BM}\\times\\slot{BN}\\times\\slot{BK}",
+    "idx": "C^{(0)}_{ij} = 0,\\qquad (M,N,K) = (\\slot{M},\\slot{N},\\slot{K}),\\qquad \\mathrm{tile} = \\slot{BM}\\times\\slot{BN}\\times\\slot{BK}",
+    "num": "C^{(0)}_{ij} = \\slot{Z},\\qquad (M,N,K) = (\\slot{M},\\slot{N},\\slot{K}),\\qquad \\mathrm{tile} = \\slot{BM}\\times\\slot{BN}\\times\\slot{BK},\\qquad \\mathrm{blocks} = \\slot{NB}"
+   },
+   "bindings": {
+    "Z": {
+     "sym": "0",
+     "idx": "0",
+     "num": "0"
+    },
+    "M": {
+     "sym": "M",
+     "idx": "8",
+     "num": "8"
+    },
+    "N": {
+     "sym": "N",
+     "idx": "8",
+     "num": "8"
+    },
+    "K": {
+     "sym": "K",
+     "idx": "8",
+     "num": "8"
+    },
+    "BM": {
+     "sym": "B_M",
+     "idx": "2",
+     "num": "2"
+    },
+    "BN": {
+     "sym": "B_N",
+     "idx": "4",
+     "num": "4"
+    },
+    "BK": {
+     "sym": "B_K",
+     "idx": "4",
+     "num": "4"
+    },
+    "NB": {
+     "sym": "(M/B_M)(N/B_N)(K/B_K)",
+     "idx": "(8/2)(8/4)(8/4)",
+     "num": "16"
+    }
+   },
+   "reads": [],
+   "writes": [
+    "C"
+   ],
+   "state": {
+    "C": [
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ]
+    ]
+   },
+   "narration": "A 和 B 已经在 HBM 里，C 先清零。8×8×8 的矩阵按 2×4×4 分块，C 是 4×2 个块，每个块沿 K 要迭代 2 次。"
+  },
+  {
+   "id": "d0",
+   "title": "点积 C00：第 1 个 k",
+   "kind": "op",
+   "op": "fma",
+   "phase": "点积展开",
+   "formula": {
+    "sym": "\\slot{NEW} \\leftarrow \\slot{OLD} + \\region{MUL}{A_{i\\slot{K}}\\,B_{\\slot{K}j}}",
+    "idx": "\\slot{NEW} \\leftarrow \\slot{OLD} + \\region{MUL}{A_{0\\slot{K}}\\,B_{\\slot{K}0}}",
+    "num": "\\slot{NEW} \\leftarrow \\slot{OLD} + \\region{MUL}{\\slot{AV}\\cdot\\slot{BV}}"
+   },
+   "bindings": {
+    "K": {
+     "sym": "k",
+     "idx": "0",
+     "num": "0"
+    },
+    "OLD": {
+     "sym": "C_{ij}",
+     "idx": "C_{00}",
+     "num": "0"
+    },
+    "AV": {
+     "sym": "A_{ik}",
+     "idx": "A_{00}",
+     "num": "0.25"
+    },
+    "BV": {
+     "sym": "B_{kj}",
+     "idx": "B_{00}",
+     "num": "-0.12"
+    },
+    "NEW": {
+     "sym": "C_{ij}",
+     "idx": "C_{00}",
+     "num": "-0.03"
+    }
+   },
+   "reads": [
+    "A",
+    "B",
+    "acc"
+   ],
+   "writes": [
+    "a_val",
+    "b_val",
+    "acc"
+   ],
+   "state": {
+    "a_val": 0.25,
+    "b_val": -0.12,
+    "acc": -0.03
+   },
+   "narration": "取 A[0][0] = 0.25 和 B[0][0] = -0.12，乘起来累加：0 + 0.25×-0.12 = -0.03。这两个数是从 HBM 直接进寄存器的 —— 朴素实现里没有 SMEM 这一层。",
+   "regions": {
+    "MUL": "0.25 × -0.12 是要累加的那一项。两个操作数都来自 HBM，每算一个输出点都要重新读一遍，谁都复用不上。"
+   },
+   "spans": {
+    "A": [
+     [
+      0,
+      1
+     ],
+     [
+      0,
+      1
+     ]
+    ],
+    "B": [
+     [
+      0,
+      1
+     ],
+     [
+      0,
+      1
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "REG",
+     "elements": 2,
+     "note": "A[0][0] 与 B[0][0] 各 1 个 float，直接进寄存器",
+     "bytes": 8
+    }
+   ]
+  },
+  {
+   "id": "d1",
+   "title": "点积 C00：第 2 个 k",
+   "kind": "op",
+   "op": "fma",
+   "phase": "点积展开",
+   "formula": {
+    "sym": "\\slot{NEW} \\leftarrow \\slot{OLD} + \\region{MUL}{A_{i\\slot{K}}\\,B_{\\slot{K}j}}",
+    "idx": "\\slot{NEW} \\leftarrow \\slot{OLD} + \\region{MUL}{A_{0\\slot{K}}\\,B_{\\slot{K}0}}",
+    "num": "\\slot{NEW} \\leftarrow \\slot{OLD} + \\region{MUL}{\\slot{AV}\\cdot\\slot{BV}}"
+   },
+   "bindings": {
+    "K": {
+     "sym": "k",
+     "idx": "1",
+     "num": "1"
+    },
+    "OLD": {
+     "sym": "C_{ij}",
+     "idx": "C_{00}",
+     "num": "-0.03"
+    },
+    "AV": {
+     "sym": "A_{ik}",
+     "idx": "A_{01}",
+     "num": "0.79"
+    },
+    "BV": {
+     "sym": "B_{kj}",
+     "idx": "B_{10}",
+     "num": "0.75"
+    },
+    "NEW": {
+     "sym": "C_{ij}",
+     "idx": "C_{00}",
+     "num": "0.5625"
+    }
+   },
+   "reads": [
+    "A",
+    "B",
+    "acc"
+   ],
+   "writes": [
+    "a_val",
+    "b_val",
+    "acc"
+   ],
+   "state": {
+    "a_val": 0.79,
+    "b_val": 0.75,
+    "acc": 0.5625
+   },
+   "narration": "取 A[0][1] = 0.79 和 B[1][0] = 0.75，乘起来累加：-0.03 + 0.79×0.75 = 0.5625。这两个数是从 HBM 直接进寄存器的 —— 朴素实现里没有 SMEM 这一层。",
+   "regions": {
+    "MUL": "0.79 × 0.75 是要累加的那一项。两个操作数都来自 HBM，每算一个输出点都要重新读一遍，谁都复用不上。"
+   },
+   "spans": {
+    "A": [
+     [
+      0,
+      1
+     ],
+     [
+      1,
+      2
+     ]
+    ],
+    "B": [
+     [
+      1,
+      2
+     ],
+     [
+      0,
+      1
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "REG",
+     "elements": 2,
+     "note": "A[0][1] 与 B[1][0] 各 1 个 float，直接进寄存器",
+     "bytes": 8
+    }
+   ]
+  },
+  {
+   "id": "d2",
+   "title": "点积 C00：第 3 个 k",
+   "kind": "op",
+   "op": "fma",
+   "phase": "点积展开",
+   "formula": {
+    "sym": "\\slot{NEW} \\leftarrow \\slot{OLD} + \\region{MUL}{A_{i\\slot{K}}\\,B_{\\slot{K}j}}",
+    "idx": "\\slot{NEW} \\leftarrow \\slot{OLD} + \\region{MUL}{A_{0\\slot{K}}\\,B_{\\slot{K}0}}",
+    "num": "\\slot{NEW} \\leftarrow \\slot{OLD} + \\region{MUL}{\\slot{AV}\\cdot\\slot{BV}}"
+   },
+   "bindings": {
+    "K": {
+     "sym": "k",
+     "idx": "2",
+     "num": "2"
+    },
+    "OLD": {
+     "sym": "C_{ij}",
+     "idx": "C_{00}",
+     "num": "0.5625"
+    },
+    "AV": {
+     "sym": "A_{ik}",
+     "idx": "A_{02}",
+     "num": "0.55"
+    },
+    "BV": {
+     "sym": "B_{kj}",
+     "idx": "B_{20}",
+     "num": "-0.62"
+    },
+    "NEW": {
+     "sym": "C_{ij}",
+     "idx": "C_{00}",
+     "num": "0.2215"
+    }
+   },
+   "reads": [
+    "A",
+    "B",
+    "acc"
+   ],
+   "writes": [
+    "a_val",
+    "b_val",
+    "acc"
+   ],
+   "state": {
+    "a_val": 0.55,
+    "b_val": -0.62,
+    "acc": 0.22149999999999997
+   },
+   "narration": "取 A[0][2] = 0.55 和 B[2][0] = -0.62，乘起来累加：0.5625 + 0.55×-0.62 = 0.2215。这两个数是从 HBM 直接进寄存器的 —— 朴素实现里没有 SMEM 这一层。",
+   "regions": {
+    "MUL": "0.55 × -0.62 是要累加的那一项。两个操作数都来自 HBM，每算一个输出点都要重新读一遍，谁都复用不上。"
+   },
+   "spans": {
+    "A": [
+     [
+      0,
+      1
+     ],
+     [
+      2,
+      3
+     ]
+    ],
+    "B": [
+     [
+      2,
+      3
+     ],
+     [
+      0,
+      1
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "REG",
+     "elements": 2,
+     "note": "A[0][2] 与 B[2][0] 各 1 个 float，直接进寄存器",
+     "bytes": 8
+    }
+   ]
+  },
+  {
+   "id": "d3",
+   "title": "点积 C00：第 4 个 k",
+   "kind": "op",
+   "op": "fma",
+   "phase": "点积展开",
+   "formula": {
+    "sym": "\\slot{NEW} \\leftarrow \\slot{OLD} + \\region{MUL}{A_{i\\slot{K}}\\,B_{\\slot{K}j}}",
+    "idx": "\\slot{NEW} \\leftarrow \\slot{OLD} + \\region{MUL}{A_{0\\slot{K}}\\,B_{\\slot{K}0}}",
+    "num": "\\slot{NEW} \\leftarrow \\slot{OLD} + \\region{MUL}{\\slot{AV}\\cdot\\slot{BV}}"
+   },
+   "bindings": {
+    "K": {
+     "sym": "k",
+     "idx": "3",
+     "num": "3"
+    },
+    "OLD": {
+     "sym": "C_{ij}",
+     "idx": "C_{00}",
+     "num": "0.2215"
+    },
+    "AV": {
+     "sym": "A_{ik}",
+     "idx": "A_{03}",
+     "num": "-0.55"
+    },
+    "BV": {
+     "sym": "B_{kj}",
+     "idx": "B_{30}",
+     "num": "-0.18"
+    },
+    "NEW": {
+     "sym": "C_{ij}",
+     "idx": "C_{00}",
+     "num": "0.3205"
+    }
+   },
+   "reads": [
+    "A",
+    "B",
+    "acc"
+   ],
+   "writes": [
+    "a_val",
+    "b_val",
+    "acc"
+   ],
+   "state": {
+    "a_val": -0.55,
+    "b_val": -0.18,
+    "acc": 0.3205
+   },
+   "narration": "取 A[0][3] = -0.55 和 B[3][0] = -0.18，乘起来累加：0.2215 + -0.55×-0.18 = 0.3205。这两个数是从 HBM 直接进寄存器的 —— 朴素实现里没有 SMEM 这一层。",
+   "regions": {
+    "MUL": "-0.55 × -0.18 是要累加的那一项。两个操作数都来自 HBM，每算一个输出点都要重新读一遍，谁都复用不上。"
+   },
+   "spans": {
+    "A": [
+     [
+      0,
+      1
+     ],
+     [
+      3,
+      4
+     ]
+    ],
+    "B": [
+     [
+      3,
+      4
+     ],
+     [
+      0,
+      1
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "REG",
+     "elements": 2,
+     "note": "A[0][3] 与 B[3][0] 各 1 个 float，直接进寄存器",
+     "bytes": 8
+    }
+   ]
+  },
+  {
+   "id": "d4",
+   "title": "点积 C00：第 5 个 k",
+   "kind": "op",
+   "op": "fma",
+   "phase": "点积展开",
+   "formula": {
+    "sym": "\\slot{NEW} \\leftarrow \\slot{OLD} + \\region{MUL}{A_{i\\slot{K}}\\,B_{\\slot{K}j}}",
+    "idx": "\\slot{NEW} \\leftarrow \\slot{OLD} + \\region{MUL}{A_{0\\slot{K}}\\,B_{\\slot{K}0}}",
+    "num": "\\slot{NEW} \\leftarrow \\slot{OLD} + \\region{MUL}{\\slot{AV}\\cdot\\slot{BV}}"
+   },
+   "bindings": {
+    "K": {
+     "sym": "k",
+     "idx": "4",
+     "num": "4"
+    },
+    "OLD": {
+     "sym": "C_{ij}",
+     "idx": "C_{00}",
+     "num": "0.3205"
+    },
+    "AV": {
+     "sym": "A_{ik}",
+     "idx": "A_{04}",
+     "num": "-0.4"
+    },
+    "BV": {
+     "sym": "B_{kj}",
+     "idx": "B_{40}",
+     "num": "-0.95"
+    },
+    "NEW": {
+     "sym": "C_{ij}",
+     "idx": "C_{00}",
+     "num": "0.7005"
+    }
+   },
+   "reads": [
+    "A",
+    "B",
+    "acc"
+   ],
+   "writes": [
+    "a_val",
+    "b_val",
+    "acc"
+   ],
+   "state": {
+    "a_val": -0.4,
+    "b_val": -0.95,
+    "acc": 0.7005
+   },
+   "narration": "取 A[0][4] = -0.4 和 B[4][0] = -0.95，乘起来累加：0.3205 + -0.4×-0.95 = 0.7005。这两个数是从 HBM 直接进寄存器的 —— 朴素实现里没有 SMEM 这一层。",
+   "regions": {
+    "MUL": "-0.4 × -0.95 是要累加的那一项。两个操作数都来自 HBM，每算一个输出点都要重新读一遍，谁都复用不上。"
+   },
+   "spans": {
+    "A": [
+     [
+      0,
+      1
+     ],
+     [
+      4,
+      5
+     ]
+    ],
+    "B": [
+     [
+      4,
+      5
+     ],
+     [
+      0,
+      1
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "REG",
+     "elements": 2,
+     "note": "A[0][4] 与 B[4][0] 各 1 个 float，直接进寄存器",
+     "bytes": 8
+    }
+   ]
+  },
+  {
+   "id": "d5",
+   "title": "点积 C00：第 6 个 k",
+   "kind": "op",
+   "op": "fma",
+   "phase": "点积展开",
+   "formula": {
+    "sym": "\\slot{NEW} \\leftarrow \\slot{OLD} + \\region{MUL}{A_{i\\slot{K}}\\,B_{\\slot{K}j}}",
+    "idx": "\\slot{NEW} \\leftarrow \\slot{OLD} + \\region{MUL}{A_{0\\slot{K}}\\,B_{\\slot{K}0}}",
+    "num": "\\slot{NEW} \\leftarrow \\slot{OLD} + \\region{MUL}{\\slot{AV}\\cdot\\slot{BV}}"
+   },
+   "bindings": {
+    "K": {
+     "sym": "k",
+     "idx": "5",
+     "num": "5"
+    },
+    "OLD": {
+     "sym": "C_{ij}",
+     "idx": "C_{00}",
+     "num": "0.7005"
+    },
+    "AV": {
+     "sym": "A_{ik}",
+     "idx": "A_{05}",
+     "num": "0.75"
+    },
+    "BV": {
+     "sym": "B_{kj}",
+     "idx": "B_{50}",
+     "num": "0.75"
+    },
+    "NEW": {
+     "sym": "C_{ij}",
+     "idx": "C_{00}",
+     "num": "1.263"
+    }
+   },
+   "reads": [
+    "A",
+    "B",
+    "acc"
+   ],
+   "writes": [
+    "a_val",
+    "b_val",
+    "acc"
+   ],
+   "state": {
+    "a_val": 0.75,
+    "b_val": 0.75,
+    "acc": 1.263
+   },
+   "narration": "取 A[0][5] = 0.75 和 B[5][0] = 0.75，乘起来累加：0.7005 + 0.75×0.75 = 1.263。这两个数是从 HBM 直接进寄存器的 —— 朴素实现里没有 SMEM 这一层。",
+   "regions": {
+    "MUL": "0.75 × 0.75 是要累加的那一项。两个操作数都来自 HBM，每算一个输出点都要重新读一遍，谁都复用不上。"
+   },
+   "spans": {
+    "A": [
+     [
+      0,
+      1
+     ],
+     [
+      5,
+      6
+     ]
+    ],
+    "B": [
+     [
+      5,
+      6
+     ],
+     [
+      0,
+      1
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "REG",
+     "elements": 2,
+     "note": "A[0][5] 与 B[5][0] 各 1 个 float，直接进寄存器",
+     "bytes": 8
+    }
+   ]
+  },
+  {
+   "id": "d6",
+   "title": "点积 C00：第 7 个 k",
+   "kind": "op",
+   "op": "fma",
+   "phase": "点积展开",
+   "formula": {
+    "sym": "\\slot{NEW} \\leftarrow \\slot{OLD} + \\region{MUL}{A_{i\\slot{K}}\\,B_{\\slot{K}j}}",
+    "idx": "\\slot{NEW} \\leftarrow \\slot{OLD} + \\region{MUL}{A_{0\\slot{K}}\\,B_{\\slot{K}0}}",
+    "num": "\\slot{NEW} \\leftarrow \\slot{OLD} + \\region{MUL}{\\slot{AV}\\cdot\\slot{BV}}"
+   },
+   "bindings": {
+    "K": {
+     "sym": "k",
+     "idx": "6",
+     "num": "6"
+    },
+    "OLD": {
+     "sym": "C_{ij}",
+     "idx": "C_{00}",
+     "num": "1.263"
+    },
+    "AV": {
+     "sym": "A_{ik}",
+     "idx": "A_{06}",
+     "num": "-0.99"
+    },
+    "BV": {
+     "sym": "B_{kj}",
+     "idx": "B_{60}",
+     "num": "-0.7"
+    },
+    "NEW": {
+     "sym": "C_{ij}",
+     "idx": "C_{00}",
+     "num": "1.956"
+    }
+   },
+   "reads": [
+    "A",
+    "B",
+    "acc"
+   ],
+   "writes": [
+    "a_val",
+    "b_val",
+    "acc"
+   ],
+   "state": {
+    "a_val": -0.99,
+    "b_val": -0.7,
+    "acc": 1.956
+   },
+   "narration": "取 A[0][6] = -0.99 和 B[6][0] = -0.7，乘起来累加：1.263 + -0.99×-0.7 = 1.956。这两个数是从 HBM 直接进寄存器的 —— 朴素实现里没有 SMEM 这一层。",
+   "regions": {
+    "MUL": "-0.99 × -0.7 是要累加的那一项。两个操作数都来自 HBM，每算一个输出点都要重新读一遍，谁都复用不上。"
+   },
+   "spans": {
+    "A": [
+     [
+      0,
+      1
+     ],
+     [
+      6,
+      7
+     ]
+    ],
+    "B": [
+     [
+      6,
+      7
+     ],
+     [
+      0,
+      1
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "REG",
+     "elements": 2,
+     "note": "A[0][6] 与 B[6][0] 各 1 个 float，直接进寄存器",
+     "bytes": 8
+    }
+   ]
+  },
+  {
+   "id": "d7",
+   "title": "点积 C00：第 8 个 k",
+   "kind": "op",
+   "op": "fma",
+   "phase": "点积展开",
+   "formula": {
+    "sym": "\\slot{NEW} \\leftarrow \\slot{OLD} + \\region{MUL}{A_{i\\slot{K}}\\,B_{\\slot{K}j}}",
+    "idx": "\\slot{NEW} \\leftarrow \\slot{OLD} + \\region{MUL}{A_{0\\slot{K}}\\,B_{\\slot{K}0}}",
+    "num": "\\slot{NEW} \\leftarrow \\slot{OLD} + \\region{MUL}{\\slot{AV}\\cdot\\slot{BV}}"
+   },
+   "bindings": {
+    "K": {
+     "sym": "k",
+     "idx": "7",
+     "num": "7"
+    },
+    "OLD": {
+     "sym": "C_{ij}",
+     "idx": "C_{00}",
+     "num": "1.956"
+    },
+    "AV": {
+     "sym": "A_{ik}",
+     "idx": "A_{07}",
+     "num": "0.64"
+    },
+    "BV": {
+     "sym": "B_{kj}",
+     "idx": "B_{70}",
+     "num": "-0.97"
+    },
+    "NEW": {
+     "sym": "C_{ij}",
+     "idx": "C_{00}",
+     "num": "1.335"
+    }
+   },
+   "reads": [
+    "A",
+    "B",
+    "acc"
+   ],
+   "writes": [
+    "a_val",
+    "b_val",
+    "acc"
+   ],
+   "state": {
+    "a_val": 0.64,
+    "b_val": -0.97,
+    "acc": 1.3352
+   },
+   "narration": "取 A[0][7] = 0.64 和 B[7][0] = -0.97，乘起来累加：1.956 + 0.64×-0.97 = 1.335。这两个数是从 HBM 直接进寄存器的 —— 朴素实现里没有 SMEM 这一层。",
+   "regions": {
+    "MUL": "0.64 × -0.97 是要累加的那一项。两个操作数都来自 HBM，每算一个输出点都要重新读一遍，谁都复用不上。"
+   },
+   "spans": {
+    "A": [
+     [
+      0,
+      1
+     ],
+     [
+      7,
+      8
+     ]
+    ],
+    "B": [
+     [
+      7,
+      8
+     ],
+     [
+      0,
+      1
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "REG",
+     "elements": 2,
+     "note": "A[0][7] 与 B[7][0] 各 1 个 float，直接进寄存器",
+     "bytes": 8
+    }
+   ]
+  },
+  {
+   "id": "d8",
+   "title": "点积结束：写回 C00",
+   "kind": "op",
+   "op": "store",
+   "phase": "点积展开",
+   "formula": {
+    "sym": "\\mathrm{HBM}[C][\\slot{RI}][\\slot{CI}] \\leftarrow \\slot{ACC}",
+    "idx": "\\mathrm{HBM}[C][0][0] \\leftarrow \\slot{ACC}",
+    "num": "\\mathrm{HBM}[C][0][0] \\leftarrow \\slot{ACC} = \\slot{SUM}"
+   },
+   "bindings": {
+    "RI": {
+     "sym": "i",
+     "idx": "0",
+     "num": "0"
+    },
+    "CI": {
+     "sym": "j",
+     "idx": "0",
+     "num": "0"
+    },
+    "ACC": {
+     "sym": "\\mathrm{acc}",
+     "idx": "\\mathrm{acc}",
+     "num": "1.335"
+    },
+    "SUM": {
+     "sym": "C_{ij}",
+     "idx": "C_{00}",
+     "num": "1.335"
+    }
+   },
+   "reads": [
+    "acc"
+   ],
+   "writes": [
+    "C"
+   ],
+   "state": {
+    "C": [
+     [
+      1.3352,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ]
+    ]
+   },
+   "narration": "8 次乘加之后 C[0][0] = 1.335。整个矩阵有 64 个输出点，每个都得这么来一遍。",
+   "spans": {
+    "C": [
+     [
+      0,
+      1
+     ],
+     [
+      0,
+      1
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "REG",
+     "to": "HBM",
+     "elements": 1,
+     "note": "一个输出点，一个 float 写回 HBM",
+     "bytes": 4
+    }
+   ]
+  },
+  {
+   "id": "naive",
+   "title": "朴素铺满：同样的事做 64 遍",
+   "kind": "op",
+   "op": "cost",
+   "phase": "朴素铺满",
+   "formula": {
+    "sym": "\\slot{NEW} = \\sum_{k=0}^{K-1} A_{ik}B_{kj}\\quad \\text{for every }(i,j)",
+    "idx": "\\text{reads} = 2MNK = \\slot{RD},\\qquad \\text{FMA} = MNK = \\slot{FL}",
+    "num": "\\region{RBYTES}{\\text{reads} = \\slot{RD}},\\qquad \\text{FMA} = \\slot{FL},\\qquad \\mathrm{AI} = \\slot{AI}\\ \\mathrm{FLOP/B}"
+   },
+   "bindings": {
+    "NEW": {
+     "sym": "C_{ij}",
+     "idx": "C_{ij}",
+     "num": "C_{ij}"
+    },
+    "RD": {
+     "sym": "2MNK",
+     "idx": "2\\times8\\times8\\times8",
+     "num": "1024"
+    },
+    "FL": {
+     "sym": "MNK",
+     "idx": "8\\times8\\times8",
+     "num": "512"
+    },
+    "AI": {
+     "sym": "\\frac{2K}{8K}",
+     "idx": "\\frac{2K}{8K}",
+     "num": "0.25"
+    }
+   },
+   "reads": [
+    "A",
+    "B"
+   ],
+   "writes": [
+    "C"
+   ],
+   "state": {
+    "C": [
+     [
+      1.3352,
+      0.058400000000000146,
+      1.7951,
+      -0.33010000000000006,
+      0.47929999999999995,
+      0.8691,
+      0.6985000000000002,
+      -1.2749000000000001
+     ],
+     [
+      0.4744999999999999,
+      -0.23379999999999995,
+      0.7879999999999998,
+      -0.2644999999999999,
+      -0.14079999999999998,
+      -0.7670999999999998,
+      0.23869999999999997,
+      -0.454
+     ],
+     [
+      0.7517,
+      -0.3067000000000001,
+      -1.8634,
+      0.4524999999999999,
+      0.9819000000000002,
+      0.2018000000000002,
+      0.3286,
+      -0.5803999999999999
+     ],
+     [
+      0.2956,
+      -0.21419999999999995,
+      -1.1309,
+      1.2373,
+      -0.9492999999999999,
+      0.9845,
+      -0.33949999999999997,
+      0.9495000000000001
+     ],
+     [
+      -0.7632,
+      1.7193,
+      0.2505000000000002,
+      -0.18259999999999982,
+      -1.0004,
+      -0.12230000000000002,
+      -0.33070000000000005,
+      0.2145000000000001
+     ],
+     [
+      1.0790000000000002,
+      -0.7733999999999999,
+      -0.42100000000000004,
+      0.9535,
+      -0.1331999999999999,
+      1.6158000000000001,
+      0.002800000000000011,
+      -0.14619999999999994
+     ],
+     [
+      2.2851999999999997,
+      -0.3079,
+      -0.04250000000000015,
+      1.2027,
+      -0.8368,
+      0.8797,
+      0.4818,
+      -0.6192999999999997
+     ],
+     [
+      -0.4387,
+      0.30870000000000003,
+      -0.9244999999999999,
+      -1.0516999999999999,
+      1.1231000000000002,
+      -0.05879999999999996,
+      0.7332000000000001,
+      0.418
+     ]
+    ]
+   },
+   "narration": "把上面的点积对全部 64 个输出点各做一次，C 就满了。代价是 1024 次 HBM 读取（4096 字节）换 512 次 FMA：算术强度 0.25 FLOP/Byte。A 的同一行被不同列重复读、B 的同一列被不同行重复读，一次都没复用上。",
+   "regions": {
+    "RBYTES": "每次乘加都要从 HBM 取 2 个 float，共 1024 次读取，fp32 下就是 4096 字节。这是下面要消掉的量。"
+   },
+   "spans": {
+    "C": [
+     [
+      0,
+      8
+     ],
+     [
+      0,
+      8
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "HBM",
+     "elements": 1024,
+     "note": "64 个输出点各读 2K 个元素，全部从 HBM 出发",
+     "bytes": 4096
+    }
+   ]
+  },
+  {
+   "id": "ld000",
+   "title": "块(0,0)·K1：A、B 的 tile 载入 SMEM",
+   "kind": "comm",
+   "op": "load",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "idx": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "num": "\\region{MOVE}{A^{\\mathrm{sm}},\\; B^{\\mathrm{sm}} \\leftarrow \\slot{BYTES}\\ \\mathrm{B}}"
+   },
+   "bindings": {
+    "R0": {
+     "sym": "(b_i)B_M",
+     "idx": "0",
+     "num": "0"
+    },
+    "R1": {
+     "sym": "(b_i+1)B_M",
+     "idx": "2",
+     "num": "2"
+    },
+    "K0": {
+     "sym": "(b_k)B_K",
+     "idx": "0",
+     "num": "0"
+    },
+    "K1": {
+     "sym": "(b_k+1)B_K",
+     "idx": "4",
+     "num": "4"
+    },
+    "C0": {
+     "sym": "(b_j)B_N",
+     "idx": "0",
+     "num": "0"
+    },
+    "C1": {
+     "sym": "(b_j+1)B_N",
+     "idx": "4",
+     "num": "4"
+    },
+    "BYTES": {
+     "sym": "4(B_MB_K + B_KB_N)",
+     "idx": "4\\times(8 + 16)",
+     "num": "96"
+    }
+   },
+   "reads": [
+    "A",
+    "B"
+   ],
+   "writes": [
+    "A_smem",
+    "B_smem"
+   ],
+   "state": {
+    "A_smem": [
+     [
+      0.25,
+      0.79,
+      0.55,
+      -0.55
+     ],
+     [
+      0.59,
+      -0.06,
+      -0.39,
+      -0.44
+     ]
+    ],
+    "B_smem": [
+     [
+      -0.12,
+      -0.52,
+      -0.2,
+      -0.81
+     ],
+     [
+      0.75,
+      0.32,
+      -0.74,
+      0.69
+     ],
+     [
+      -0.62,
+      0.86,
+      0.1,
+      -0.64
+     ],
+     [
+      -0.18,
+      -0.52,
+      -0.92,
+      0.75
+     ]
+    ]
+   },
+   "narration": "块(0,0) 的第 5 个 K 迭代：A 的 [0:2, 0:4] 和 B 的 [0:4, 0:4] 从 HBM 搬进 SMEM，共 24 个 float（96 字节）。这一对 tile 接下来会被块内 8 个输出点复用。",
+   "regions": {
+    "MOVE": "这次搬运把 A、B 各一个 2×4 的 tile 送进 SMEM，合计 24 个 float，即 96 字节。朴素实现算这 8 个输出点要读 128 个元素。"
+   },
+   "spans": {
+    "A": [
+     [
+      0,
+      2
+     ],
+     [
+      0,
+      4
+     ]
+    ],
+    "B": [
+     [
+      0,
+      4
+     ],
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "SMEM",
+     "elements": 24,
+     "note": "A 的 2×4 tile 与 B 的 4×4 tile，一次搬完",
+     "bytes": 96
+    }
+   ]
+  },
+  {
+   "id": "mma000",
+   "title": "块(0,0)·K1：SMEM → REG 外积累加",
+   "kind": "op",
+   "op": "fma",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "idx": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}=\\slot{P0}}^{\\slot{P1}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "num": "\\slot{AV} \\leftarrow A^{\\mathrm{sm}}\\left[:,\\slot{PL}\\right],\\qquad \\slot{BV} \\leftarrow B^{\\mathrm{sm}}\\left[\\slot{PL},:\\right],\\qquad \\region{OUTER}{\\slot{FRAG}}"
+   },
+   "bindings": {
+    "P": {
+     "sym": "p",
+     "idx": "3",
+     "num": "3"
+    },
+    "P0": {
+     "sym": "0",
+     "idx": "0",
+     "num": "0"
+    },
+    "P1": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "PL": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "AV": {
+     "sym": "A^{\\mathrm{sm}}[:,B_K-1]",
+     "idx": "A^{\\mathrm{sm}}[:,3]",
+     "num": "\\left[-0.55,\\; -0.44\\right]"
+    },
+    "BV": {
+     "sym": "B^{\\mathrm{sm}}[B_K-1,:]",
+     "idx": "B^{\\mathrm{sm}}[3,:]",
+     "num": "\\left[-0.18,\\; -0.52,\\; -0.92,\\; 0.75\\right]"
+    },
+    "FRAG": {
+     "sym": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "idx": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "num": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}"
+    }
+   },
+   "reads": [
+    "A_smem",
+    "B_smem",
+    "c_frag"
+   ],
+   "writes": [
+    "a_frag",
+    "b_frag",
+    "c_frag"
+   ],
+   "state": {
+    "a_frag": [
+     -0.55,
+     -0.44
+    ],
+    "b_frag": [
+     -0.18,
+     -0.52,
+     -0.92,
+     0.75
+    ],
+    "c_frag": [
+     [
+      0.3205,
+      0.8818000000000001,
+      -0.07359999999999989,
+      -0.42190000000000005
+     ],
+     [
+      0.20520000000000002,
+      -0.4326,
+      0.2922,
+      -0.5996999999999999
+     ]
+    ]
+   },
+   "narration": "线程把 A_smem 的第 4 列 2 个数、B_smem 的第 4 行 4 个数搬进寄存器，然后做外积。本块的 4 个 k 里，每轮读 2 + 4 = 6 个 float，完成 8 次 FMA —— 这就是 SMEM 这一级买到的复用。",
+   "regions": {
+    "OUTER": "每轮 SMEM 读 6 个 float 做 8 次 FMA，比例 8 / 6 = 1 : 1，而朴素实现是每读 2 个 float 做 1 次 FMA。"
+   },
+   "spans": {
+    "A_smem": [
+     [
+      0,
+      2
+     ],
+     [
+      3,
+      4
+     ]
+    ],
+    "B_smem": [
+     [
+      3,
+      4
+     ],
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "SMEM",
+     "to": "REG",
+     "elements": 6,
+     "note": "A_smem 的 2 个 + B_smem 的 4 个，共 6 个进寄存器",
+     "bytes": 24
+    },
+    {
+     "from": "REG",
+     "to": "REG",
+     "elements": 8,
+     "note": "寄存器内的 8 次 FMA，c_frag 原地累加，不跨层",
+     "bytes": 32
+    }
+   ]
+  },
+  {
+   "id": "ld001",
+   "title": "块(0,0)·K2：A、B 的 tile 载入 SMEM",
+   "kind": "comm",
+   "op": "load",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "idx": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "num": "\\region{MOVE}{A^{\\mathrm{sm}},\\; B^{\\mathrm{sm}} \\leftarrow \\slot{BYTES}\\ \\mathrm{B}}"
+   },
+   "bindings": {
+    "R0": {
+     "sym": "(b_i)B_M",
+     "idx": "0",
+     "num": "0"
+    },
+    "R1": {
+     "sym": "(b_i+1)B_M",
+     "idx": "2",
+     "num": "2"
+    },
+    "K0": {
+     "sym": "(b_k)B_K",
+     "idx": "4",
+     "num": "4"
+    },
+    "K1": {
+     "sym": "(b_k+1)B_K",
+     "idx": "8",
+     "num": "8"
+    },
+    "C0": {
+     "sym": "(b_j)B_N",
+     "idx": "0",
+     "num": "0"
+    },
+    "C1": {
+     "sym": "(b_j+1)B_N",
+     "idx": "4",
+     "num": "4"
+    },
+    "BYTES": {
+     "sym": "4(B_MB_K + B_KB_N)",
+     "idx": "4\\times(8 + 16)",
+     "num": "96"
+    }
+   },
+   "reads": [
+    "A",
+    "B"
+   ],
+   "writes": [
+    "A_smem",
+    "B_smem"
+   ],
+   "state": {
+    "A_smem": [
+     [
+      -0.4,
+      0.75,
+      -0.99,
+      0.64
+     ],
+     [
+      -0.49,
+      -0.11,
+      0.01,
+      0.11
+     ]
+    ],
+    "B_smem": [
+     [
+      -0.95,
+      -0.26,
+      -0.94,
+      -0.75
+     ],
+     [
+      0.75,
+      -0.31,
+      0.18,
+      0.37
+     ],
+     [
+      -0.7,
+      0.87,
+      -0.99,
+      0.51
+     ],
+     [
+      -0.97,
+      0.26,
+      0.59,
+      0.03
+     ]
+    ]
+   },
+   "narration": "块(0,0) 的第 5 个 K 迭代：A 的 [0:2, 4:8] 和 B 的 [4:8, 0:4] 从 HBM 搬进 SMEM，共 24 个 float（96 字节）。这一对 tile 接下来会被块内 8 个输出点复用。",
+   "regions": {
+    "MOVE": "这次搬运把 A、B 各一个 2×4 的 tile 送进 SMEM，合计 24 个 float，即 96 字节。朴素实现算这 8 个输出点要读 128 个元素。"
+   },
+   "spans": {
+    "A": [
+     [
+      0,
+      2
+     ],
+     [
+      4,
+      8
+     ]
+    ],
+    "B": [
+     [
+      4,
+      8
+     ],
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "SMEM",
+     "elements": 24,
+     "note": "A 的 2×4 tile 与 B 的 4×4 tile，一次搬完",
+     "bytes": 96
+    }
+   ]
+  },
+  {
+   "id": "mma001",
+   "title": "块(0,0)·K2：SMEM → REG 外积累加",
+   "kind": "op",
+   "op": "fma",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "idx": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}=\\slot{P0}}^{\\slot{P1}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "num": "\\slot{AV} \\leftarrow A^{\\mathrm{sm}}\\left[:,\\slot{PL}\\right],\\qquad \\slot{BV} \\leftarrow B^{\\mathrm{sm}}\\left[\\slot{PL},:\\right],\\qquad \\region{OUTER}{\\slot{FRAG}}"
+   },
+   "bindings": {
+    "P": {
+     "sym": "p",
+     "idx": "3",
+     "num": "3"
+    },
+    "P0": {
+     "sym": "0",
+     "idx": "0",
+     "num": "0"
+    },
+    "P1": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "PL": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "AV": {
+     "sym": "A^{\\mathrm{sm}}[:,B_K-1]",
+     "idx": "A^{\\mathrm{sm}}[:,3]",
+     "num": "\\left[0.64,\\; 0.11\\right]"
+    },
+    "BV": {
+     "sym": "B^{\\mathrm{sm}}[B_K-1,:]",
+     "idx": "B^{\\mathrm{sm}}[3,:]",
+     "num": "\\left[-0.97,\\; 0.26,\\; 0.59,\\; 0.03\\right]"
+    },
+    "FRAG": {
+     "sym": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "idx": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "num": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}"
+    }
+   },
+   "reads": [
+    "A_smem",
+    "B_smem",
+    "c_frag"
+   ],
+   "writes": [
+    "a_frag",
+    "b_frag",
+    "c_frag"
+   ],
+   "state": {
+    "a_frag": [
+     0.64,
+     0.11
+    ],
+    "b_frag": [
+     -0.97,
+     0.26,
+     0.59,
+     0.03
+    ],
+    "c_frag": [
+     [
+      1.3352,
+      0.058400000000000146,
+      1.7951,
+      -0.33010000000000006
+     ],
+     [
+      0.4744999999999999,
+      -0.23379999999999995,
+      0.7879999999999998,
+      -0.2644999999999999
+     ]
+    ]
+   },
+   "narration": "线程把 A_smem 的第 4 列 2 个数、B_smem 的第 4 行 4 个数搬进寄存器，然后做外积。本块的 4 个 k 里，每轮读 2 + 4 = 6 个 float，完成 8 次 FMA —— 这就是 SMEM 这一级买到的复用。",
+   "regions": {
+    "OUTER": "每轮 SMEM 读 6 个 float 做 8 次 FMA，比例 8 / 6 = 1 : 1，而朴素实现是每读 2 个 float 做 1 次 FMA。"
+   },
+   "spans": {
+    "A_smem": [
+     [
+      0,
+      2
+     ],
+     [
+      3,
+      4
+     ]
+    ],
+    "B_smem": [
+     [
+      3,
+      4
+     ],
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "SMEM",
+     "to": "REG",
+     "elements": 6,
+     "note": "A_smem 的 2 个 + B_smem 的 4 个，共 6 个进寄存器",
+     "bytes": 24
+    },
+    {
+     "from": "REG",
+     "to": "REG",
+     "elements": 8,
+     "note": "寄存器内的 8 次 FMA，c_frag 原地累加，不跨层",
+     "bytes": 32
+    }
+   ]
+  },
+  {
+   "id": "st00",
+   "title": "块(0,0)：累加器写回 C",
+   "kind": "comm",
+   "op": "store",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "\\mathrm{HBM}[C]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{C0}:\\slot{C1}\\right] \\leftarrow C^{\\mathrm{frag}}",
+    "idx": "\\mathrm{HBM}[C]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{C0}:\\slot{C1}\\right] \\leftarrow C^{\\mathrm{frag}}",
+    "num": "\\mathrm{HBM}[C]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{C0}:\\slot{C1}\\right] \\leftarrow C^{\\mathrm{frag}},\\qquad C_{\\slot{SI}\\slot{SJ}} = \\slot{SV}"
+   },
+   "bindings": {
+    "R0": {
+     "sym": "(b_i)B_M",
+     "idx": "0",
+     "num": "0"
+    },
+    "R1": {
+     "sym": "(b_i+1)B_M",
+     "idx": "2",
+     "num": "2"
+    },
+    "C0": {
+     "sym": "(b_j)B_N",
+     "idx": "0",
+     "num": "0"
+    },
+    "C1": {
+     "sym": "(b_j+1)B_N",
+     "idx": "4",
+     "num": "4"
+    },
+    "SI": {
+     "sym": "i",
+     "idx": "0",
+     "num": "0"
+    },
+    "SJ": {
+     "sym": "j",
+     "idx": "0",
+     "num": "0"
+    },
+    "SV": {
+     "sym": "C_{ij}",
+     "idx": "C_{00}",
+     "num": "1.335"
+    }
+   },
+   "reads": [
+    "c_frag"
+   ],
+   "writes": [
+    "C"
+   ],
+   "state": {
+    "C": [
+     [
+      1.3352,
+      0.058400000000000146,
+      1.7951,
+      -0.33010000000000006,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.4744999999999999,
+      -0.23379999999999995,
+      0.7879999999999998,
+      -0.2644999999999999,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ]
+    ]
+   },
+   "narration": "块(0,0) 的 2×4 个结果从寄存器写回 HBM。这 8 个输出点一共从 HBM 读了 48 个元素，朴素实现要读 128 个。算出来的值两者逐位相同。",
+   "spans": {
+    "C": [
+     [
+      0,
+      2
+     ],
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "REG",
+     "to": "HBM",
+     "elements": 8,
+     "note": "2×4 个输出点从寄存器写回 HBM",
+     "bytes": 32
+    }
+   ]
+  },
+  {
+   "id": "ld010",
+   "title": "块(0,1)·K1：A、B 的 tile 载入 SMEM",
+   "kind": "comm",
+   "op": "load",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "idx": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "num": "\\region{MOVE}{A^{\\mathrm{sm}},\\; B^{\\mathrm{sm}} \\leftarrow \\slot{BYTES}\\ \\mathrm{B}}"
+   },
+   "bindings": {
+    "R0": {
+     "sym": "(b_i)B_M",
+     "idx": "0",
+     "num": "0"
+    },
+    "R1": {
+     "sym": "(b_i+1)B_M",
+     "idx": "2",
+     "num": "2"
+    },
+    "K0": {
+     "sym": "(b_k)B_K",
+     "idx": "0",
+     "num": "0"
+    },
+    "K1": {
+     "sym": "(b_k+1)B_K",
+     "idx": "4",
+     "num": "4"
+    },
+    "C0": {
+     "sym": "(b_j)B_N",
+     "idx": "4",
+     "num": "4"
+    },
+    "C1": {
+     "sym": "(b_j+1)B_N",
+     "idx": "8",
+     "num": "8"
+    },
+    "BYTES": {
+     "sym": "4(B_MB_K + B_KB_N)",
+     "idx": "4\\times(8 + 16)",
+     "num": "96"
+    }
+   },
+   "reads": [
+    "A",
+    "B"
+   ],
+   "writes": [
+    "A_smem",
+    "B_smem"
+   ],
+   "state": {
+    "A_smem": [
+     [
+      0.25,
+      0.79,
+      0.55,
+      -0.55
+     ],
+     [
+      0.59,
+      -0.06,
+      -0.39,
+      -0.44
+     ]
+    ],
+    "B_smem": [
+     [
+      0.94,
+      -0.57,
+      0.34,
+      -0.4
+     ],
+     [
+      0.89,
+      0.81,
+      0.14,
+      -0.71
+     ],
+     [
+      0.77,
+      0.28,
+      0.14,
+      -0.25
+     ],
+     [
+      -0.06,
+      0.1,
+      -0.36,
+      0.5
+     ]
+    ]
+   },
+   "narration": "块(0,1) 的第 5 个 K 迭代：A 的 [0:2, 0:4] 和 B 的 [0:4, 4:8] 从 HBM 搬进 SMEM，共 24 个 float（96 字节）。这一对 tile 接下来会被块内 8 个输出点复用。",
+   "regions": {
+    "MOVE": "这次搬运把 A、B 各一个 2×4 的 tile 送进 SMEM，合计 24 个 float，即 96 字节。朴素实现算这 8 个输出点要读 128 个元素。"
+   },
+   "spans": {
+    "A": [
+     [
+      0,
+      2
+     ],
+     [
+      0,
+      4
+     ]
+    ],
+    "B": [
+     [
+      0,
+      4
+     ],
+     [
+      4,
+      8
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "SMEM",
+     "elements": 24,
+     "note": "A 的 2×4 tile 与 B 的 4×4 tile，一次搬完",
+     "bytes": 96
+    }
+   ]
+  },
+  {
+   "id": "mma010",
+   "title": "块(0,1)·K1：SMEM → REG 外积累加",
+   "kind": "op",
+   "op": "fma",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "idx": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}=\\slot{P0}}^{\\slot{P1}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "num": "\\slot{AV} \\leftarrow A^{\\mathrm{sm}}\\left[:,\\slot{PL}\\right],\\qquad \\slot{BV} \\leftarrow B^{\\mathrm{sm}}\\left[\\slot{PL},:\\right],\\qquad \\region{OUTER}{\\slot{FRAG}}"
+   },
+   "bindings": {
+    "P": {
+     "sym": "p",
+     "idx": "3",
+     "num": "3"
+    },
+    "P0": {
+     "sym": "0",
+     "idx": "0",
+     "num": "0"
+    },
+    "P1": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "PL": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "AV": {
+     "sym": "A^{\\mathrm{sm}}[:,B_K-1]",
+     "idx": "A^{\\mathrm{sm}}[:,3]",
+     "num": "\\left[-0.55,\\; -0.44\\right]"
+    },
+    "BV": {
+     "sym": "B^{\\mathrm{sm}}[B_K-1,:]",
+     "idx": "B^{\\mathrm{sm}}[3,:]",
+     "num": "\\left[-0.06,\\; 0.1,\\; -0.36,\\; 0.5\\right]"
+    },
+    "FRAG": {
+     "sym": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "idx": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "num": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}"
+    }
+   },
+   "reads": [
+    "A_smem",
+    "B_smem",
+    "c_frag"
+   ],
+   "writes": [
+    "a_frag",
+    "b_frag",
+    "c_frag"
+   ],
+   "state": {
+    "a_frag": [
+     -0.55,
+     -0.44
+    ],
+    "b_frag": [
+     -0.06,
+     0.1,
+     -0.36,
+     0.5
+    ],
+    "c_frag": [
+     [
+      1.3946,
+      0.5964,
+      0.4706000000000001,
+      -1.0734
+     ],
+     [
+      0.22729999999999997,
+      -0.5380999999999999,
+      0.296,
+      -0.31589999999999996
+     ]
+    ]
+   },
+   "narration": "线程把 A_smem 的第 4 列 2 个数、B_smem 的第 4 行 4 个数搬进寄存器，然后做外积。本块的 4 个 k 里，每轮读 2 + 4 = 6 个 float，完成 8 次 FMA —— 这就是 SMEM 这一级买到的复用。",
+   "regions": {
+    "OUTER": "每轮 SMEM 读 6 个 float 做 8 次 FMA，比例 8 / 6 = 1 : 1，而朴素实现是每读 2 个 float 做 1 次 FMA。"
+   },
+   "spans": {
+    "A_smem": [
+     [
+      0,
+      2
+     ],
+     [
+      3,
+      4
+     ]
+    ],
+    "B_smem": [
+     [
+      3,
+      4
+     ],
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "SMEM",
+     "to": "REG",
+     "elements": 6,
+     "note": "A_smem 的 2 个 + B_smem 的 4 个，共 6 个进寄存器",
+     "bytes": 24
+    },
+    {
+     "from": "REG",
+     "to": "REG",
+     "elements": 8,
+     "note": "寄存器内的 8 次 FMA，c_frag 原地累加，不跨层",
+     "bytes": 32
+    }
+   ]
+  },
+  {
+   "id": "ld011",
+   "title": "块(0,1)·K2：A、B 的 tile 载入 SMEM",
+   "kind": "comm",
+   "op": "load",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "idx": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "num": "\\region{MOVE}{A^{\\mathrm{sm}},\\; B^{\\mathrm{sm}} \\leftarrow \\slot{BYTES}\\ \\mathrm{B}}"
+   },
+   "bindings": {
+    "R0": {
+     "sym": "(b_i)B_M",
+     "idx": "0",
+     "num": "0"
+    },
+    "R1": {
+     "sym": "(b_i+1)B_M",
+     "idx": "2",
+     "num": "2"
+    },
+    "K0": {
+     "sym": "(b_k)B_K",
+     "idx": "4",
+     "num": "4"
+    },
+    "K1": {
+     "sym": "(b_k+1)B_K",
+     "idx": "8",
+     "num": "8"
+    },
+    "C0": {
+     "sym": "(b_j)B_N",
+     "idx": "4",
+     "num": "4"
+    },
+    "C1": {
+     "sym": "(b_j+1)B_N",
+     "idx": "8",
+     "num": "8"
+    },
+    "BYTES": {
+     "sym": "4(B_MB_K + B_KB_N)",
+     "idx": "4\\times(8 + 16)",
+     "num": "96"
+    }
+   },
+   "reads": [
+    "A",
+    "B"
+   ],
+   "writes": [
+    "A_smem",
+    "B_smem"
+   ],
+   "state": {
+    "A_smem": [
+     [
+      -0.4,
+      0.75,
+      -0.99,
+      0.64
+     ],
+     [
+      -0.49,
+      -0.11,
+      0.01,
+      0.11
+     ]
+    ],
+    "B_smem": [
+     [
+      0.93,
+      0.32,
+      -0.14,
+      0.05
+     ],
+     [
+      -0.29,
+      0.04,
+      0.53,
+      0.82
+     ],
+     [
+      0.62,
+      -0.73,
+      -0.16,
+      0.63
+     ],
+     [
+      0.45,
+      -0.55,
+      -0.6,
+      -0.27
+     ]
+    ]
+   },
+   "narration": "块(0,1) 的第 5 个 K 迭代：A 的 [0:2, 4:8] 和 B 的 [4:8, 4:8] 从 HBM 搬进 SMEM，共 24 个 float（96 字节）。这一对 tile 接下来会被块内 8 个输出点复用。",
+   "regions": {
+    "MOVE": "这次搬运把 A、B 各一个 2×4 的 tile 送进 SMEM，合计 24 个 float，即 96 字节。朴素实现算这 8 个输出点要读 128 个元素。"
+   },
+   "spans": {
+    "A": [
+     [
+      0,
+      2
+     ],
+     [
+      4,
+      8
+     ]
+    ],
+    "B": [
+     [
+      4,
+      8
+     ],
+     [
+      4,
+      8
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "SMEM",
+     "elements": 24,
+     "note": "A 的 2×4 tile 与 B 的 4×4 tile，一次搬完",
+     "bytes": 96
+    }
+   ]
+  },
+  {
+   "id": "mma011",
+   "title": "块(0,1)·K2：SMEM → REG 外积累加",
+   "kind": "op",
+   "op": "fma",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "idx": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}=\\slot{P0}}^{\\slot{P1}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "num": "\\slot{AV} \\leftarrow A^{\\mathrm{sm}}\\left[:,\\slot{PL}\\right],\\qquad \\slot{BV} \\leftarrow B^{\\mathrm{sm}}\\left[\\slot{PL},:\\right],\\qquad \\region{OUTER}{\\slot{FRAG}}"
+   },
+   "bindings": {
+    "P": {
+     "sym": "p",
+     "idx": "3",
+     "num": "3"
+    },
+    "P0": {
+     "sym": "0",
+     "idx": "0",
+     "num": "0"
+    },
+    "P1": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "PL": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "AV": {
+     "sym": "A^{\\mathrm{sm}}[:,B_K-1]",
+     "idx": "A^{\\mathrm{sm}}[:,3]",
+     "num": "\\left[0.64,\\; 0.11\\right]"
+    },
+    "BV": {
+     "sym": "B^{\\mathrm{sm}}[B_K-1,:]",
+     "idx": "B^{\\mathrm{sm}}[3,:]",
+     "num": "\\left[0.45,\\; -0.55,\\; -0.6,\\; -0.27\\right]"
+    },
+    "FRAG": {
+     "sym": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "idx": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "num": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}"
+    }
+   },
+   "reads": [
+    "A_smem",
+    "B_smem",
+    "c_frag"
+   ],
+   "writes": [
+    "a_frag",
+    "b_frag",
+    "c_frag"
+   ],
+   "state": {
+    "a_frag": [
+     0.64,
+     0.11
+    ],
+    "b_frag": [
+     0.45,
+     -0.55,
+     -0.6,
+     -0.27
+    ],
+    "c_frag": [
+     [
+      0.47929999999999995,
+      0.8691,
+      0.6985000000000002,
+      -1.2749000000000001
+     ],
+     [
+      -0.14079999999999998,
+      -0.7670999999999998,
+      0.23869999999999997,
+      -0.454
+     ]
+    ]
+   },
+   "narration": "线程把 A_smem 的第 4 列 2 个数、B_smem 的第 4 行 4 个数搬进寄存器，然后做外积。本块的 4 个 k 里，每轮读 2 + 4 = 6 个 float，完成 8 次 FMA —— 这就是 SMEM 这一级买到的复用。",
+   "regions": {
+    "OUTER": "每轮 SMEM 读 6 个 float 做 8 次 FMA，比例 8 / 6 = 1 : 1，而朴素实现是每读 2 个 float 做 1 次 FMA。"
+   },
+   "spans": {
+    "A_smem": [
+     [
+      0,
+      2
+     ],
+     [
+      3,
+      4
+     ]
+    ],
+    "B_smem": [
+     [
+      3,
+      4
+     ],
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "SMEM",
+     "to": "REG",
+     "elements": 6,
+     "note": "A_smem 的 2 个 + B_smem 的 4 个，共 6 个进寄存器",
+     "bytes": 24
+    },
+    {
+     "from": "REG",
+     "to": "REG",
+     "elements": 8,
+     "note": "寄存器内的 8 次 FMA，c_frag 原地累加，不跨层",
+     "bytes": 32
+    }
+   ]
+  },
+  {
+   "id": "st01",
+   "title": "块(0,1)：累加器写回 C",
+   "kind": "comm",
+   "op": "store",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "\\mathrm{HBM}[C]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{C0}:\\slot{C1}\\right] \\leftarrow C^{\\mathrm{frag}}",
+    "idx": "\\mathrm{HBM}[C]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{C0}:\\slot{C1}\\right] \\leftarrow C^{\\mathrm{frag}}",
+    "num": "\\mathrm{HBM}[C]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{C0}:\\slot{C1}\\right] \\leftarrow C^{\\mathrm{frag}},\\qquad C_{\\slot{SI}\\slot{SJ}} = \\slot{SV}"
+   },
+   "bindings": {
+    "R0": {
+     "sym": "(b_i)B_M",
+     "idx": "0",
+     "num": "0"
+    },
+    "R1": {
+     "sym": "(b_i+1)B_M",
+     "idx": "2",
+     "num": "2"
+    },
+    "C0": {
+     "sym": "(b_j)B_N",
+     "idx": "4",
+     "num": "4"
+    },
+    "C1": {
+     "sym": "(b_j+1)B_N",
+     "idx": "8",
+     "num": "8"
+    },
+    "SI": {
+     "sym": "i",
+     "idx": "0",
+     "num": "0"
+    },
+    "SJ": {
+     "sym": "j",
+     "idx": "4",
+     "num": "4"
+    },
+    "SV": {
+     "sym": "C_{ij}",
+     "idx": "C_{04}",
+     "num": "0.4793"
+    }
+   },
+   "reads": [
+    "c_frag"
+   ],
+   "writes": [
+    "C"
+   ],
+   "state": {
+    "C": [
+     [
+      1.3352,
+      0.058400000000000146,
+      1.7951,
+      -0.33010000000000006,
+      0.47929999999999995,
+      0.8691,
+      0.6985000000000002,
+      -1.2749000000000001
+     ],
+     [
+      0.4744999999999999,
+      -0.23379999999999995,
+      0.7879999999999998,
+      -0.2644999999999999,
+      -0.14079999999999998,
+      -0.7670999999999998,
+      0.23869999999999997,
+      -0.454
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ]
+    ]
+   },
+   "narration": "块(0,1) 的 2×4 个结果从寄存器写回 HBM。这 8 个输出点一共从 HBM 读了 48 个元素，朴素实现要读 128 个。算出来的值两者逐位相同。",
+   "spans": {
+    "C": [
+     [
+      0,
+      2
+     ],
+     [
+      4,
+      8
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "REG",
+     "to": "HBM",
+     "elements": 8,
+     "note": "2×4 个输出点从寄存器写回 HBM",
+     "bytes": 32
+    }
+   ]
+  },
+  {
+   "id": "ld100",
+   "title": "块(1,0)·K1：A、B 的 tile 载入 SMEM",
+   "kind": "comm",
+   "op": "load",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "idx": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "num": "\\region{MOVE}{A^{\\mathrm{sm}},\\; B^{\\mathrm{sm}} \\leftarrow \\slot{BYTES}\\ \\mathrm{B}}"
+   },
+   "bindings": {
+    "R0": {
+     "sym": "(b_i)B_M",
+     "idx": "2",
+     "num": "2"
+    },
+    "R1": {
+     "sym": "(b_i+1)B_M",
+     "idx": "4",
+     "num": "4"
+    },
+    "K0": {
+     "sym": "(b_k)B_K",
+     "idx": "0",
+     "num": "0"
+    },
+    "K1": {
+     "sym": "(b_k+1)B_K",
+     "idx": "4",
+     "num": "4"
+    },
+    "C0": {
+     "sym": "(b_j)B_N",
+     "idx": "0",
+     "num": "0"
+    },
+    "C1": {
+     "sym": "(b_j+1)B_N",
+     "idx": "4",
+     "num": "4"
+    },
+    "BYTES": {
+     "sym": "4(B_MB_K + B_KB_N)",
+     "idx": "4\\times(8 + 16)",
+     "num": "96"
+    }
+   },
+   "reads": [
+    "A",
+    "B"
+   ],
+   "writes": [
+    "A_smem",
+    "B_smem"
+   ],
+   "state": {
+    "A_smem": [
+     [
+      0.99,
+      0.59,
+      0.24,
+      0.98
+     ],
+     [
+      -0.93,
+      0.03,
+      -0.07,
+      0.83
+     ]
+    ],
+    "B_smem": [
+     [
+      -0.12,
+      -0.52,
+      -0.2,
+      -0.81
+     ],
+     [
+      0.75,
+      0.32,
+      -0.74,
+      0.69
+     ],
+     [
+      -0.62,
+      0.86,
+      0.1,
+      -0.64
+     ],
+     [
+      -0.18,
+      -0.52,
+      -0.92,
+      0.75
+     ]
+    ]
+   },
+   "narration": "块(1,0) 的第 5 个 K 迭代：A 的 [2:4, 0:4] 和 B 的 [0:4, 0:4] 从 HBM 搬进 SMEM，共 24 个 float（96 字节）。这一对 tile 接下来会被块内 8 个输出点复用。",
+   "regions": {
+    "MOVE": "这次搬运把 A、B 各一个 2×4 的 tile 送进 SMEM，合计 24 个 float，即 96 字节。朴素实现算这 8 个输出点要读 128 个元素。"
+   },
+   "spans": {
+    "A": [
+     [
+      2,
+      4
+     ],
+     [
+      0,
+      4
+     ]
+    ],
+    "B": [
+     [
+      0,
+      4
+     ],
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "SMEM",
+     "elements": 24,
+     "note": "A 的 2×4 tile 与 B 的 4×4 tile，一次搬完",
+     "bytes": 96
+    }
+   ]
+  },
+  {
+   "id": "mma100",
+   "title": "块(1,0)·K1：SMEM → REG 外积累加",
+   "kind": "op",
+   "op": "fma",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "idx": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}=\\slot{P0}}^{\\slot{P1}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "num": "\\slot{AV} \\leftarrow A^{\\mathrm{sm}}\\left[:,\\slot{PL}\\right],\\qquad \\slot{BV} \\leftarrow B^{\\mathrm{sm}}\\left[\\slot{PL},:\\right],\\qquad \\region{OUTER}{\\slot{FRAG}}"
+   },
+   "bindings": {
+    "P": {
+     "sym": "p",
+     "idx": "3",
+     "num": "3"
+    },
+    "P0": {
+     "sym": "0",
+     "idx": "0",
+     "num": "0"
+    },
+    "P1": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "PL": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "AV": {
+     "sym": "A^{\\mathrm{sm}}[:,B_K-1]",
+     "idx": "A^{\\mathrm{sm}}[:,3]",
+     "num": "\\left[0.98,\\; 0.83\\right]"
+    },
+    "BV": {
+     "sym": "B^{\\mathrm{sm}}[B_K-1,:]",
+     "idx": "B^{\\mathrm{sm}}[3,:]",
+     "num": "\\left[-0.18,\\; -0.52,\\; -0.92,\\; 0.75\\right]"
+    },
+    "FRAG": {
+     "sym": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "idx": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "num": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}"
+    }
+   },
+   "reads": [
+    "A_smem",
+    "B_smem",
+    "c_frag"
+   ],
+   "writes": [
+    "a_frag",
+    "b_frag",
+    "c_frag"
+   ],
+   "state": {
+    "a_frag": [
+     0.98,
+     0.83
+    ],
+    "b_frag": [
+     -0.18,
+     -0.52,
+     -0.92,
+     0.75
+    ],
+    "c_frag": [
+     [
+      -0.0015000000000000013,
+      -0.6292000000000001,
+      -1.5122,
+      0.18659999999999988
+     ],
+     [
+      0.028100000000000014,
+      0.0014000000000000679,
+      -0.6067999999999999,
+      1.4413
+     ]
+    ]
+   },
+   "narration": "线程把 A_smem 的第 4 列 2 个数、B_smem 的第 4 行 4 个数搬进寄存器，然后做外积。本块的 4 个 k 里，每轮读 2 + 4 = 6 个 float，完成 8 次 FMA —— 这就是 SMEM 这一级买到的复用。",
+   "regions": {
+    "OUTER": "每轮 SMEM 读 6 个 float 做 8 次 FMA，比例 8 / 6 = 1 : 1，而朴素实现是每读 2 个 float 做 1 次 FMA。"
+   },
+   "spans": {
+    "A_smem": [
+     [
+      0,
+      2
+     ],
+     [
+      3,
+      4
+     ]
+    ],
+    "B_smem": [
+     [
+      3,
+      4
+     ],
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "SMEM",
+     "to": "REG",
+     "elements": 6,
+     "note": "A_smem 的 2 个 + B_smem 的 4 个，共 6 个进寄存器",
+     "bytes": 24
+    },
+    {
+     "from": "REG",
+     "to": "REG",
+     "elements": 8,
+     "note": "寄存器内的 8 次 FMA，c_frag 原地累加，不跨层",
+     "bytes": 32
+    }
+   ]
+  },
+  {
+   "id": "ld101",
+   "title": "块(1,0)·K2：A、B 的 tile 载入 SMEM",
+   "kind": "comm",
+   "op": "load",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "idx": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "num": "\\region{MOVE}{A^{\\mathrm{sm}},\\; B^{\\mathrm{sm}} \\leftarrow \\slot{BYTES}\\ \\mathrm{B}}"
+   },
+   "bindings": {
+    "R0": {
+     "sym": "(b_i)B_M",
+     "idx": "2",
+     "num": "2"
+    },
+    "R1": {
+     "sym": "(b_i+1)B_M",
+     "idx": "4",
+     "num": "4"
+    },
+    "K0": {
+     "sym": "(b_k)B_K",
+     "idx": "4",
+     "num": "4"
+    },
+    "K1": {
+     "sym": "(b_k+1)B_K",
+     "idx": "8",
+     "num": "8"
+    },
+    "C0": {
+     "sym": "(b_j)B_N",
+     "idx": "0",
+     "num": "0"
+    },
+    "C1": {
+     "sym": "(b_j+1)B_N",
+     "idx": "4",
+     "num": "4"
+    },
+    "BYTES": {
+     "sym": "4(B_MB_K + B_KB_N)",
+     "idx": "4\\times(8 + 16)",
+     "num": "96"
+    }
+   },
+   "reads": [
+    "A",
+    "B"
+   ],
+   "writes": [
+    "A_smem",
+    "B_smem"
+   ],
+   "state": {
+    "A_smem": [
+     [
+      -0.57,
+      -0.68,
+      0.23,
+      -0.91
+     ],
+     [
+      0.26,
+      0.03,
+      -0.01,
+      -0.5
+     ]
+    ],
+    "B_smem": [
+     [
+      -0.95,
+      -0.26,
+      -0.94,
+      -0.75
+     ],
+     [
+      0.75,
+      -0.31,
+      0.18,
+      0.37
+     ],
+     [
+      -0.7,
+      0.87,
+      -0.99,
+      0.51
+     ],
+     [
+      -0.97,
+      0.26,
+      0.59,
+      0.03
+     ]
+    ]
+   },
+   "narration": "块(1,0) 的第 5 个 K 迭代：A 的 [2:4, 4:8] 和 B 的 [4:8, 0:4] 从 HBM 搬进 SMEM，共 24 个 float（96 字节）。这一对 tile 接下来会被块内 8 个输出点复用。",
+   "regions": {
+    "MOVE": "这次搬运把 A、B 各一个 2×4 的 tile 送进 SMEM，合计 24 个 float，即 96 字节。朴素实现算这 8 个输出点要读 128 个元素。"
+   },
+   "spans": {
+    "A": [
+     [
+      2,
+      4
+     ],
+     [
+      4,
+      8
+     ]
+    ],
+    "B": [
+     [
+      4,
+      8
+     ],
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "SMEM",
+     "elements": 24,
+     "note": "A 的 2×4 tile 与 B 的 4×4 tile，一次搬完",
+     "bytes": 96
+    }
+   ]
+  },
+  {
+   "id": "mma101",
+   "title": "块(1,0)·K2：SMEM → REG 外积累加",
+   "kind": "op",
+   "op": "fma",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "idx": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}=\\slot{P0}}^{\\slot{P1}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "num": "\\slot{AV} \\leftarrow A^{\\mathrm{sm}}\\left[:,\\slot{PL}\\right],\\qquad \\slot{BV} \\leftarrow B^{\\mathrm{sm}}\\left[\\slot{PL},:\\right],\\qquad \\region{OUTER}{\\slot{FRAG}}"
+   },
+   "bindings": {
+    "P": {
+     "sym": "p",
+     "idx": "3",
+     "num": "3"
+    },
+    "P0": {
+     "sym": "0",
+     "idx": "0",
+     "num": "0"
+    },
+    "P1": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "PL": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "AV": {
+     "sym": "A^{\\mathrm{sm}}[:,B_K-1]",
+     "idx": "A^{\\mathrm{sm}}[:,3]",
+     "num": "\\left[-0.91,\\; -0.5\\right]"
+    },
+    "BV": {
+     "sym": "B^{\\mathrm{sm}}[B_K-1,:]",
+     "idx": "B^{\\mathrm{sm}}[3,:]",
+     "num": "\\left[-0.97,\\; 0.26,\\; 0.59,\\; 0.03\\right]"
+    },
+    "FRAG": {
+     "sym": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "idx": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "num": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}"
+    }
+   },
+   "reads": [
+    "A_smem",
+    "B_smem",
+    "c_frag"
+   ],
+   "writes": [
+    "a_frag",
+    "b_frag",
+    "c_frag"
+   ],
+   "state": {
+    "a_frag": [
+     -0.91,
+     -0.5
+    ],
+    "b_frag": [
+     -0.97,
+     0.26,
+     0.59,
+     0.03
+    ],
+    "c_frag": [
+     [
+      0.7517,
+      -0.3067000000000001,
+      -1.8634,
+      0.4524999999999999
+     ],
+     [
+      0.2956,
+      -0.21419999999999995,
+      -1.1309,
+      1.2373
+     ]
+    ]
+   },
+   "narration": "线程把 A_smem 的第 4 列 2 个数、B_smem 的第 4 行 4 个数搬进寄存器，然后做外积。本块的 4 个 k 里，每轮读 2 + 4 = 6 个 float，完成 8 次 FMA —— 这就是 SMEM 这一级买到的复用。",
+   "regions": {
+    "OUTER": "每轮 SMEM 读 6 个 float 做 8 次 FMA，比例 8 / 6 = 1 : 1，而朴素实现是每读 2 个 float 做 1 次 FMA。"
+   },
+   "spans": {
+    "A_smem": [
+     [
+      0,
+      2
+     ],
+     [
+      3,
+      4
+     ]
+    ],
+    "B_smem": [
+     [
+      3,
+      4
+     ],
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "SMEM",
+     "to": "REG",
+     "elements": 6,
+     "note": "A_smem 的 2 个 + B_smem 的 4 个，共 6 个进寄存器",
+     "bytes": 24
+    },
+    {
+     "from": "REG",
+     "to": "REG",
+     "elements": 8,
+     "note": "寄存器内的 8 次 FMA，c_frag 原地累加，不跨层",
+     "bytes": 32
+    }
+   ]
+  },
+  {
+   "id": "st10",
+   "title": "块(1,0)：累加器写回 C",
+   "kind": "comm",
+   "op": "store",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "\\mathrm{HBM}[C]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{C0}:\\slot{C1}\\right] \\leftarrow C^{\\mathrm{frag}}",
+    "idx": "\\mathrm{HBM}[C]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{C0}:\\slot{C1}\\right] \\leftarrow C^{\\mathrm{frag}}",
+    "num": "\\mathrm{HBM}[C]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{C0}:\\slot{C1}\\right] \\leftarrow C^{\\mathrm{frag}},\\qquad C_{\\slot{SI}\\slot{SJ}} = \\slot{SV}"
+   },
+   "bindings": {
+    "R0": {
+     "sym": "(b_i)B_M",
+     "idx": "2",
+     "num": "2"
+    },
+    "R1": {
+     "sym": "(b_i+1)B_M",
+     "idx": "4",
+     "num": "4"
+    },
+    "C0": {
+     "sym": "(b_j)B_N",
+     "idx": "0",
+     "num": "0"
+    },
+    "C1": {
+     "sym": "(b_j+1)B_N",
+     "idx": "4",
+     "num": "4"
+    },
+    "SI": {
+     "sym": "i",
+     "idx": "2",
+     "num": "2"
+    },
+    "SJ": {
+     "sym": "j",
+     "idx": "0",
+     "num": "0"
+    },
+    "SV": {
+     "sym": "C_{ij}",
+     "idx": "C_{20}",
+     "num": "0.7517"
+    }
+   },
+   "reads": [
+    "c_frag"
+   ],
+   "writes": [
+    "C"
+   ],
+   "state": {
+    "C": [
+     [
+      1.3352,
+      0.058400000000000146,
+      1.7951,
+      -0.33010000000000006,
+      0.47929999999999995,
+      0.8691,
+      0.6985000000000002,
+      -1.2749000000000001
+     ],
+     [
+      0.4744999999999999,
+      -0.23379999999999995,
+      0.7879999999999998,
+      -0.2644999999999999,
+      -0.14079999999999998,
+      -0.7670999999999998,
+      0.23869999999999997,
+      -0.454
+     ],
+     [
+      0.7517,
+      -0.3067000000000001,
+      -1.8634,
+      0.4524999999999999,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.2956,
+      -0.21419999999999995,
+      -1.1309,
+      1.2373,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ]
+    ]
+   },
+   "narration": "块(1,0) 的 2×4 个结果从寄存器写回 HBM。这 8 个输出点一共从 HBM 读了 48 个元素，朴素实现要读 128 个。算出来的值两者逐位相同。",
+   "spans": {
+    "C": [
+     [
+      2,
+      4
+     ],
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "REG",
+     "to": "HBM",
+     "elements": 8,
+     "note": "2×4 个输出点从寄存器写回 HBM",
+     "bytes": 32
+    }
+   ]
+  },
+  {
+   "id": "ld110",
+   "title": "块(1,1)·K1：A、B 的 tile 载入 SMEM",
+   "kind": "comm",
+   "op": "load",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "idx": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "num": "\\region{MOVE}{A^{\\mathrm{sm}},\\; B^{\\mathrm{sm}} \\leftarrow \\slot{BYTES}\\ \\mathrm{B}}"
+   },
+   "bindings": {
+    "R0": {
+     "sym": "(b_i)B_M",
+     "idx": "2",
+     "num": "2"
+    },
+    "R1": {
+     "sym": "(b_i+1)B_M",
+     "idx": "4",
+     "num": "4"
+    },
+    "K0": {
+     "sym": "(b_k)B_K",
+     "idx": "0",
+     "num": "0"
+    },
+    "K1": {
+     "sym": "(b_k+1)B_K",
+     "idx": "4",
+     "num": "4"
+    },
+    "C0": {
+     "sym": "(b_j)B_N",
+     "idx": "4",
+     "num": "4"
+    },
+    "C1": {
+     "sym": "(b_j+1)B_N",
+     "idx": "8",
+     "num": "8"
+    },
+    "BYTES": {
+     "sym": "4(B_MB_K + B_KB_N)",
+     "idx": "4\\times(8 + 16)",
+     "num": "96"
+    }
+   },
+   "reads": [
+    "A",
+    "B"
+   ],
+   "writes": [
+    "A_smem",
+    "B_smem"
+   ],
+   "state": {
+    "A_smem": [
+     [
+      0.99,
+      0.59,
+      0.24,
+      0.98
+     ],
+     [
+      -0.93,
+      0.03,
+      -0.07,
+      0.83
+     ]
+    ],
+    "B_smem": [
+     [
+      0.94,
+      -0.57,
+      0.34,
+      -0.4
+     ],
+     [
+      0.89,
+      0.81,
+      0.14,
+      -0.71
+     ],
+     [
+      0.77,
+      0.28,
+      0.14,
+      -0.25
+     ],
+     [
+      -0.06,
+      0.1,
+      -0.36,
+      0.5
+     ]
+    ]
+   },
+   "narration": "块(1,1) 的第 5 个 K 迭代：A 的 [2:4, 0:4] 和 B 的 [0:4, 4:8] 从 HBM 搬进 SMEM，共 24 个 float（96 字节）。这一对 tile 接下来会被块内 8 个输出点复用。",
+   "regions": {
+    "MOVE": "这次搬运把 A、B 各一个 2×4 的 tile 送进 SMEM，合计 24 个 float，即 96 字节。朴素实现算这 8 个输出点要读 128 个元素。"
+   },
+   "spans": {
+    "A": [
+     [
+      2,
+      4
+     ],
+     [
+      0,
+      4
+     ]
+    ],
+    "B": [
+     [
+      0,
+      4
+     ],
+     [
+      4,
+      8
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "SMEM",
+     "elements": 24,
+     "note": "A 的 2×4 tile 与 B 的 4×4 tile，一次搬完",
+     "bytes": 96
+    }
+   ]
+  },
+  {
+   "id": "mma110",
+   "title": "块(1,1)·K1：SMEM → REG 外积累加",
+   "kind": "op",
+   "op": "fma",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "idx": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}=\\slot{P0}}^{\\slot{P1}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "num": "\\slot{AV} \\leftarrow A^{\\mathrm{sm}}\\left[:,\\slot{PL}\\right],\\qquad \\slot{BV} \\leftarrow B^{\\mathrm{sm}}\\left[\\slot{PL},:\\right],\\qquad \\region{OUTER}{\\slot{FRAG}}"
+   },
+   "bindings": {
+    "P": {
+     "sym": "p",
+     "idx": "3",
+     "num": "3"
+    },
+    "P0": {
+     "sym": "0",
+     "idx": "0",
+     "num": "0"
+    },
+    "P1": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "PL": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "AV": {
+     "sym": "A^{\\mathrm{sm}}[:,B_K-1]",
+     "idx": "A^{\\mathrm{sm}}[:,3]",
+     "num": "\\left[0.98,\\; 0.83\\right]"
+    },
+    "BV": {
+     "sym": "B^{\\mathrm{sm}}[B_K-1,:]",
+     "idx": "B^{\\mathrm{sm}}[3,:]",
+     "num": "\\left[-0.06,\\; 0.1,\\; -0.36,\\; 0.5\\right]"
+    },
+    "FRAG": {
+     "sym": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "idx": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "num": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}"
+    }
+   },
+   "reads": [
+    "A_smem",
+    "B_smem",
+    "c_frag"
+   ],
+   "writes": [
+    "a_frag",
+    "b_frag",
+    "c_frag"
+   ],
+   "state": {
+    "a_frag": [
+     0.98,
+     0.83
+    ],
+    "b_frag": [
+     -0.06,
+     0.1,
+     -0.36,
+     0.5
+    ],
+    "c_frag": [
+     [
+      1.5817,
+      0.07880000000000009,
+      0.10000000000000003,
+      -0.3849
+     ],
+     [
+      -0.9511999999999999,
+      0.6178,
+      -0.6206,
+      0.7832000000000001
+     ]
+    ]
+   },
+   "narration": "线程把 A_smem 的第 4 列 2 个数、B_smem 的第 4 行 4 个数搬进寄存器，然后做外积。本块的 4 个 k 里，每轮读 2 + 4 = 6 个 float，完成 8 次 FMA —— 这就是 SMEM 这一级买到的复用。",
+   "regions": {
+    "OUTER": "每轮 SMEM 读 6 个 float 做 8 次 FMA，比例 8 / 6 = 1 : 1，而朴素实现是每读 2 个 float 做 1 次 FMA。"
+   },
+   "spans": {
+    "A_smem": [
+     [
+      0,
+      2
+     ],
+     [
+      3,
+      4
+     ]
+    ],
+    "B_smem": [
+     [
+      3,
+      4
+     ],
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "SMEM",
+     "to": "REG",
+     "elements": 6,
+     "note": "A_smem 的 2 个 + B_smem 的 4 个，共 6 个进寄存器",
+     "bytes": 24
+    },
+    {
+     "from": "REG",
+     "to": "REG",
+     "elements": 8,
+     "note": "寄存器内的 8 次 FMA，c_frag 原地累加，不跨层",
+     "bytes": 32
+    }
+   ]
+  },
+  {
+   "id": "ld111",
+   "title": "块(1,1)·K2：A、B 的 tile 载入 SMEM",
+   "kind": "comm",
+   "op": "load",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "idx": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "num": "\\region{MOVE}{A^{\\mathrm{sm}},\\; B^{\\mathrm{sm}} \\leftarrow \\slot{BYTES}\\ \\mathrm{B}}"
+   },
+   "bindings": {
+    "R0": {
+     "sym": "(b_i)B_M",
+     "idx": "2",
+     "num": "2"
+    },
+    "R1": {
+     "sym": "(b_i+1)B_M",
+     "idx": "4",
+     "num": "4"
+    },
+    "K0": {
+     "sym": "(b_k)B_K",
+     "idx": "4",
+     "num": "4"
+    },
+    "K1": {
+     "sym": "(b_k+1)B_K",
+     "idx": "8",
+     "num": "8"
+    },
+    "C0": {
+     "sym": "(b_j)B_N",
+     "idx": "4",
+     "num": "4"
+    },
+    "C1": {
+     "sym": "(b_j+1)B_N",
+     "idx": "8",
+     "num": "8"
+    },
+    "BYTES": {
+     "sym": "4(B_MB_K + B_KB_N)",
+     "idx": "4\\times(8 + 16)",
+     "num": "96"
+    }
+   },
+   "reads": [
+    "A",
+    "B"
+   ],
+   "writes": [
+    "A_smem",
+    "B_smem"
+   ],
+   "state": {
+    "A_smem": [
+     [
+      -0.57,
+      -0.68,
+      0.23,
+      -0.91
+     ],
+     [
+      0.26,
+      0.03,
+      -0.01,
+      -0.5
+     ]
+    ],
+    "B_smem": [
+     [
+      0.93,
+      0.32,
+      -0.14,
+      0.05
+     ],
+     [
+      -0.29,
+      0.04,
+      0.53,
+      0.82
+     ],
+     [
+      0.62,
+      -0.73,
+      -0.16,
+      0.63
+     ],
+     [
+      0.45,
+      -0.55,
+      -0.6,
+      -0.27
+     ]
+    ]
+   },
+   "narration": "块(1,1) 的第 5 个 K 迭代：A 的 [2:4, 4:8] 和 B 的 [4:8, 4:8] 从 HBM 搬进 SMEM，共 24 个 float（96 字节）。这一对 tile 接下来会被块内 8 个输出点复用。",
+   "regions": {
+    "MOVE": "这次搬运把 A、B 各一个 2×4 的 tile 送进 SMEM，合计 24 个 float，即 96 字节。朴素实现算这 8 个输出点要读 128 个元素。"
+   },
+   "spans": {
+    "A": [
+     [
+      2,
+      4
+     ],
+     [
+      4,
+      8
+     ]
+    ],
+    "B": [
+     [
+      4,
+      8
+     ],
+     [
+      4,
+      8
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "SMEM",
+     "elements": 24,
+     "note": "A 的 2×4 tile 与 B 的 4×4 tile，一次搬完",
+     "bytes": 96
+    }
+   ]
+  },
+  {
+   "id": "mma111",
+   "title": "块(1,1)·K2：SMEM → REG 外积累加",
+   "kind": "op",
+   "op": "fma",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "idx": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}=\\slot{P0}}^{\\slot{P1}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "num": "\\slot{AV} \\leftarrow A^{\\mathrm{sm}}\\left[:,\\slot{PL}\\right],\\qquad \\slot{BV} \\leftarrow B^{\\mathrm{sm}}\\left[\\slot{PL},:\\right],\\qquad \\region{OUTER}{\\slot{FRAG}}"
+   },
+   "bindings": {
+    "P": {
+     "sym": "p",
+     "idx": "3",
+     "num": "3"
+    },
+    "P0": {
+     "sym": "0",
+     "idx": "0",
+     "num": "0"
+    },
+    "P1": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "PL": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "AV": {
+     "sym": "A^{\\mathrm{sm}}[:,B_K-1]",
+     "idx": "A^{\\mathrm{sm}}[:,3]",
+     "num": "\\left[-0.91,\\; -0.5\\right]"
+    },
+    "BV": {
+     "sym": "B^{\\mathrm{sm}}[B_K-1,:]",
+     "idx": "B^{\\mathrm{sm}}[3,:]",
+     "num": "\\left[0.45,\\; -0.55,\\; -0.6,\\; -0.27\\right]"
+    },
+    "FRAG": {
+     "sym": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "idx": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "num": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}"
+    }
+   },
+   "reads": [
+    "A_smem",
+    "B_smem",
+    "c_frag"
+   ],
+   "writes": [
+    "a_frag",
+    "b_frag",
+    "c_frag"
+   ],
+   "state": {
+    "a_frag": [
+     -0.91,
+     -0.5
+    ],
+    "b_frag": [
+     0.45,
+     -0.55,
+     -0.6,
+     -0.27
+    ],
+    "c_frag": [
+     [
+      0.9819000000000002,
+      0.2018000000000002,
+      0.3286,
+      -0.5803999999999999
+     ],
+     [
+      -0.9492999999999999,
+      0.9845,
+      -0.33949999999999997,
+      0.9495000000000001
+     ]
+    ]
+   },
+   "narration": "线程把 A_smem 的第 4 列 2 个数、B_smem 的第 4 行 4 个数搬进寄存器，然后做外积。本块的 4 个 k 里，每轮读 2 + 4 = 6 个 float，完成 8 次 FMA —— 这就是 SMEM 这一级买到的复用。",
+   "regions": {
+    "OUTER": "每轮 SMEM 读 6 个 float 做 8 次 FMA，比例 8 / 6 = 1 : 1，而朴素实现是每读 2 个 float 做 1 次 FMA。"
+   },
+   "spans": {
+    "A_smem": [
+     [
+      0,
+      2
+     ],
+     [
+      3,
+      4
+     ]
+    ],
+    "B_smem": [
+     [
+      3,
+      4
+     ],
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "SMEM",
+     "to": "REG",
+     "elements": 6,
+     "note": "A_smem 的 2 个 + B_smem 的 4 个，共 6 个进寄存器",
+     "bytes": 24
+    },
+    {
+     "from": "REG",
+     "to": "REG",
+     "elements": 8,
+     "note": "寄存器内的 8 次 FMA，c_frag 原地累加，不跨层",
+     "bytes": 32
+    }
+   ]
+  },
+  {
+   "id": "st11",
+   "title": "块(1,1)：累加器写回 C",
+   "kind": "comm",
+   "op": "store",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "\\mathrm{HBM}[C]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{C0}:\\slot{C1}\\right] \\leftarrow C^{\\mathrm{frag}}",
+    "idx": "\\mathrm{HBM}[C]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{C0}:\\slot{C1}\\right] \\leftarrow C^{\\mathrm{frag}}",
+    "num": "\\mathrm{HBM}[C]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{C0}:\\slot{C1}\\right] \\leftarrow C^{\\mathrm{frag}},\\qquad C_{\\slot{SI}\\slot{SJ}} = \\slot{SV}"
+   },
+   "bindings": {
+    "R0": {
+     "sym": "(b_i)B_M",
+     "idx": "2",
+     "num": "2"
+    },
+    "R1": {
+     "sym": "(b_i+1)B_M",
+     "idx": "4",
+     "num": "4"
+    },
+    "C0": {
+     "sym": "(b_j)B_N",
+     "idx": "4",
+     "num": "4"
+    },
+    "C1": {
+     "sym": "(b_j+1)B_N",
+     "idx": "8",
+     "num": "8"
+    },
+    "SI": {
+     "sym": "i",
+     "idx": "2",
+     "num": "2"
+    },
+    "SJ": {
+     "sym": "j",
+     "idx": "4",
+     "num": "4"
+    },
+    "SV": {
+     "sym": "C_{ij}",
+     "idx": "C_{24}",
+     "num": "0.9819"
+    }
+   },
+   "reads": [
+    "c_frag"
+   ],
+   "writes": [
+    "C"
+   ],
+   "state": {
+    "C": [
+     [
+      1.3352,
+      0.058400000000000146,
+      1.7951,
+      -0.33010000000000006,
+      0.47929999999999995,
+      0.8691,
+      0.6985000000000002,
+      -1.2749000000000001
+     ],
+     [
+      0.4744999999999999,
+      -0.23379999999999995,
+      0.7879999999999998,
+      -0.2644999999999999,
+      -0.14079999999999998,
+      -0.7670999999999998,
+      0.23869999999999997,
+      -0.454
+     ],
+     [
+      0.7517,
+      -0.3067000000000001,
+      -1.8634,
+      0.4524999999999999,
+      0.9819000000000002,
+      0.2018000000000002,
+      0.3286,
+      -0.5803999999999999
+     ],
+     [
+      0.2956,
+      -0.21419999999999995,
+      -1.1309,
+      1.2373,
+      -0.9492999999999999,
+      0.9845,
+      -0.33949999999999997,
+      0.9495000000000001
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ]
+    ]
+   },
+   "narration": "块(1,1) 的 2×4 个结果从寄存器写回 HBM。这 8 个输出点一共从 HBM 读了 48 个元素，朴素实现要读 128 个。算出来的值两者逐位相同。",
+   "spans": {
+    "C": [
+     [
+      2,
+      4
+     ],
+     [
+      4,
+      8
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "REG",
+     "to": "HBM",
+     "elements": 8,
+     "note": "2×4 个输出点从寄存器写回 HBM",
+     "bytes": 32
+    }
+   ]
+  },
+  {
+   "id": "ld200",
+   "title": "块(2,0)·K1：A、B 的 tile 载入 SMEM",
+   "kind": "comm",
+   "op": "load",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "idx": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "num": "\\region{MOVE}{A^{\\mathrm{sm}},\\; B^{\\mathrm{sm}} \\leftarrow \\slot{BYTES}\\ \\mathrm{B}}"
+   },
+   "bindings": {
+    "R0": {
+     "sym": "(b_i)B_M",
+     "idx": "4",
+     "num": "4"
+    },
+    "R1": {
+     "sym": "(b_i+1)B_M",
+     "idx": "6",
+     "num": "6"
+    },
+    "K0": {
+     "sym": "(b_k)B_K",
+     "idx": "0",
+     "num": "0"
+    },
+    "K1": {
+     "sym": "(b_k+1)B_K",
+     "idx": "4",
+     "num": "4"
+    },
+    "C0": {
+     "sym": "(b_j)B_N",
+     "idx": "0",
+     "num": "0"
+    },
+    "C1": {
+     "sym": "(b_j+1)B_N",
+     "idx": "4",
+     "num": "4"
+    },
+    "BYTES": {
+     "sym": "4(B_MB_K + B_KB_N)",
+     "idx": "4\\times(8 + 16)",
+     "num": "96"
+    }
+   },
+   "reads": [
+    "A",
+    "B"
+   ],
+   "writes": [
+    "A_smem",
+    "B_smem"
+   ],
+   "state": {
+    "A_smem": [
+     [
+      -0.98,
+      -0.62,
+      0.38,
+      -0.6
+     ],
+     [
+      -0.46,
+      0.76,
+      0.02,
+      0.69
+     ]
+    ],
+    "B_smem": [
+     [
+      -0.12,
+      -0.52,
+      -0.2,
+      -0.81
+     ],
+     [
+      0.75,
+      0.32,
+      -0.74,
+      0.69
+     ],
+     [
+      -0.62,
+      0.86,
+      0.1,
+      -0.64
+     ],
+     [
+      -0.18,
+      -0.52,
+      -0.92,
+      0.75
+     ]
+    ]
+   },
+   "narration": "块(2,0) 的第 5 个 K 迭代：A 的 [4:6, 0:4] 和 B 的 [0:4, 0:4] 从 HBM 搬进 SMEM，共 24 个 float（96 字节）。这一对 tile 接下来会被块内 8 个输出点复用。",
+   "regions": {
+    "MOVE": "这次搬运把 A、B 各一个 2×4 的 tile 送进 SMEM，合计 24 个 float，即 96 字节。朴素实现算这 8 个输出点要读 128 个元素。"
+   },
+   "spans": {
+    "A": [
+     [
+      4,
+      6
+     ],
+     [
+      0,
+      4
+     ]
+    ],
+    "B": [
+     [
+      0,
+      4
+     ],
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "SMEM",
+     "elements": 24,
+     "note": "A 的 2×4 tile 与 B 的 4×4 tile，一次搬完",
+     "bytes": 96
+    }
+   ]
+  },
+  {
+   "id": "mma200",
+   "title": "块(2,0)·K1：SMEM → REG 外积累加",
+   "kind": "op",
+   "op": "fma",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "idx": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}=\\slot{P0}}^{\\slot{P1}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "num": "\\slot{AV} \\leftarrow A^{\\mathrm{sm}}\\left[:,\\slot{PL}\\right],\\qquad \\slot{BV} \\leftarrow B^{\\mathrm{sm}}\\left[\\slot{PL},:\\right],\\qquad \\region{OUTER}{\\slot{FRAG}}"
+   },
+   "bindings": {
+    "P": {
+     "sym": "p",
+     "idx": "3",
+     "num": "3"
+    },
+    "P0": {
+     "sym": "0",
+     "idx": "0",
+     "num": "0"
+    },
+    "P1": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "PL": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "AV": {
+     "sym": "A^{\\mathrm{sm}}[:,B_K-1]",
+     "idx": "A^{\\mathrm{sm}}[:,3]",
+     "num": "\\left[-0.6,\\; 0.69\\right]"
+    },
+    "BV": {
+     "sym": "B^{\\mathrm{sm}}[B_K-1,:]",
+     "idx": "B^{\\mathrm{sm}}[3,:]",
+     "num": "\\left[-0.18,\\; -0.52,\\; -0.92,\\; 0.75\\right]"
+    },
+    "FRAG": {
+     "sym": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "idx": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "num": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}"
+    }
+   },
+   "reads": [
+    "A_smem",
+    "B_smem",
+    "c_frag"
+   ],
+   "writes": [
+    "a_frag",
+    "b_frag",
+    "c_frag"
+   ],
+   "state": {
+    "a_frag": [
+     -0.6,
+     0.69
+    ],
+    "b_frag": [
+     -0.18,
+     -0.52,
+     -0.92,
+     0.75
+    ],
+    "c_frag": [
+     [
+      -0.475,
+      0.95,
+      1.2448000000000001,
+      -0.3271999999999998
+     ],
+     [
+      0.48860000000000015,
+      0.14080000000000004,
+      -1.1032,
+      1.4017
+     ]
+    ]
+   },
+   "narration": "线程把 A_smem 的第 4 列 2 个数、B_smem 的第 4 行 4 个数搬进寄存器，然后做外积。本块的 4 个 k 里，每轮读 2 + 4 = 6 个 float，完成 8 次 FMA —— 这就是 SMEM 这一级买到的复用。",
+   "regions": {
+    "OUTER": "每轮 SMEM 读 6 个 float 做 8 次 FMA，比例 8 / 6 = 1 : 1，而朴素实现是每读 2 个 float 做 1 次 FMA。"
+   },
+   "spans": {
+    "A_smem": [
+     [
+      0,
+      2
+     ],
+     [
+      3,
+      4
+     ]
+    ],
+    "B_smem": [
+     [
+      3,
+      4
+     ],
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "SMEM",
+     "to": "REG",
+     "elements": 6,
+     "note": "A_smem 的 2 个 + B_smem 的 4 个，共 6 个进寄存器",
+     "bytes": 24
+    },
+    {
+     "from": "REG",
+     "to": "REG",
+     "elements": 8,
+     "note": "寄存器内的 8 次 FMA，c_frag 原地累加，不跨层",
+     "bytes": 32
+    }
+   ]
+  },
+  {
+   "id": "ld201",
+   "title": "块(2,0)·K2：A、B 的 tile 载入 SMEM",
+   "kind": "comm",
+   "op": "load",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "idx": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "num": "\\region{MOVE}{A^{\\mathrm{sm}},\\; B^{\\mathrm{sm}} \\leftarrow \\slot{BYTES}\\ \\mathrm{B}}"
+   },
+   "bindings": {
+    "R0": {
+     "sym": "(b_i)B_M",
+     "idx": "4",
+     "num": "4"
+    },
+    "R1": {
+     "sym": "(b_i+1)B_M",
+     "idx": "6",
+     "num": "6"
+    },
+    "K0": {
+     "sym": "(b_k)B_K",
+     "idx": "4",
+     "num": "4"
+    },
+    "K1": {
+     "sym": "(b_k+1)B_K",
+     "idx": "8",
+     "num": "8"
+    },
+    "C0": {
+     "sym": "(b_j)B_N",
+     "idx": "0",
+     "num": "0"
+    },
+    "C1": {
+     "sym": "(b_j+1)B_N",
+     "idx": "4",
+     "num": "4"
+    },
+    "BYTES": {
+     "sym": "4(B_MB_K + B_KB_N)",
+     "idx": "4\\times(8 + 16)",
+     "num": "96"
+    }
+   },
+   "reads": [
+    "A",
+    "B"
+   ],
+   "writes": [
+    "A_smem",
+    "B_smem"
+   ],
+   "state": {
+    "A_smem": [
+     [
+      -0.26,
+      -0.99,
+      0.66,
+      -0.69
+     ],
+     [
+      0.28,
+      0.48,
+      -0.82,
+      0.08
+     ]
+    ],
+    "B_smem": [
+     [
+      -0.95,
+      -0.26,
+      -0.94,
+      -0.75
+     ],
+     [
+      0.75,
+      -0.31,
+      0.18,
+      0.37
+     ],
+     [
+      -0.7,
+      0.87,
+      -0.99,
+      0.51
+     ],
+     [
+      -0.97,
+      0.26,
+      0.59,
+      0.03
+     ]
+    ]
+   },
+   "narration": "块(2,0) 的第 5 个 K 迭代：A 的 [4:6, 4:8] 和 B 的 [4:8, 0:4] 从 HBM 搬进 SMEM，共 24 个 float（96 字节）。这一对 tile 接下来会被块内 8 个输出点复用。",
+   "regions": {
+    "MOVE": "这次搬运把 A、B 各一个 2×4 的 tile 送进 SMEM，合计 24 个 float，即 96 字节。朴素实现算这 8 个输出点要读 128 个元素。"
+   },
+   "spans": {
+    "A": [
+     [
+      4,
+      6
+     ],
+     [
+      4,
+      8
+     ]
+    ],
+    "B": [
+     [
+      4,
+      8
+     ],
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "SMEM",
+     "elements": 24,
+     "note": "A 的 2×4 tile 与 B 的 4×4 tile，一次搬完",
+     "bytes": 96
+    }
+   ]
+  },
+  {
+   "id": "mma201",
+   "title": "块(2,0)·K2：SMEM → REG 外积累加",
+   "kind": "op",
+   "op": "fma",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "idx": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}=\\slot{P0}}^{\\slot{P1}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "num": "\\slot{AV} \\leftarrow A^{\\mathrm{sm}}\\left[:,\\slot{PL}\\right],\\qquad \\slot{BV} \\leftarrow B^{\\mathrm{sm}}\\left[\\slot{PL},:\\right],\\qquad \\region{OUTER}{\\slot{FRAG}}"
+   },
+   "bindings": {
+    "P": {
+     "sym": "p",
+     "idx": "3",
+     "num": "3"
+    },
+    "P0": {
+     "sym": "0",
+     "idx": "0",
+     "num": "0"
+    },
+    "P1": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "PL": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "AV": {
+     "sym": "A^{\\mathrm{sm}}[:,B_K-1]",
+     "idx": "A^{\\mathrm{sm}}[:,3]",
+     "num": "\\left[-0.69,\\; 0.08\\right]"
+    },
+    "BV": {
+     "sym": "B^{\\mathrm{sm}}[B_K-1,:]",
+     "idx": "B^{\\mathrm{sm}}[3,:]",
+     "num": "\\left[-0.97,\\; 0.26,\\; 0.59,\\; 0.03\\right]"
+    },
+    "FRAG": {
+     "sym": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "idx": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "num": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}"
+    }
+   },
+   "reads": [
+    "A_smem",
+    "B_smem",
+    "c_frag"
+   ],
+   "writes": [
+    "a_frag",
+    "b_frag",
+    "c_frag"
+   ],
+   "state": {
+    "a_frag": [
+     -0.69,
+     0.08
+    ],
+    "b_frag": [
+     -0.97,
+     0.26,
+     0.59,
+     0.03
+    ],
+    "c_frag": [
+     [
+      -0.7632,
+      1.7193,
+      0.2505000000000002,
+      -0.18259999999999982
+     ],
+     [
+      1.0790000000000002,
+      -0.7733999999999999,
+      -0.42100000000000004,
+      0.9535
+     ]
+    ]
+   },
+   "narration": "线程把 A_smem 的第 4 列 2 个数、B_smem 的第 4 行 4 个数搬进寄存器，然后做外积。本块的 4 个 k 里，每轮读 2 + 4 = 6 个 float，完成 8 次 FMA —— 这就是 SMEM 这一级买到的复用。",
+   "regions": {
+    "OUTER": "每轮 SMEM 读 6 个 float 做 8 次 FMA，比例 8 / 6 = 1 : 1，而朴素实现是每读 2 个 float 做 1 次 FMA。"
+   },
+   "spans": {
+    "A_smem": [
+     [
+      0,
+      2
+     ],
+     [
+      3,
+      4
+     ]
+    ],
+    "B_smem": [
+     [
+      3,
+      4
+     ],
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "SMEM",
+     "to": "REG",
+     "elements": 6,
+     "note": "A_smem 的 2 个 + B_smem 的 4 个，共 6 个进寄存器",
+     "bytes": 24
+    },
+    {
+     "from": "REG",
+     "to": "REG",
+     "elements": 8,
+     "note": "寄存器内的 8 次 FMA，c_frag 原地累加，不跨层",
+     "bytes": 32
+    }
+   ]
+  },
+  {
+   "id": "st20",
+   "title": "块(2,0)：累加器写回 C",
+   "kind": "comm",
+   "op": "store",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "\\mathrm{HBM}[C]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{C0}:\\slot{C1}\\right] \\leftarrow C^{\\mathrm{frag}}",
+    "idx": "\\mathrm{HBM}[C]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{C0}:\\slot{C1}\\right] \\leftarrow C^{\\mathrm{frag}}",
+    "num": "\\mathrm{HBM}[C]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{C0}:\\slot{C1}\\right] \\leftarrow C^{\\mathrm{frag}},\\qquad C_{\\slot{SI}\\slot{SJ}} = \\slot{SV}"
+   },
+   "bindings": {
+    "R0": {
+     "sym": "(b_i)B_M",
+     "idx": "4",
+     "num": "4"
+    },
+    "R1": {
+     "sym": "(b_i+1)B_M",
+     "idx": "6",
+     "num": "6"
+    },
+    "C0": {
+     "sym": "(b_j)B_N",
+     "idx": "0",
+     "num": "0"
+    },
+    "C1": {
+     "sym": "(b_j+1)B_N",
+     "idx": "4",
+     "num": "4"
+    },
+    "SI": {
+     "sym": "i",
+     "idx": "4",
+     "num": "4"
+    },
+    "SJ": {
+     "sym": "j",
+     "idx": "0",
+     "num": "0"
+    },
+    "SV": {
+     "sym": "C_{ij}",
+     "idx": "C_{40}",
+     "num": "-0.7632"
+    }
+   },
+   "reads": [
+    "c_frag"
+   ],
+   "writes": [
+    "C"
+   ],
+   "state": {
+    "C": [
+     [
+      1.3352,
+      0.058400000000000146,
+      1.7951,
+      -0.33010000000000006,
+      0.47929999999999995,
+      0.8691,
+      0.6985000000000002,
+      -1.2749000000000001
+     ],
+     [
+      0.4744999999999999,
+      -0.23379999999999995,
+      0.7879999999999998,
+      -0.2644999999999999,
+      -0.14079999999999998,
+      -0.7670999999999998,
+      0.23869999999999997,
+      -0.454
+     ],
+     [
+      0.7517,
+      -0.3067000000000001,
+      -1.8634,
+      0.4524999999999999,
+      0.9819000000000002,
+      0.2018000000000002,
+      0.3286,
+      -0.5803999999999999
+     ],
+     [
+      0.2956,
+      -0.21419999999999995,
+      -1.1309,
+      1.2373,
+      -0.9492999999999999,
+      0.9845,
+      -0.33949999999999997,
+      0.9495000000000001
+     ],
+     [
+      -0.7632,
+      1.7193,
+      0.2505000000000002,
+      -0.18259999999999982,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      1.0790000000000002,
+      -0.7733999999999999,
+      -0.42100000000000004,
+      0.9535,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ]
+    ]
+   },
+   "narration": "块(2,0) 的 2×4 个结果从寄存器写回 HBM。这 8 个输出点一共从 HBM 读了 48 个元素，朴素实现要读 128 个。算出来的值两者逐位相同。",
+   "spans": {
+    "C": [
+     [
+      4,
+      6
+     ],
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "REG",
+     "to": "HBM",
+     "elements": 8,
+     "note": "2×4 个输出点从寄存器写回 HBM",
+     "bytes": 32
+    }
+   ]
+  },
+  {
+   "id": "ld210",
+   "title": "块(2,1)·K1：A、B 的 tile 载入 SMEM",
+   "kind": "comm",
+   "op": "load",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "idx": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "num": "\\region{MOVE}{A^{\\mathrm{sm}},\\; B^{\\mathrm{sm}} \\leftarrow \\slot{BYTES}\\ \\mathrm{B}}"
+   },
+   "bindings": {
+    "R0": {
+     "sym": "(b_i)B_M",
+     "idx": "4",
+     "num": "4"
+    },
+    "R1": {
+     "sym": "(b_i+1)B_M",
+     "idx": "6",
+     "num": "6"
+    },
+    "K0": {
+     "sym": "(b_k)B_K",
+     "idx": "0",
+     "num": "0"
+    },
+    "K1": {
+     "sym": "(b_k+1)B_K",
+     "idx": "4",
+     "num": "4"
+    },
+    "C0": {
+     "sym": "(b_j)B_N",
+     "idx": "4",
+     "num": "4"
+    },
+    "C1": {
+     "sym": "(b_j+1)B_N",
+     "idx": "8",
+     "num": "8"
+    },
+    "BYTES": {
+     "sym": "4(B_MB_K + B_KB_N)",
+     "idx": "4\\times(8 + 16)",
+     "num": "96"
+    }
+   },
+   "reads": [
+    "A",
+    "B"
+   ],
+   "writes": [
+    "A_smem",
+    "B_smem"
+   ],
+   "state": {
+    "A_smem": [
+     [
+      -0.98,
+      -0.62,
+      0.38,
+      -0.6
+     ],
+     [
+      -0.46,
+      0.76,
+      0.02,
+      0.69
+     ]
+    ],
+    "B_smem": [
+     [
+      0.94,
+      -0.57,
+      0.34,
+      -0.4
+     ],
+     [
+      0.89,
+      0.81,
+      0.14,
+      -0.71
+     ],
+     [
+      0.77,
+      0.28,
+      0.14,
+      -0.25
+     ],
+     [
+      -0.06,
+      0.1,
+      -0.36,
+      0.5
+     ]
+    ]
+   },
+   "narration": "块(2,1) 的第 5 个 K 迭代：A 的 [4:6, 0:4] 和 B 的 [0:4, 4:8] 从 HBM 搬进 SMEM，共 24 个 float（96 字节）。这一对 tile 接下来会被块内 8 个输出点复用。",
+   "regions": {
+    "MOVE": "这次搬运把 A、B 各一个 2×4 的 tile 送进 SMEM，合计 24 个 float，即 96 字节。朴素实现算这 8 个输出点要读 128 个元素。"
+   },
+   "spans": {
+    "A": [
+     [
+      4,
+      6
+     ],
+     [
+      0,
+      4
+     ]
+    ],
+    "B": [
+     [
+      0,
+      4
+     ],
+     [
+      4,
+      8
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "SMEM",
+     "elements": 24,
+     "note": "A 的 2×4 tile 与 B 的 4×4 tile，一次搬完",
+     "bytes": 96
+    }
+   ]
+  },
+  {
+   "id": "mma210",
+   "title": "块(2,1)·K1：SMEM → REG 外积累加",
+   "kind": "op",
+   "op": "fma",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "idx": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}=\\slot{P0}}^{\\slot{P1}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "num": "\\slot{AV} \\leftarrow A^{\\mathrm{sm}}\\left[:,\\slot{PL}\\right],\\qquad \\slot{BV} \\leftarrow B^{\\mathrm{sm}}\\left[\\slot{PL},:\\right],\\qquad \\region{OUTER}{\\slot{FRAG}}"
+   },
+   "bindings": {
+    "P": {
+     "sym": "p",
+     "idx": "3",
+     "num": "3"
+    },
+    "P0": {
+     "sym": "0",
+     "idx": "0",
+     "num": "0"
+    },
+    "P1": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "PL": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "AV": {
+     "sym": "A^{\\mathrm{sm}}[:,B_K-1]",
+     "idx": "A^{\\mathrm{sm}}[:,3]",
+     "num": "\\left[-0.6,\\; 0.69\\right]"
+    },
+    "BV": {
+     "sym": "B^{\\mathrm{sm}}[B_K-1,:]",
+     "idx": "B^{\\mathrm{sm}}[3,:]",
+     "num": "\\left[-0.06,\\; 0.1,\\; -0.36,\\; 0.5\\right]"
+    },
+    "FRAG": {
+     "sym": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "idx": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "num": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}"
+    }
+   },
+   "reads": [
+    "A_smem",
+    "B_smem",
+    "c_frag"
+   ],
+   "writes": [
+    "a_frag",
+    "b_frag",
+    "c_frag"
+   ],
+   "state": {
+    "a_frag": [
+     -0.6,
+     0.69
+    ],
+    "b_frag": [
+     -0.06,
+     0.1,
+     -0.36,
+     0.5
+    ],
+    "c_frag": [
+     [
+      -1.1443999999999999,
+      0.1028,
+      -0.15079999999999996,
+      0.4372000000000001
+     ],
+     [
+      0.21800000000000003,
+      0.9524,
+      -0.2956,
+      -0.015599999999999947
+     ]
+    ]
+   },
+   "narration": "线程把 A_smem 的第 4 列 2 个数、B_smem 的第 4 行 4 个数搬进寄存器，然后做外积。本块的 4 个 k 里，每轮读 2 + 4 = 6 个 float，完成 8 次 FMA —— 这就是 SMEM 这一级买到的复用。",
+   "regions": {
+    "OUTER": "每轮 SMEM 读 6 个 float 做 8 次 FMA，比例 8 / 6 = 1 : 1，而朴素实现是每读 2 个 float 做 1 次 FMA。"
+   },
+   "spans": {
+    "A_smem": [
+     [
+      0,
+      2
+     ],
+     [
+      3,
+      4
+     ]
+    ],
+    "B_smem": [
+     [
+      3,
+      4
+     ],
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "SMEM",
+     "to": "REG",
+     "elements": 6,
+     "note": "A_smem 的 2 个 + B_smem 的 4 个，共 6 个进寄存器",
+     "bytes": 24
+    },
+    {
+     "from": "REG",
+     "to": "REG",
+     "elements": 8,
+     "note": "寄存器内的 8 次 FMA，c_frag 原地累加，不跨层",
+     "bytes": 32
+    }
+   ]
+  },
+  {
+   "id": "ld211",
+   "title": "块(2,1)·K2：A、B 的 tile 载入 SMEM",
+   "kind": "comm",
+   "op": "load",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "idx": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "num": "\\region{MOVE}{A^{\\mathrm{sm}},\\; B^{\\mathrm{sm}} \\leftarrow \\slot{BYTES}\\ \\mathrm{B}}"
+   },
+   "bindings": {
+    "R0": {
+     "sym": "(b_i)B_M",
+     "idx": "4",
+     "num": "4"
+    },
+    "R1": {
+     "sym": "(b_i+1)B_M",
+     "idx": "6",
+     "num": "6"
+    },
+    "K0": {
+     "sym": "(b_k)B_K",
+     "idx": "4",
+     "num": "4"
+    },
+    "K1": {
+     "sym": "(b_k+1)B_K",
+     "idx": "8",
+     "num": "8"
+    },
+    "C0": {
+     "sym": "(b_j)B_N",
+     "idx": "4",
+     "num": "4"
+    },
+    "C1": {
+     "sym": "(b_j+1)B_N",
+     "idx": "8",
+     "num": "8"
+    },
+    "BYTES": {
+     "sym": "4(B_MB_K + B_KB_N)",
+     "idx": "4\\times(8 + 16)",
+     "num": "96"
+    }
+   },
+   "reads": [
+    "A",
+    "B"
+   ],
+   "writes": [
+    "A_smem",
+    "B_smem"
+   ],
+   "state": {
+    "A_smem": [
+     [
+      -0.26,
+      -0.99,
+      0.66,
+      -0.69
+     ],
+     [
+      0.28,
+      0.48,
+      -0.82,
+      0.08
+     ]
+    ],
+    "B_smem": [
+     [
+      0.93,
+      0.32,
+      -0.14,
+      0.05
+     ],
+     [
+      -0.29,
+      0.04,
+      0.53,
+      0.82
+     ],
+     [
+      0.62,
+      -0.73,
+      -0.16,
+      0.63
+     ],
+     [
+      0.45,
+      -0.55,
+      -0.6,
+      -0.27
+     ]
+    ]
+   },
+   "narration": "块(2,1) 的第 5 个 K 迭代：A 的 [4:6, 4:8] 和 B 的 [4:8, 4:8] 从 HBM 搬进 SMEM，共 24 个 float（96 字节）。这一对 tile 接下来会被块内 8 个输出点复用。",
+   "regions": {
+    "MOVE": "这次搬运把 A、B 各一个 2×4 的 tile 送进 SMEM，合计 24 个 float，即 96 字节。朴素实现算这 8 个输出点要读 128 个元素。"
+   },
+   "spans": {
+    "A": [
+     [
+      4,
+      6
+     ],
+     [
+      4,
+      8
+     ]
+    ],
+    "B": [
+     [
+      4,
+      8
+     ],
+     [
+      4,
+      8
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "SMEM",
+     "elements": 24,
+     "note": "A 的 2×4 tile 与 B 的 4×4 tile，一次搬完",
+     "bytes": 96
+    }
+   ]
+  },
+  {
+   "id": "mma211",
+   "title": "块(2,1)·K2：SMEM → REG 外积累加",
+   "kind": "op",
+   "op": "fma",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "idx": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}=\\slot{P0}}^{\\slot{P1}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "num": "\\slot{AV} \\leftarrow A^{\\mathrm{sm}}\\left[:,\\slot{PL}\\right],\\qquad \\slot{BV} \\leftarrow B^{\\mathrm{sm}}\\left[\\slot{PL},:\\right],\\qquad \\region{OUTER}{\\slot{FRAG}}"
+   },
+   "bindings": {
+    "P": {
+     "sym": "p",
+     "idx": "3",
+     "num": "3"
+    },
+    "P0": {
+     "sym": "0",
+     "idx": "0",
+     "num": "0"
+    },
+    "P1": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "PL": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "AV": {
+     "sym": "A^{\\mathrm{sm}}[:,B_K-1]",
+     "idx": "A^{\\mathrm{sm}}[:,3]",
+     "num": "\\left[-0.69,\\; 0.08\\right]"
+    },
+    "BV": {
+     "sym": "B^{\\mathrm{sm}}[B_K-1,:]",
+     "idx": "B^{\\mathrm{sm}}[3,:]",
+     "num": "\\left[0.45,\\; -0.55,\\; -0.6,\\; -0.27\\right]"
+    },
+    "FRAG": {
+     "sym": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "idx": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "num": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}"
+    }
+   },
+   "reads": [
+    "A_smem",
+    "B_smem",
+    "c_frag"
+   ],
+   "writes": [
+    "a_frag",
+    "b_frag",
+    "c_frag"
+   ],
+   "state": {
+    "a_frag": [
+     -0.69,
+     0.08
+    ],
+    "b_frag": [
+     0.45,
+     -0.55,
+     -0.6,
+     -0.27
+    ],
+    "c_frag": [
+     [
+      -1.0004,
+      -0.12230000000000002,
+      -0.33070000000000005,
+      0.2145000000000001
+     ],
+     [
+      -0.1331999999999999,
+      1.6158000000000001,
+      0.002800000000000011,
+      -0.14619999999999994
+     ]
+    ]
+   },
+   "narration": "线程把 A_smem 的第 4 列 2 个数、B_smem 的第 4 行 4 个数搬进寄存器，然后做外积。本块的 4 个 k 里，每轮读 2 + 4 = 6 个 float，完成 8 次 FMA —— 这就是 SMEM 这一级买到的复用。",
+   "regions": {
+    "OUTER": "每轮 SMEM 读 6 个 float 做 8 次 FMA，比例 8 / 6 = 1 : 1，而朴素实现是每读 2 个 float 做 1 次 FMA。"
+   },
+   "spans": {
+    "A_smem": [
+     [
+      0,
+      2
+     ],
+     [
+      3,
+      4
+     ]
+    ],
+    "B_smem": [
+     [
+      3,
+      4
+     ],
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "SMEM",
+     "to": "REG",
+     "elements": 6,
+     "note": "A_smem 的 2 个 + B_smem 的 4 个，共 6 个进寄存器",
+     "bytes": 24
+    },
+    {
+     "from": "REG",
+     "to": "REG",
+     "elements": 8,
+     "note": "寄存器内的 8 次 FMA，c_frag 原地累加，不跨层",
+     "bytes": 32
+    }
+   ]
+  },
+  {
+   "id": "st21",
+   "title": "块(2,1)：累加器写回 C",
+   "kind": "comm",
+   "op": "store",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "\\mathrm{HBM}[C]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{C0}:\\slot{C1}\\right] \\leftarrow C^{\\mathrm{frag}}",
+    "idx": "\\mathrm{HBM}[C]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{C0}:\\slot{C1}\\right] \\leftarrow C^{\\mathrm{frag}}",
+    "num": "\\mathrm{HBM}[C]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{C0}:\\slot{C1}\\right] \\leftarrow C^{\\mathrm{frag}},\\qquad C_{\\slot{SI}\\slot{SJ}} = \\slot{SV}"
+   },
+   "bindings": {
+    "R0": {
+     "sym": "(b_i)B_M",
+     "idx": "4",
+     "num": "4"
+    },
+    "R1": {
+     "sym": "(b_i+1)B_M",
+     "idx": "6",
+     "num": "6"
+    },
+    "C0": {
+     "sym": "(b_j)B_N",
+     "idx": "4",
+     "num": "4"
+    },
+    "C1": {
+     "sym": "(b_j+1)B_N",
+     "idx": "8",
+     "num": "8"
+    },
+    "SI": {
+     "sym": "i",
+     "idx": "4",
+     "num": "4"
+    },
+    "SJ": {
+     "sym": "j",
+     "idx": "4",
+     "num": "4"
+    },
+    "SV": {
+     "sym": "C_{ij}",
+     "idx": "C_{44}",
+     "num": "-1"
+    }
+   },
+   "reads": [
+    "c_frag"
+   ],
+   "writes": [
+    "C"
+   ],
+   "state": {
+    "C": [
+     [
+      1.3352,
+      0.058400000000000146,
+      1.7951,
+      -0.33010000000000006,
+      0.47929999999999995,
+      0.8691,
+      0.6985000000000002,
+      -1.2749000000000001
+     ],
+     [
+      0.4744999999999999,
+      -0.23379999999999995,
+      0.7879999999999998,
+      -0.2644999999999999,
+      -0.14079999999999998,
+      -0.7670999999999998,
+      0.23869999999999997,
+      -0.454
+     ],
+     [
+      0.7517,
+      -0.3067000000000001,
+      -1.8634,
+      0.4524999999999999,
+      0.9819000000000002,
+      0.2018000000000002,
+      0.3286,
+      -0.5803999999999999
+     ],
+     [
+      0.2956,
+      -0.21419999999999995,
+      -1.1309,
+      1.2373,
+      -0.9492999999999999,
+      0.9845,
+      -0.33949999999999997,
+      0.9495000000000001
+     ],
+     [
+      -0.7632,
+      1.7193,
+      0.2505000000000002,
+      -0.18259999999999982,
+      -1.0004,
+      -0.12230000000000002,
+      -0.33070000000000005,
+      0.2145000000000001
+     ],
+     [
+      1.0790000000000002,
+      -0.7733999999999999,
+      -0.42100000000000004,
+      0.9535,
+      -0.1331999999999999,
+      1.6158000000000001,
+      0.002800000000000011,
+      -0.14619999999999994
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ]
+    ]
+   },
+   "narration": "块(2,1) 的 2×4 个结果从寄存器写回 HBM。这 8 个输出点一共从 HBM 读了 48 个元素，朴素实现要读 128 个。算出来的值两者逐位相同。",
+   "spans": {
+    "C": [
+     [
+      4,
+      6
+     ],
+     [
+      4,
+      8
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "REG",
+     "to": "HBM",
+     "elements": 8,
+     "note": "2×4 个输出点从寄存器写回 HBM",
+     "bytes": 32
+    }
+   ]
+  },
+  {
+   "id": "ld300",
+   "title": "块(3,0)·K1：A、B 的 tile 载入 SMEM",
+   "kind": "comm",
+   "op": "load",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "idx": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "num": "\\region{MOVE}{A^{\\mathrm{sm}},\\; B^{\\mathrm{sm}} \\leftarrow \\slot{BYTES}\\ \\mathrm{B}}"
+   },
+   "bindings": {
+    "R0": {
+     "sym": "(b_i)B_M",
+     "idx": "6",
+     "num": "6"
+    },
+    "R1": {
+     "sym": "(b_i+1)B_M",
+     "idx": "8",
+     "num": "8"
+    },
+    "K0": {
+     "sym": "(b_k)B_K",
+     "idx": "0",
+     "num": "0"
+    },
+    "K1": {
+     "sym": "(b_k+1)B_K",
+     "idx": "4",
+     "num": "4"
+    },
+    "C0": {
+     "sym": "(b_j)B_N",
+     "idx": "0",
+     "num": "0"
+    },
+    "C1": {
+     "sym": "(b_j+1)B_N",
+     "idx": "4",
+     "num": "4"
+    },
+    "BYTES": {
+     "sym": "4(B_MB_K + B_KB_N)",
+     "idx": "4\\times(8 + 16)",
+     "num": "96"
+    }
+   },
+   "reads": [
+    "A",
+    "B"
+   ],
+   "writes": [
+    "A_smem",
+    "B_smem"
+   ],
+   "state": {
+    "A_smem": [
+     [
+      0.02,
+      0.74,
+      -0.28,
+      0.2
+     ],
+     [
+      0.63,
+      -0.24,
+      0.96,
+      0.18
+     ]
+    ],
+    "B_smem": [
+     [
+      -0.12,
+      -0.52,
+      -0.2,
+      -0.81
+     ],
+     [
+      0.75,
+      0.32,
+      -0.74,
+      0.69
+     ],
+     [
+      -0.62,
+      0.86,
+      0.1,
+      -0.64
+     ],
+     [
+      -0.18,
+      -0.52,
+      -0.92,
+      0.75
+     ]
+    ]
+   },
+   "narration": "块(3,0) 的第 5 个 K 迭代：A 的 [6:8, 0:4] 和 B 的 [0:4, 0:4] 从 HBM 搬进 SMEM，共 24 个 float（96 字节）。这一对 tile 接下来会被块内 8 个输出点复用。",
+   "regions": {
+    "MOVE": "这次搬运把 A、B 各一个 2×4 的 tile 送进 SMEM，合计 24 个 float，即 96 字节。朴素实现算这 8 个输出点要读 128 个元素。"
+   },
+   "spans": {
+    "A": [
+     [
+      6,
+      8
+     ],
+     [
+      0,
+      4
+     ]
+    ],
+    "B": [
+     [
+      0,
+      4
+     ],
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "SMEM",
+     "elements": 24,
+     "note": "A 的 2×4 tile 与 B 的 4×4 tile，一次搬完",
+     "bytes": 96
+    }
+   ]
+  },
+  {
+   "id": "mma300",
+   "title": "块(3,0)·K1：SMEM → REG 外积累加",
+   "kind": "op",
+   "op": "fma",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "idx": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}=\\slot{P0}}^{\\slot{P1}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "num": "\\slot{AV} \\leftarrow A^{\\mathrm{sm}}\\left[:,\\slot{PL}\\right],\\qquad \\slot{BV} \\leftarrow B^{\\mathrm{sm}}\\left[\\slot{PL},:\\right],\\qquad \\region{OUTER}{\\slot{FRAG}}"
+   },
+   "bindings": {
+    "P": {
+     "sym": "p",
+     "idx": "3",
+     "num": "3"
+    },
+    "P0": {
+     "sym": "0",
+     "idx": "0",
+     "num": "0"
+    },
+    "P1": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "PL": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "AV": {
+     "sym": "A^{\\mathrm{sm}}[:,B_K-1]",
+     "idx": "A^{\\mathrm{sm}}[:,3]",
+     "num": "\\left[0.2,\\; 0.18\\right]"
+    },
+    "BV": {
+     "sym": "B^{\\mathrm{sm}}[B_K-1,:]",
+     "idx": "B^{\\mathrm{sm}}[3,:]",
+     "num": "\\left[-0.18,\\; -0.52,\\; -0.92,\\; 0.75\\right]"
+    },
+    "FRAG": {
+     "sym": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "idx": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "num": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}"
+    }
+   },
+   "reads": [
+    "A_smem",
+    "B_smem",
+    "c_frag"
+   ],
+   "writes": [
+    "a_frag",
+    "b_frag",
+    "c_frag"
+   ],
+   "state": {
+    "a_frag": [
+     0.2,
+     0.18
+    ],
+    "b_frag": [
+     -0.18,
+     -0.52,
+     -0.92,
+     0.75
+    ],
+    "c_frag": [
+     [
+      0.6901999999999999,
+      -0.1184,
+      -0.7636000000000001,
+      0.8236
+     ],
+     [
+      -0.8832,
+      0.3276,
+      -0.018000000000000016,
+      -1.1553
+     ]
+    ]
+   },
+   "narration": "线程把 A_smem 的第 4 列 2 个数、B_smem 的第 4 行 4 个数搬进寄存器，然后做外积。本块的 4 个 k 里，每轮读 2 + 4 = 6 个 float，完成 8 次 FMA —— 这就是 SMEM 这一级买到的复用。",
+   "regions": {
+    "OUTER": "每轮 SMEM 读 6 个 float 做 8 次 FMA，比例 8 / 6 = 1 : 1，而朴素实现是每读 2 个 float 做 1 次 FMA。"
+   },
+   "spans": {
+    "A_smem": [
+     [
+      0,
+      2
+     ],
+     [
+      3,
+      4
+     ]
+    ],
+    "B_smem": [
+     [
+      3,
+      4
+     ],
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "SMEM",
+     "to": "REG",
+     "elements": 6,
+     "note": "A_smem 的 2 个 + B_smem 的 4 个，共 6 个进寄存器",
+     "bytes": 24
+    },
+    {
+     "from": "REG",
+     "to": "REG",
+     "elements": 8,
+     "note": "寄存器内的 8 次 FMA，c_frag 原地累加，不跨层",
+     "bytes": 32
+    }
+   ]
+  },
+  {
+   "id": "ld301",
+   "title": "块(3,0)·K2：A、B 的 tile 载入 SMEM",
+   "kind": "comm",
+   "op": "load",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "idx": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "num": "\\region{MOVE}{A^{\\mathrm{sm}},\\; B^{\\mathrm{sm}} \\leftarrow \\slot{BYTES}\\ \\mathrm{B}}"
+   },
+   "bindings": {
+    "R0": {
+     "sym": "(b_i)B_M",
+     "idx": "6",
+     "num": "6"
+    },
+    "R1": {
+     "sym": "(b_i+1)B_M",
+     "idx": "8",
+     "num": "8"
+    },
+    "K0": {
+     "sym": "(b_k)B_K",
+     "idx": "4",
+     "num": "4"
+    },
+    "K1": {
+     "sym": "(b_k+1)B_K",
+     "idx": "8",
+     "num": "8"
+    },
+    "C0": {
+     "sym": "(b_j)B_N",
+     "idx": "0",
+     "num": "0"
+    },
+    "C1": {
+     "sym": "(b_j+1)B_N",
+     "idx": "4",
+     "num": "4"
+    },
+    "BYTES": {
+     "sym": "4(B_MB_K + B_KB_N)",
+     "idx": "4\\times(8 + 16)",
+     "num": "96"
+    }
+   },
+   "reads": [
+    "A",
+    "B"
+   ],
+   "writes": [
+    "A_smem",
+    "B_smem"
+   ],
+   "state": {
+    "A_smem": [
+     [
+      -0.88,
+      -0.22,
+      -0.35,
+      -0.7
+     ],
+     [
+      0.21,
+      0.28,
+      0.35,
+      -0.7
+     ]
+    ],
+    "B_smem": [
+     [
+      -0.95,
+      -0.26,
+      -0.94,
+      -0.75
+     ],
+     [
+      0.75,
+      -0.31,
+      0.18,
+      0.37
+     ],
+     [
+      -0.7,
+      0.87,
+      -0.99,
+      0.51
+     ],
+     [
+      -0.97,
+      0.26,
+      0.59,
+      0.03
+     ]
+    ]
+   },
+   "narration": "块(3,0) 的第 5 个 K 迭代：A 的 [6:8, 4:8] 和 B 的 [4:8, 0:4] 从 HBM 搬进 SMEM，共 24 个 float（96 字节）。这一对 tile 接下来会被块内 8 个输出点复用。",
+   "regions": {
+    "MOVE": "这次搬运把 A、B 各一个 2×4 的 tile 送进 SMEM，合计 24 个 float，即 96 字节。朴素实现算这 8 个输出点要读 128 个元素。"
+   },
+   "spans": {
+    "A": [
+     [
+      6,
+      8
+     ],
+     [
+      4,
+      8
+     ]
+    ],
+    "B": [
+     [
+      4,
+      8
+     ],
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "SMEM",
+     "elements": 24,
+     "note": "A 的 2×4 tile 与 B 的 4×4 tile，一次搬完",
+     "bytes": 96
+    }
+   ]
+  },
+  {
+   "id": "mma301",
+   "title": "块(3,0)·K2：SMEM → REG 外积累加",
+   "kind": "op",
+   "op": "fma",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "idx": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}=\\slot{P0}}^{\\slot{P1}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "num": "\\slot{AV} \\leftarrow A^{\\mathrm{sm}}\\left[:,\\slot{PL}\\right],\\qquad \\slot{BV} \\leftarrow B^{\\mathrm{sm}}\\left[\\slot{PL},:\\right],\\qquad \\region{OUTER}{\\slot{FRAG}}"
+   },
+   "bindings": {
+    "P": {
+     "sym": "p",
+     "idx": "3",
+     "num": "3"
+    },
+    "P0": {
+     "sym": "0",
+     "idx": "0",
+     "num": "0"
+    },
+    "P1": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "PL": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "AV": {
+     "sym": "A^{\\mathrm{sm}}[:,B_K-1]",
+     "idx": "A^{\\mathrm{sm}}[:,3]",
+     "num": "\\left[-0.7,\\; -0.7\\right]"
+    },
+    "BV": {
+     "sym": "B^{\\mathrm{sm}}[B_K-1,:]",
+     "idx": "B^{\\mathrm{sm}}[3,:]",
+     "num": "\\left[-0.97,\\; 0.26,\\; 0.59,\\; 0.03\\right]"
+    },
+    "FRAG": {
+     "sym": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "idx": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "num": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}"
+    }
+   },
+   "reads": [
+    "A_smem",
+    "B_smem",
+    "c_frag"
+   ],
+   "writes": [
+    "a_frag",
+    "b_frag",
+    "c_frag"
+   ],
+   "state": {
+    "a_frag": [
+     -0.7,
+     -0.7
+    ],
+    "b_frag": [
+     -0.97,
+     0.26,
+     0.59,
+     0.03
+    ],
+    "c_frag": [
+     [
+      2.2851999999999997,
+      -0.3079,
+      -0.04250000000000015,
+      1.2027
+     ],
+     [
+      -0.4387,
+      0.30870000000000003,
+      -0.9244999999999999,
+      -1.0516999999999999
+     ]
+    ]
+   },
+   "narration": "线程把 A_smem 的第 4 列 2 个数、B_smem 的第 4 行 4 个数搬进寄存器，然后做外积。本块的 4 个 k 里，每轮读 2 + 4 = 6 个 float，完成 8 次 FMA —— 这就是 SMEM 这一级买到的复用。",
+   "regions": {
+    "OUTER": "每轮 SMEM 读 6 个 float 做 8 次 FMA，比例 8 / 6 = 1 : 1，而朴素实现是每读 2 个 float 做 1 次 FMA。"
+   },
+   "spans": {
+    "A_smem": [
+     [
+      0,
+      2
+     ],
+     [
+      3,
+      4
+     ]
+    ],
+    "B_smem": [
+     [
+      3,
+      4
+     ],
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "SMEM",
+     "to": "REG",
+     "elements": 6,
+     "note": "A_smem 的 2 个 + B_smem 的 4 个，共 6 个进寄存器",
+     "bytes": 24
+    },
+    {
+     "from": "REG",
+     "to": "REG",
+     "elements": 8,
+     "note": "寄存器内的 8 次 FMA，c_frag 原地累加，不跨层",
+     "bytes": 32
+    }
+   ]
+  },
+  {
+   "id": "st30",
+   "title": "块(3,0)：累加器写回 C",
+   "kind": "comm",
+   "op": "store",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "\\mathrm{HBM}[C]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{C0}:\\slot{C1}\\right] \\leftarrow C^{\\mathrm{frag}}",
+    "idx": "\\mathrm{HBM}[C]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{C0}:\\slot{C1}\\right] \\leftarrow C^{\\mathrm{frag}}",
+    "num": "\\mathrm{HBM}[C]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{C0}:\\slot{C1}\\right] \\leftarrow C^{\\mathrm{frag}},\\qquad C_{\\slot{SI}\\slot{SJ}} = \\slot{SV}"
+   },
+   "bindings": {
+    "R0": {
+     "sym": "(b_i)B_M",
+     "idx": "6",
+     "num": "6"
+    },
+    "R1": {
+     "sym": "(b_i+1)B_M",
+     "idx": "8",
+     "num": "8"
+    },
+    "C0": {
+     "sym": "(b_j)B_N",
+     "idx": "0",
+     "num": "0"
+    },
+    "C1": {
+     "sym": "(b_j+1)B_N",
+     "idx": "4",
+     "num": "4"
+    },
+    "SI": {
+     "sym": "i",
+     "idx": "6",
+     "num": "6"
+    },
+    "SJ": {
+     "sym": "j",
+     "idx": "0",
+     "num": "0"
+    },
+    "SV": {
+     "sym": "C_{ij}",
+     "idx": "C_{60}",
+     "num": "2.285"
+    }
+   },
+   "reads": [
+    "c_frag"
+   ],
+   "writes": [
+    "C"
+   ],
+   "state": {
+    "C": [
+     [
+      1.3352,
+      0.058400000000000146,
+      1.7951,
+      -0.33010000000000006,
+      0.47929999999999995,
+      0.8691,
+      0.6985000000000002,
+      -1.2749000000000001
+     ],
+     [
+      0.4744999999999999,
+      -0.23379999999999995,
+      0.7879999999999998,
+      -0.2644999999999999,
+      -0.14079999999999998,
+      -0.7670999999999998,
+      0.23869999999999997,
+      -0.454
+     ],
+     [
+      0.7517,
+      -0.3067000000000001,
+      -1.8634,
+      0.4524999999999999,
+      0.9819000000000002,
+      0.2018000000000002,
+      0.3286,
+      -0.5803999999999999
+     ],
+     [
+      0.2956,
+      -0.21419999999999995,
+      -1.1309,
+      1.2373,
+      -0.9492999999999999,
+      0.9845,
+      -0.33949999999999997,
+      0.9495000000000001
+     ],
+     [
+      -0.7632,
+      1.7193,
+      0.2505000000000002,
+      -0.18259999999999982,
+      -1.0004,
+      -0.12230000000000002,
+      -0.33070000000000005,
+      0.2145000000000001
+     ],
+     [
+      1.0790000000000002,
+      -0.7733999999999999,
+      -0.42100000000000004,
+      0.9535,
+      -0.1331999999999999,
+      1.6158000000000001,
+      0.002800000000000011,
+      -0.14619999999999994
+     ],
+     [
+      2.2851999999999997,
+      -0.3079,
+      -0.04250000000000015,
+      1.2027,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      -0.4387,
+      0.30870000000000003,
+      -0.9244999999999999,
+      -1.0516999999999999,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ]
+    ]
+   },
+   "narration": "块(3,0) 的 2×4 个结果从寄存器写回 HBM。这 8 个输出点一共从 HBM 读了 48 个元素，朴素实现要读 128 个。算出来的值两者逐位相同。",
+   "spans": {
+    "C": [
+     [
+      6,
+      8
+     ],
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "REG",
+     "to": "HBM",
+     "elements": 8,
+     "note": "2×4 个输出点从寄存器写回 HBM",
+     "bytes": 32
+    }
+   ]
+  },
+  {
+   "id": "ld310",
+   "title": "块(3,1)·K1：A、B 的 tile 载入 SMEM",
+   "kind": "comm",
+   "op": "load",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "idx": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "num": "\\region{MOVE}{A^{\\mathrm{sm}},\\; B^{\\mathrm{sm}} \\leftarrow \\slot{BYTES}\\ \\mathrm{B}}"
+   },
+   "bindings": {
+    "R0": {
+     "sym": "(b_i)B_M",
+     "idx": "6",
+     "num": "6"
+    },
+    "R1": {
+     "sym": "(b_i+1)B_M",
+     "idx": "8",
+     "num": "8"
+    },
+    "K0": {
+     "sym": "(b_k)B_K",
+     "idx": "0",
+     "num": "0"
+    },
+    "K1": {
+     "sym": "(b_k+1)B_K",
+     "idx": "4",
+     "num": "4"
+    },
+    "C0": {
+     "sym": "(b_j)B_N",
+     "idx": "4",
+     "num": "4"
+    },
+    "C1": {
+     "sym": "(b_j+1)B_N",
+     "idx": "8",
+     "num": "8"
+    },
+    "BYTES": {
+     "sym": "4(B_MB_K + B_KB_N)",
+     "idx": "4\\times(8 + 16)",
+     "num": "96"
+    }
+   },
+   "reads": [
+    "A",
+    "B"
+   ],
+   "writes": [
+    "A_smem",
+    "B_smem"
+   ],
+   "state": {
+    "A_smem": [
+     [
+      0.02,
+      0.74,
+      -0.28,
+      0.2
+     ],
+     [
+      0.63,
+      -0.24,
+      0.96,
+      0.18
+     ]
+    ],
+    "B_smem": [
+     [
+      0.94,
+      -0.57,
+      0.34,
+      -0.4
+     ],
+     [
+      0.89,
+      0.81,
+      0.14,
+      -0.71
+     ],
+     [
+      0.77,
+      0.28,
+      0.14,
+      -0.25
+     ],
+     [
+      -0.06,
+      0.1,
+      -0.36,
+      0.5
+     ]
+    ]
+   },
+   "narration": "块(3,1) 的第 5 个 K 迭代：A 的 [6:8, 0:4] 和 B 的 [0:4, 4:8] 从 HBM 搬进 SMEM，共 24 个 float（96 字节）。这一对 tile 接下来会被块内 8 个输出点复用。",
+   "regions": {
+    "MOVE": "这次搬运把 A、B 各一个 2×4 的 tile 送进 SMEM，合计 24 个 float，即 96 字节。朴素实现算这 8 个输出点要读 128 个元素。"
+   },
+   "spans": {
+    "A": [
+     [
+      6,
+      8
+     ],
+     [
+      0,
+      4
+     ]
+    ],
+    "B": [
+     [
+      0,
+      4
+     ],
+     [
+      4,
+      8
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "SMEM",
+     "elements": 24,
+     "note": "A 的 2×4 tile 与 B 的 4×4 tile，一次搬完",
+     "bytes": 96
+    }
+   ]
+  },
+  {
+   "id": "mma310",
+   "title": "块(3,1)·K1：SMEM → REG 外积累加",
+   "kind": "op",
+   "op": "fma",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "idx": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}=\\slot{P0}}^{\\slot{P1}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "num": "\\slot{AV} \\leftarrow A^{\\mathrm{sm}}\\left[:,\\slot{PL}\\right],\\qquad \\slot{BV} \\leftarrow B^{\\mathrm{sm}}\\left[\\slot{PL},:\\right],\\qquad \\region{OUTER}{\\slot{FRAG}}"
+   },
+   "bindings": {
+    "P": {
+     "sym": "p",
+     "idx": "3",
+     "num": "3"
+    },
+    "P0": {
+     "sym": "0",
+     "idx": "0",
+     "num": "0"
+    },
+    "P1": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "PL": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "AV": {
+     "sym": "A^{\\mathrm{sm}}[:,B_K-1]",
+     "idx": "A^{\\mathrm{sm}}[:,3]",
+     "num": "\\left[0.2,\\; 0.18\\right]"
+    },
+    "BV": {
+     "sym": "B^{\\mathrm{sm}}[B_K-1,:]",
+     "idx": "B^{\\mathrm{sm}}[3,:]",
+     "num": "\\left[-0.06,\\; 0.1,\\; -0.36,\\; 0.5\\right]"
+    },
+    "FRAG": {
+     "sym": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "idx": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "num": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}"
+    }
+   },
+   "reads": [
+    "A_smem",
+    "B_smem",
+    "c_frag"
+   ],
+   "writes": [
+    "a_frag",
+    "b_frag",
+    "c_frag"
+   ],
+   "state": {
+    "a_frag": [
+     0.2,
+     0.18
+    ],
+    "b_frag": [
+     -0.06,
+     0.1,
+     -0.36,
+     0.5
+    ],
+    "c_frag": [
+     [
+      0.4498,
+      0.5296000000000001,
+      -0.0007999999999999813,
+      -0.36339999999999995
+     ],
+     [
+      1.107,
+      -0.26669999999999994,
+      0.2502000000000001,
+      -0.2316
+     ]
+    ]
+   },
+   "narration": "线程把 A_smem 的第 4 列 2 个数、B_smem 的第 4 行 4 个数搬进寄存器，然后做外积。本块的 4 个 k 里，每轮读 2 + 4 = 6 个 float，完成 8 次 FMA —— 这就是 SMEM 这一级买到的复用。",
+   "regions": {
+    "OUTER": "每轮 SMEM 读 6 个 float 做 8 次 FMA，比例 8 / 6 = 1 : 1，而朴素实现是每读 2 个 float 做 1 次 FMA。"
+   },
+   "spans": {
+    "A_smem": [
+     [
+      0,
+      2
+     ],
+     [
+      3,
+      4
+     ]
+    ],
+    "B_smem": [
+     [
+      3,
+      4
+     ],
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "SMEM",
+     "to": "REG",
+     "elements": 6,
+     "note": "A_smem 的 2 个 + B_smem 的 4 个，共 6 个进寄存器",
+     "bytes": 24
+    },
+    {
+     "from": "REG",
+     "to": "REG",
+     "elements": 8,
+     "note": "寄存器内的 8 次 FMA，c_frag 原地累加，不跨层",
+     "bytes": 32
+    }
+   ]
+  },
+  {
+   "id": "ld311",
+   "title": "块(3,1)·K2：A、B 的 tile 载入 SMEM",
+   "kind": "comm",
+   "op": "load",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "idx": "A^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[A]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{K0}:\\slot{K1}\\right],\\qquad B^{\\mathrm{sm}} \\leftarrow \\mathrm{HBM}[B]\\left[\\slot{K0}:\\slot{K1},\\ \\slot{C0}:\\slot{C1}\\right]",
+    "num": "\\region{MOVE}{A^{\\mathrm{sm}},\\; B^{\\mathrm{sm}} \\leftarrow \\slot{BYTES}\\ \\mathrm{B}}"
+   },
+   "bindings": {
+    "R0": {
+     "sym": "(b_i)B_M",
+     "idx": "6",
+     "num": "6"
+    },
+    "R1": {
+     "sym": "(b_i+1)B_M",
+     "idx": "8",
+     "num": "8"
+    },
+    "K0": {
+     "sym": "(b_k)B_K",
+     "idx": "4",
+     "num": "4"
+    },
+    "K1": {
+     "sym": "(b_k+1)B_K",
+     "idx": "8",
+     "num": "8"
+    },
+    "C0": {
+     "sym": "(b_j)B_N",
+     "idx": "4",
+     "num": "4"
+    },
+    "C1": {
+     "sym": "(b_j+1)B_N",
+     "idx": "8",
+     "num": "8"
+    },
+    "BYTES": {
+     "sym": "4(B_MB_K + B_KB_N)",
+     "idx": "4\\times(8 + 16)",
+     "num": "96"
+    }
+   },
+   "reads": [
+    "A",
+    "B"
+   ],
+   "writes": [
+    "A_smem",
+    "B_smem"
+   ],
+   "state": {
+    "A_smem": [
+     [
+      -0.88,
+      -0.22,
+      -0.35,
+      -0.7
+     ],
+     [
+      0.21,
+      0.28,
+      0.35,
+      -0.7
+     ]
+    ],
+    "B_smem": [
+     [
+      0.93,
+      0.32,
+      -0.14,
+      0.05
+     ],
+     [
+      -0.29,
+      0.04,
+      0.53,
+      0.82
+     ],
+     [
+      0.62,
+      -0.73,
+      -0.16,
+      0.63
+     ],
+     [
+      0.45,
+      -0.55,
+      -0.6,
+      -0.27
+     ]
+    ]
+   },
+   "narration": "块(3,1) 的第 5 个 K 迭代：A 的 [6:8, 4:8] 和 B 的 [4:8, 4:8] 从 HBM 搬进 SMEM，共 24 个 float（96 字节）。这一对 tile 接下来会被块内 8 个输出点复用。",
+   "regions": {
+    "MOVE": "这次搬运把 A、B 各一个 2×4 的 tile 送进 SMEM，合计 24 个 float，即 96 字节。朴素实现算这 8 个输出点要读 128 个元素。"
+   },
+   "spans": {
+    "A": [
+     [
+      6,
+      8
+     ],
+     [
+      4,
+      8
+     ]
+    ],
+    "B": [
+     [
+      4,
+      8
+     ],
+     [
+      4,
+      8
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "SMEM",
+     "elements": 24,
+     "note": "A 的 2×4 tile 与 B 的 4×4 tile，一次搬完",
+     "bytes": 96
+    }
+   ]
+  },
+  {
+   "id": "mma311",
+   "title": "块(3,1)·K2：SMEM → REG 外积累加",
+   "kind": "op",
+   "op": "fma",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "idx": "C^{\\mathrm{frag}}_{pq} \\mathrel{+}= \\sum_{\\slot{P}=\\slot{P0}}^{\\slot{P1}} A^{\\mathrm{sm}}_{p\\slot{P}}\\,B^{\\mathrm{sm}}_{\\slot{P}q}",
+    "num": "\\slot{AV} \\leftarrow A^{\\mathrm{sm}}\\left[:,\\slot{PL}\\right],\\qquad \\slot{BV} \\leftarrow B^{\\mathrm{sm}}\\left[\\slot{PL},:\\right],\\qquad \\region{OUTER}{\\slot{FRAG}}"
+   },
+   "bindings": {
+    "P": {
+     "sym": "p",
+     "idx": "3",
+     "num": "3"
+    },
+    "P0": {
+     "sym": "0",
+     "idx": "0",
+     "num": "0"
+    },
+    "P1": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "PL": {
+     "sym": "B_K-1",
+     "idx": "3",
+     "num": "3"
+    },
+    "AV": {
+     "sym": "A^{\\mathrm{sm}}[:,B_K-1]",
+     "idx": "A^{\\mathrm{sm}}[:,3]",
+     "num": "\\left[-0.7,\\; -0.7\\right]"
+    },
+    "BV": {
+     "sym": "B^{\\mathrm{sm}}[B_K-1,:]",
+     "idx": "B^{\\mathrm{sm}}[3,:]",
+     "num": "\\left[0.45,\\; -0.55,\\; -0.6,\\; -0.27\\right]"
+    },
+    "FRAG": {
+     "sym": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "idx": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}",
+     "num": "C^{\\mathrm{frag}} \\mathrel{+}= a^{\\mathrm{frag}}\\otimes b^{\\mathrm{frag}}"
+    }
+   },
+   "reads": [
+    "A_smem",
+    "B_smem",
+    "c_frag"
+   ],
+   "writes": [
+    "a_frag",
+    "b_frag",
+    "c_frag"
+   ],
+   "state": {
+    "a_frag": [
+     -0.7,
+     -0.7
+    ],
+    "b_frag": [
+     0.45,
+     -0.55,
+     -0.6,
+     -0.27
+    ],
+    "c_frag": [
+     [
+      -0.8368,
+      0.8797,
+      0.4818,
+      -0.6192999999999997
+     ],
+     [
+      1.1231000000000002,
+      -0.05879999999999996,
+      0.7332000000000001,
+      0.418
+     ]
+    ]
+   },
+   "narration": "线程把 A_smem 的第 4 列 2 个数、B_smem 的第 4 行 4 个数搬进寄存器，然后做外积。本块的 4 个 k 里，每轮读 2 + 4 = 6 个 float，完成 8 次 FMA —— 这就是 SMEM 这一级买到的复用。",
+   "regions": {
+    "OUTER": "每轮 SMEM 读 6 个 float 做 8 次 FMA，比例 8 / 6 = 1 : 1，而朴素实现是每读 2 个 float 做 1 次 FMA。"
+   },
+   "spans": {
+    "A_smem": [
+     [
+      0,
+      2
+     ],
+     [
+      3,
+      4
+     ]
+    ],
+    "B_smem": [
+     [
+      3,
+      4
+     ],
+     [
+      0,
+      4
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "SMEM",
+     "to": "REG",
+     "elements": 6,
+     "note": "A_smem 的 2 个 + B_smem 的 4 个，共 6 个进寄存器",
+     "bytes": 24
+    },
+    {
+     "from": "REG",
+     "to": "REG",
+     "elements": 8,
+     "note": "寄存器内的 8 次 FMA，c_frag 原地累加，不跨层",
+     "bytes": 32
+    }
+   ]
+  },
+  {
+   "id": "st31",
+   "title": "块(3,1)：累加器写回 C",
+   "kind": "comm",
+   "op": "store",
+   "phase": "分块搬运",
+   "formula": {
+    "sym": "\\mathrm{HBM}[C]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{C0}:\\slot{C1}\\right] \\leftarrow C^{\\mathrm{frag}}",
+    "idx": "\\mathrm{HBM}[C]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{C0}:\\slot{C1}\\right] \\leftarrow C^{\\mathrm{frag}}",
+    "num": "\\mathrm{HBM}[C]\\left[\\slot{R0}:\\slot{R1},\\ \\slot{C0}:\\slot{C1}\\right] \\leftarrow C^{\\mathrm{frag}},\\qquad C_{\\slot{SI}\\slot{SJ}} = \\slot{SV}"
+   },
+   "bindings": {
+    "R0": {
+     "sym": "(b_i)B_M",
+     "idx": "6",
+     "num": "6"
+    },
+    "R1": {
+     "sym": "(b_i+1)B_M",
+     "idx": "8",
+     "num": "8"
+    },
+    "C0": {
+     "sym": "(b_j)B_N",
+     "idx": "4",
+     "num": "4"
+    },
+    "C1": {
+     "sym": "(b_j+1)B_N",
+     "idx": "8",
+     "num": "8"
+    },
+    "SI": {
+     "sym": "i",
+     "idx": "6",
+     "num": "6"
+    },
+    "SJ": {
+     "sym": "j",
+     "idx": "4",
+     "num": "4"
+    },
+    "SV": {
+     "sym": "C_{ij}",
+     "idx": "C_{64}",
+     "num": "-0.8368"
+    }
+   },
+   "reads": [
+    "c_frag"
+   ],
+   "writes": [
+    "C"
+   ],
+   "state": {
+    "C": [
+     [
+      1.3352,
+      0.058400000000000146,
+      1.7951,
+      -0.33010000000000006,
+      0.47929999999999995,
+      0.8691,
+      0.6985000000000002,
+      -1.2749000000000001
+     ],
+     [
+      0.4744999999999999,
+      -0.23379999999999995,
+      0.7879999999999998,
+      -0.2644999999999999,
+      -0.14079999999999998,
+      -0.7670999999999998,
+      0.23869999999999997,
+      -0.454
+     ],
+     [
+      0.7517,
+      -0.3067000000000001,
+      -1.8634,
+      0.4524999999999999,
+      0.9819000000000002,
+      0.2018000000000002,
+      0.3286,
+      -0.5803999999999999
+     ],
+     [
+      0.2956,
+      -0.21419999999999995,
+      -1.1309,
+      1.2373,
+      -0.9492999999999999,
+      0.9845,
+      -0.33949999999999997,
+      0.9495000000000001
+     ],
+     [
+      -0.7632,
+      1.7193,
+      0.2505000000000002,
+      -0.18259999999999982,
+      -1.0004,
+      -0.12230000000000002,
+      -0.33070000000000005,
+      0.2145000000000001
+     ],
+     [
+      1.0790000000000002,
+      -0.7733999999999999,
+      -0.42100000000000004,
+      0.9535,
+      -0.1331999999999999,
+      1.6158000000000001,
+      0.002800000000000011,
+      -0.14619999999999994
+     ],
+     [
+      2.2851999999999997,
+      -0.3079,
+      -0.04250000000000015,
+      1.2027,
+      -0.8368,
+      0.8797,
+      0.4818,
+      -0.6192999999999997
+     ],
+     [
+      -0.4387,
+      0.30870000000000003,
+      -0.9244999999999999,
+      -1.0516999999999999,
+      1.1231000000000002,
+      -0.05879999999999996,
+      0.7332000000000001,
+      0.418
+     ]
+    ]
+   },
+   "narration": "块(3,1) 的 2×4 个结果从寄存器写回 HBM。这 8 个输出点一共从 HBM 读了 48 个元素，朴素实现要读 128 个。算出来的值两者逐位相同。",
+   "spans": {
+    "C": [
+     [
+      6,
+      8
+     ],
+     [
+      4,
+      8
+     ]
+    ]
+   },
+   "flows": [
+    {
+     "from": "REG",
+     "to": "HBM",
+     "elements": 8,
+     "note": "2×4 个输出点从寄存器写回 HBM",
+     "bytes": 32
+    }
+   ]
+  },
+  {
+   "id": "sum",
+   "title": "收尾：分块买到了什么",
+   "kind": "op",
+   "op": "summary",
+   "phase": "收尾",
+   "formula": {
+    "sym": "\\mathrm{reads}_{\\mathrm{naive}} = 2MNK,\\qquad \\mathrm{reads}_{\\mathrm{tiled}} = \\frac{MN K}{B_MB_NB_K}(B_MB_K + B_KB_N)",
+    "idx": "\\mathrm{reads}_{\\mathrm{naive}} = \\slot{RD},\\qquad \\mathrm{reads}_{\\mathrm{tiled}} = \\slot{TD}",
+    "num": "\\slot{RDI} \\rightarrow \\slot{TDI}\\ (\\times\\slot{RATIO}),\\qquad \\mathrm{AI}: \\slot{AI0} \\rightarrow \\slot{AI1}\\ \\mathrm{FLOP/B},\\qquad \\region{RIDGE}{\\mathrm{ridge} \\approx \\slot{RIDGE}}"
+   },
+   "bindings": {
+    "RD": {
+     "sym": "2MNK",
+     "idx": "2\\times8\\times8\\times8",
+     "num": "1024"
+    },
+    "TD": {
+     "sym": "\\frac{MNK}{B_MB_NB_K}(B_MB_K+B_KB_N)",
+     "idx": "16\\times(8+16)",
+     "num": "384"
+    },
+    "RDI": {
+     "sym": "2MNK",
+     "idx": "1024",
+     "num": "1024"
+    },
+    "TDI": {
+     "sym": "\\mathrm{reads}_{\\mathrm{tiled}}",
+     "idx": "384",
+     "num": "384"
+    },
+    "RATIO": {
+     "sym": "\\mathrm{reuse}",
+     "idx": "3\\times",
+     "num": "3"
+    },
+    "AI0": {
+     "sym": "\\frac{2K}{8K}",
+     "idx": "0.25",
+     "num": "0.25"
+    },
+    "AI1": {
+     "sym": "\\frac{2B_MB_NB_K}{4(B_MB_K+B_KB_N)}",
+     "idx": "0.6667",
+     "num": "0.6667"
+    },
+    "RIDGE": {
+     "sym": "\\mathrm{peak}/\\mathrm{bw}",
+     "idx": "17.4",
+     "num": "17.4"
+    }
+   },
+   "reads": [
+    "A",
+    "B"
+   ],
+   "writes": [],
+   "state": {},
+   "narration": "同样一个 C，朴素实现从 HBM 读 1024 个元素，按 2×4×4 分块只要 384 个，少了 3 倍。算术强度从 0.25 抬到 0.6667 FLOP/Byte —— 方向和教程里说的一致，但离 V100 的平衡点 17.44 还差得远：这个 8×8 的例子是为了把搬运过程看清楚，真要把算力打满，tile 得大到 128×128（算术强度 32）。",
+   "regions": {
+    "RIDGE": "平衡点 = 峰值算力 / 峰值带宽。V100 上约 17.44 FLOP/Byte，超过它才由算力而非带宽决定快慢。"
+   },
+   "flows": [
+    {
+     "from": "HBM",
+     "to": "SMEM",
+     "elements": 384,
+     "note": "整趟回放的 HBM → SMEM 总搬运量：384 个元素",
+     "bytes": 1536
+    },
+    {
+     "from": "SMEM",
+     "to": "REG",
+     "elements": 384,
+     "note": "整趟回放的 SMEM → REG 总搬运量",
+     "bytes": 1536
+    }
+   ]
+  }
+ ]
+}

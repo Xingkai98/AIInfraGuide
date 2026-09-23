@@ -1,0 +1,117 @@
+/* L00 engine · view: Roofline plot — styles.
+ *
+ * A separate file from lab.css on purpose: lab.css belongs to the engine core
+ * and is shared by every lab, while this is one view component's own chrome.
+ * Keeping them apart means a change here cannot regress the player, the DAG or
+ * the tensor inspector, and a lab that does not draw a Roofline never
+ * downloads it.
+ *
+ * Colours come from lab.css's custom properties, which are declared on
+ * .lab-root and therefore already in scope — so the plot is theme-aware
+ * without restating either palette.
+ *
+ * The chart is an SVG with a FIXED viewBox, and that is deliberate: the
+ * geometry the acceptance harness asserts (no dot on the frame, no label over
+ * a neighbouring dot, nothing clipped) is a property of the layout in viewBox
+ * units. A fluid width would make every one of those measurements depend on the
+ * viewport it happened to be taken at. `max-width:100%` lets it shrink on a
+ * narrow screen; the aspect ratio holds because height is set from the viewBox.
+ */
+
+.lab-roof {
+  padding: 10px 12px 4px;
+}
+
+/* Fills its panel rather than sitting at its natural size: this is the headline
+ * picture of the page, and a 760px chart adrift in a 1500px panel reads as an
+ * oversight. `width:100%` with a viewBox scales the CONTENT proportionally, so
+ * the layout stays the one the geometry assertions measure — they take
+ * bounding rects off the rendered DOM and are scale-independent by
+ * construction. `height:auto` lets the aspect ratio hold. */
+.lab-roof-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* ---- frame, grid and axes ---- */
+.lab-roof-plot {
+  fill: var(--lab-panel-2);
+  stroke: var(--lab-line);
+  stroke-width: 1;
+}
+.lab-roof-grid {
+  stroke: var(--lab-line);
+  stroke-width: 0.5;
+  opacity: 0.55;
+}
+.lab-roof-tick {
+  fill: var(--lab-faint);
+  font-size: 10px;
+}
+.lab-roof-tick-y { text-anchor: end; }
+.lab-roof-tick-x { text-anchor: middle; }
+.lab-roof-ax {
+  fill: var(--lab-dim);
+  font-size: 11px;
+  text-anchor: middle;
+}
+.lab-roof-unit {
+  fill: var(--lab-faint);
+  font-size: 9.5px;
+}
+
+/* ---- the two roofs and the ridge ---- */
+/* The bandwidth roof is dashed and the compute roof solid, so the two are
+ * distinguishable in a monochrome screenshot and not only by colour. Which one
+ * a dot sits on is then readable without consulting the legend. */
+.lab-roof-roof {
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+.lab-roof-roof-bw {
+  stroke: var(--lab-accent, #007aff);
+  stroke-dasharray: 6 4;
+}
+.lab-roof-roof-compute {
+  stroke: var(--lab-ok, #0f7b52);
+}
+.lab-roof-ridge {
+  stroke: var(--lab-faint);
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+}
+.lab-roof-ridge-n {
+  fill: var(--lab-faint);
+  font-size: 10px;
+}
+
+/* ---- the points ---- */
+.lab-roof-dot {
+  fill: var(--lab-panel);
+  stroke-width: 2.5;
+  cursor: help;
+}
+.lab-roof-pt-naive .lab-roof-dot { stroke: var(--lab-bad, #c0392b); }
+.lab-roof-pt-tiled .lab-roof-dot { stroke: var(--lab-accent, #007aff); }
+.lab-roof-pt-doc .lab-roof-dot { stroke: var(--lab-ok, #0f7b52); }
+/* The configuration's own point is the one the reader is moving, so it gets a
+ * fill rather than a hollow ring: at a glance, which dot is mine. */
+.lab-roof-pt-tiled .lab-roof-dot { fill: var(--lab-accent, #007aff); }
+
+.lab-roof-pt-l {
+  font-size: 11px;
+  fill: var(--lab-fg, #1f2937);
+}
+.lab-roof-pt-naive .lab-roof-pt-l { fill: var(--lab-bad, #c0392b); }
+.lab-roof-pt-tiled .lab-roof-pt-l { fill: var(--lab-accent, #007aff); }
+.lab-roof-pt-doc .lab-roof-pt-l { fill: var(--lab-ok, #0f7b52); }
+
+.lab-roof-note {
+  margin: 6px 2px 0;
+  color: var(--lab-dim, #6b7280);
+  font-size: 11px;
+  line-height: 1.6;
+}

@@ -45,6 +45,12 @@ what keeps "every number on the page is the output of one of these scripts"
 literally true for a parameterised lab: `T` is applied as `x/T` here, not on the
 page, and a configuration with no trace behind it is unreachable by construction.
 
+`gemm_tiling.py` (L01) follows the same shape for `(B_M, B_N, B_K)`: 27
+configurations — the full product of {2, 4, 8} per parameter, every one of which
+divides M=N=K=8 — plus `gemm-tiling.manifest.json`. The sliders are therefore
+three independent controls rather than three positions of one knob, and the
+filter that would skip a non-dividing tile is in the generator's `grid()`.
+
 The generators that have landed so far: `online_softmax.py` (L00),
 `gemm_tiling.py` (L01), `kv_cache.py` (L05), `continuous_batching.py` (L10),
 `ring_allreduce.py` (L13), `flash_attention.py` (L06).
@@ -58,6 +64,12 @@ ticket #45), `continuous_batching.py` has `gantt` for the gantt view (ticket
 (`labs/assets/engine/views/tiling-stage.js`, ticket #20). Writing that fixture
 is how a view ticket breaks the circular dependency — the lab that would consume
 it is blocked by the view, but trace generation does not depend on the view.
+
+The Roofline is the one view whose contract is a *trace-level block* rather than
+step fields, and it follows the gantt's precedent instead: its rules live beside
+the view (`views/roofline.js`) and beside the generator, both carry a sabotage
+control group, and the acceptance harness runs the same table through both. It
+is reached from any lab with a `meta.roofline` block; L01 is the only one so far.
 
 The other half of that coin is what a shared component must NOT do. Because
 `tiling-stage.js` is driven by four different labs, every rule its lint carries
@@ -116,6 +128,57 @@ different labs share one view component.
   how many times. `flash_forbidden_accesses` must be 0 and
   `standard_forbidden_accesses` must NOT be — the second half is the control that
   makes the first mean anything, and the lint enforces both.
+
+## The `roofline` block (added by ticket #15)
+
+L01's parameter sliders needed a picture to move, and this is it. One trace-level
+block, optional, consumed by `labs/assets/engine/views/roofline.js`:
+
+```jsonc
+"meta": {
+  "traffic":  { "naive_reads": 1024, "tiled_reads": 256, "tiled_ai": 1.0,
+                "tiled_ai_closed": 1.0, "load_steps": 8, "smem_tile": 32, … },
+  "roofline": { "peak_flops": 1.57e13, "bandwidth": 9e11, "ridge": 17.44,
+                "x_label": "算术强度 (FLOP/Byte)",
+                "y_label": "可达算力上界 (TFLOP/s)",
+                "y_divisor": 1e12, "y_unit": "TFLOP/s",
+                "points": [ { "id": "naive"|"tiled"|"doc", "ai": …,
+                              "elements": …, "bytes": …, "flops": …,
+                              "ceiling": …, "bound": "bandwidth"|"compute" } ] }
+}
+```
+
+What the lint requires, and why each rule has two sides:
+
+- **`ai` is `flops / bytes`, re-derived per point.** The page's parameter story
+  is two statements about one quantity — "读取 1024 → 256 个元素" and "算术强度
+  0.25 → 2.0" — so the point carries its own FLOP and byte counts and the rule
+  recomputes the quotient from them. A page that quoted both would otherwise be
+  making two independent claims about the same kernel.
+- **`ceiling` is `min(peak_flops, bandwidth × ai)`, and `bound` names the roof
+  that produced it.** It is a CEILING, not a measurement: nothing in this lab
+  times a kernel, and the field is named and displayed so a reader is not misled
+  into reading a bound as an achieved rate.
+- **`naive` and `tiled` are THIS configuration's problem**, so their element
+  counts must equal `meta.traffic`'s counts and their FLOPs must equal 2MNK.
+  `doc` is the tutorial's 128-cubed example and is deliberately NOT tied to this
+  trace's sizes — tying it would be the wrong rule, not a stricter one.
+- **`y_divisor` and `y_unit` must agree with `y_label`.** A chart whose label
+  reads TFLOP/s while its ticks are FLOP/s is wrong by exactly the factor
+  between them, and no reader can see it.
+- **The naive point's `ai` must be `2K/8K`** — a function of the problem size
+  alone. This is the cross-configuration control: the tiled point is the one the
+  sliders move, and its movement only means something because this one holds
+  still. `gemm_tiling.py` asserts the same thing across the whole grid, at the
+  set level rather than the trace level.
+
+`B_K` is the interesting case and the block records the asymmetry honestly.
+Under this traffic model each output block walks the whole K range, so B_K
+cancels out of the element count — which is exactly why the tutorial's §4.3
+closed form, `B_M·B_N/(2(B_M+B_N))`, has no B_K in it. So `tiled_reads` and
+`tiled_ai` are invariant across B_K, while `load_steps` and `smem_tile` scale
+with it; the generator asserts both directions, and the page says which is
+which rather than leaving a reader to conclude the middle slider is broken.
 
 ## The `ledger` block (added by ticket #45)
 

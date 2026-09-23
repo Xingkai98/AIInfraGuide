@@ -6,12 +6,13 @@
     <title>L01 · GEMM 分块与数据搬运 - AIInfraGuide</title>
     <meta
       name="description"
-      content="GEMM 的分块回放：从单个输出点的点积，到 8×8 的 C 铺满，再到 A/B 的 tile 在 HBM → SMEM → REG 三层之间搬运。"
+      content="GEMM 的分块回放：从单个输出点的点积，到 8×8 的 C 铺满，再到 A/B 的 tile 在 HBM → SMEM → REG 三层之间搬运。B_M/B_N/B_K 可调，访存次数与算术强度随之重算，Roofline 图上的点跟着移动。"
     />
     <link rel="canonical" href="./01-gemm-tiling.html" />
     <link rel="stylesheet" href="./assets/vendor/katex/katex.min.css" />
     <link rel="stylesheet" href="./assets/engine/lab.css" />
     <link rel="stylesheet" href="./assets/engine/views/tiling-stage.css" />
+    <link rel="stylesheet" href="./assets/engine/views/roofline.css" />
     <style>
       :root { color-scheme: light dark; }
       body {
@@ -50,10 +51,104 @@
         color: #1f2937;
       }
       @media (prefers-color-scheme: dark) { .lab-banner { color: #e5e7eb; } }
-      /* The stage is the point of this page, so it gets the full width above the
-         engine's two-column block rather than a slot inside it. */
+
+      /* ------------------------------------------------------------- L01 views
+       *
+       * This page's own chrome, so it lives here rather than in the shared
+       * lab.css: the generic panels in that file are used by every lab, and the
+       * view components other tickets own live beside it. Keeping L01's
+       * parameter bar and readout in L01's page is what keeps those from
+       * colliding.
+       *
+       * Colours are inherited from the engine's custom properties, so these
+       * follow the light/dark theme without a second palette.
+       */
+      .l01-params {
+        margin: 0 0 12px;
+        padding: 10px 14px;
+        border: 1px solid var(--lab-line, #e3e6ec);
+        border-radius: 12px;
+        background: var(--lab-panel, #fff);
+        color: var(--lab-fg, #1f2937);
+        font-size: 13px;
+      }
+      .l01-params-row { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; }
+      .l01-param { display: flex; align-items: center; gap: 8px; }
+      .l01-param-label { font: 600 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--lab-dim, #6b7280); }
+      .l01-param-name { color: var(--lab-accent-2, #b45309); }
+      .l01-param input[type="range"] { width: 96px; accent-color: var(--lab-accent, #007aff); cursor: pointer; }
+      .l01-param-val {
+        font: 650 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: var(--lab-accent, #007aff);
+        min-width: 22px;
+        text-align: right;
+      }
+      .l01-param-hint { color: var(--lab-faint, #9ca3af); font-size: 11.5px; margin-left: auto; }
+      .l01-params-note {
+        margin-top: 8px;
+        padding: 6px 10px;
+        border-radius: 8px;
+        background: color-mix(in srgb, var(--lab-accent-2, #b45309) 12%, transparent);
+        color: var(--lab-accent-2, #b45309);
+        font-size: 12px;
+      }
+      .l01-params-note[hidden] { display: none; }
+
+      /* ------------------------------------------------------------- readout
+       *
+       * The config's numbers, printed OUTSIDE the player's mount on purpose:
+       * the player replaces a panel's innerHTML on every paint, so anything the
+       * page injects into a panel body is wiped by the next frame. These are
+       * per-configuration values, not per-step ones, so they belong beside the
+       * sliders rather than inside a panel at all.
+       */
+      .l01-readout {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 26px;
+        margin: 0 0 12px;
+        padding: 10px 14px;
+        border: 1px solid var(--lab-line, #e3e6ec);
+        border-radius: 12px;
+        background: var(--lab-panel, #fff);
+        color: var(--lab-fg, #1f2937);
+      }
+      .l01-group { min-width: 210px; }
+      .l01-group-t {
+        display: block;
+        font-size: 11px;
+        font-weight: 650;
+        color: var(--lab-dim, #6b7280);
+        margin-bottom: 6px;
+      }
+      .l01-metric { display: inline-block; margin: 0 16px 6px 0; color: var(--lab-dim, #6b7280); font-size: 11.5px; }
+      .l01-metric b {
+        display: block;
+        color: var(--lab-fg, #1f2937);
+        font: 650 15px/1.25 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .l01-metric.good b { color: var(--lab-ok, #0f7b52); }
+      .l01-metric.move b { color: var(--lab-accent, #007aff); }
+      /* The B_K panel is deliberately the quiet one: B_K does NOT move the
+       * traffic or the intensity, and a reader who sees this row beside the two
+       * moving ones has the asymmetry stated rather than implied. */
+      .l01-metric.flat b { color: var(--lab-faint, #9ca3af); }
+      .l01-bk {
+        flex: 1 1 240px;
+        color: var(--lab-dim, #6b7280);
+        font-size: 11.5px;
+        line-height: 1.6;
+        border-left: 1px solid var(--lab-line, #e3e6ec);
+        padding-left: 16px;
+      }
+      .l01-bk b { color: var(--lab-fg, #1f2937); }
+
+      /* The stage and the Roofline are the two pictures this page is about, so
+         they get the full width above the engine's two-column block rather than
+         a slot inside it. */
       .lab-stage-panel { margin-bottom: 14px; }
       .lab-stage-panel .lab-tensor-host { max-height: 420px; overflow: auto; }
+      .lab-roof-panel { margin-bottom: 14px; }
     </style>
   </head>
   <!--
@@ -67,28 +162,20 @@
         public/labs/*.html, so this page lands beside assets/ and must use
         ./assets/… — a ../ would 404 the whole engine.
 
-    The page holds a trace and a config. Every algorithmic decision — state
-    reconstruction, layout, formula tiers, playback — lives in the engine; the
-    memory-hierarchy stage is one view component under assets/engine/views/.
+    The page holds a trace SET and a config. Every algorithmic decision —
+    state reconstruction, layout, formula tiers, playback — lives in the engine;
+    the memory-hierarchy stage and the Roofline plot are two view components
+    under assets/engine/views/. This file is the wiring between them.
   -->
   <body data-pagefind-ignore>
     <a class="lab-back" href="./">← 全部实验室</a>
     <p class="lab-banner" id="lab-banner" hidden></p>
 
-    <main id="lab"></main>
+    <div id="lab-params"></div>
+    <div id="lab-readout"></div>
+    <div id="lab-stage"></div>
 
-    <p class="lab-provenance">
-      本页每个数字都来自一次真实的 numpy 运行，不是手编的演示数据。
-      trace 由 <code>labs/traces/gemm_tiling.py</code> 生成，它做三件事：
-      ① 用朴素 k 序循环算一遍 C，再用 <b>B_M=B_N=B_K=4 的分块循环</b>算一遍，断言两者
-      <b>逐位相同</b>（分块改变的是搬运顺序，不该改变算术结果）；
-      ② 与 <b>torch</b> 的 float64 matmul 对拍；
-      ③ 用引擎的契约 lint 自查，并跑一组「故意破坏」的对照组 —— 破坏必须被抓到，否则那份
-      「0 gap」不算数。不通过就拒绝写文件。
-      引擎本身在 <code>labs/assets/engine/</code>，内存层级舞台是其中一个视图组件
-      （<code>views/tiling-stage.js</code>），不含任何 GEMM 专属逻辑 ——
-      L06 的 FlashAttention 双层舞台是同一份代码换一份层配置。
-    </p>
+    <p class="lab-provenance" id="lab-provenance"></p>
 
     <!-- KaTeX is vendored, never a CDN: a lab page must make zero external requests. -->
     <script src="./assets/vendor/katex/katex.min.js"></script>
@@ -99,99 +186,368 @@
     <script src="./assets/engine/tensors.js"></script>
     <script src="./assets/engine/narrow.js"></script>
     <script src="./assets/engine/views/tiling-stage.js"></script>
+    <script src="./assets/engine/views/roofline.js"></script>
     <script src="./assets/engine/player.js"></script>
     <script src="./assets/engine/verify.js"></script>
 
     <!--
-      The trace is substituted here at build time from labs/traces/<name>.json
-      (see the trace-inlining step in scripts/build-labs.mjs). Inlining it —
-      rather than fetching it — is what makes "the lab page is data plus config"
-      literally true, and it makes trace/page drift impossible: the page cannot
-      disagree with the JSON it was built from.
+      The whole trace set — the manifest plus every configuration it names — is
+      substituted here at build time (see the trace-set step in
+      scripts/build-labs.mjs). The manifest is written by the generator, so the
+      sliders' positions and the traces behind them are defined in one place and
+      cannot drift apart: a configuration with no trace is unreachable by
+      construction.
     -->
-    <!-- trace:gemm-tiling -->
+    <!-- traces:gemm-tiling -->
 
     <script>
       (function () {
         'use strict';
+
+        var SET = 'gemm-tiling';
         var traces = window.LabTraces || {};
-        var trace = traces['gemm-tiling'];
-        if (!trace) {
-          document.getElementById('lab').textContent =
-            'trace 未加载：本页的 trace 占位符没有被构建脚本替换。';
+        var manifest = (window.LabTraceSets || {})[SET];
+        var esc = LabEngine.formula.escapeText;
+
+        var paramsHost = document.getElementById('lab-params');
+        var readoutHost = document.getElementById('lab-readout');
+        var stage = document.getElementById('lab-stage');
+        var banner = document.getElementById('lab-banner');
+
+        if (!manifest || !traces[manifest.default]) {
+          stage.textContent = 'trace 未加载：本页的 trace 集合占位符没有被构建脚本替换。';
           return;
         }
 
-        var banner = document.getElementById('lab-banner');
-        var params = new URLSearchParams(location.search);
-        var badStep = params.get('step');
-        if (badStep !== null && (isNaN(parseInt(badStep, 10)) ||
-            parseInt(badStep, 10) < 0 || parseInt(badStep, 10) > trace.steps.length - 1)) {
-          banner.hidden = false;
-          banner.textContent = '深链里的 ?step=' + badStep + ' 超出范围（本 trace 共 ' +
-            trace.steps.length + ' 步），已停在第一步。';
+        var PARAMS = [
+          ['B_M', 'M 方向块大小'],
+          ['B_N', 'N 方向块大小'],
+          ['B_K', 'K 方向块大小']
+        ];
+
+        /* -------------------------------------------------------------- ids
+         *
+         * Config ids are `<set>-BM<b>-BN<b>-BK<b>`. The page never builds one by
+         * hand outside `configId`, and every id it does build is looked up in
+         * the manifest first — a name the generator did not produce has to be
+         * unreachable, or the sliders would be offering a configuration with no
+         * trace behind it.
+         */
+        function configId(v) {
+          return SET + '-BM' + v.B_M + '-BN' + v.B_N + '-BK' + v.B_K;
         }
 
-        /* The stage's layer config. Layer ids are the `at` values the trace's
-         * tensors use; everything else here is presentation. L06's stage is the
-         * same call with two entries — HBM and SRAM — which is the whole reason
-         * the count is configurable. */
-        var stagePanel = LabEngine.tilingStage.panel({
-          id: 'stage',
-          label: '内存层级舞台',
-          layers: [
-            { id: 'HBM', label: 'Global Memory', sub: '容量最大，带宽最低（~900 GB/s）' },
-            { id: 'SMEM', label: 'Shared Memory', sub: '块内共享，带宽高一个数量级（~12 TB/s）' },
-            { id: 'REG', label: 'Register', sub: '线程私有，最快（~20 TB/s）' }
-          ],
-          /* Read as a plain-language caption on each block. The default is the
-           * tensor name, which is the right thing for a GPU-model trace; here
-           * the tensor names are the model's own, so the panel adds nothing. */
-          emptyText: '本步没有数据块在这一层 —— 朴素实现在这里跳过了 SMEM'
-        }, { trace: trace });
+        function valueFromId(id) {
+          var m = /^gemm-tiling-BM(\d+)-BN(\d+)-BK(\d+)$/.exec(id);
+          return m ? { B_M: Number(m[1]), B_N: Number(m[2]), B_K: Number(m[3]) } : null;
+        }
 
-        var player = LabEngine.lab(trace, {
-          mount: '#lab',
-          title: 'GEMM 分块与数据搬运',
-          lead: '先把 C 的一个输出点展开成 K 次乘加，再铺满整个 8×8 的 C，然后引入 tiling：' +
-                'A、B 的 tile 沿 K 迭代，从 HBM 搬到 SMEM，再从 SMEM 搬进寄存器做外积。' +
-                '同一份 C，HBM 读取从 1024 个元素降到 256 个。',
-          tier: 'num',
-          speed: 1100,
-          panels: [stagePanel],
-          tutorial: {
-            href: '/AIInfraGuide/cuda/模块二-cuda编程与算子优化/41-cuda-gemm算子性能优化',
-            label: '返回教程正文：4.1 CUDA GEMM算子性能优化'
+        /* ------------------------------------------------------------- numbers
+         *
+         * Every value below comes straight out of the trace's own meta blocks.
+         * The only transformation is choosing how wide a number reads on screen
+         * — nothing here computes a traffic count, an intensity or a ceiling,
+         * which is what keeps "every number on the page is the output of the
+         * generator" literally true for a page whose whole subject IS those
+         * numbers.
+         */
+        function num(v, digits) {
+          if (v === null || v === undefined) return '—';
+          if (typeof v !== 'number') return String(v);
+          var s = v.toPrecision(digits || 4);
+          return s.replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
+        }
+
+        function metric(label, value, cls, attr) {
+          return '<span class="l01-metric' + (cls ? ' ' + cls : '') + '"' +
+                 (attr ? ' data-metric="' + esc(attr) + '"' : '') + '>' +
+                 '<b>' + esc(value) + '</b>' + esc(label) + '</span>';
+        }
+
+        /* ------------------------------------------------------------ readout
+         *
+         * The ticket asks for two quantities to recompute with the sliders —
+         * 访存次数 and 算术强度 — and the readout is where a reader checks
+         * that they did. Both are printed as `naive → tiled`, because the
+         * naive side is the control: it is the same on every configuration, and
+         * seeing it hold still while the tiled side moves is what makes the
+         * movement attributable to the tile rather than to the page redrawing.
+         *
+         * `data-metric` on each item is the acceptance harness's handle: it
+         * reads these back off the DOM and compares them to the trace, so a page
+         * that printed a number the trace does not contain fails the build.
+         */
+        function readout(trace) {
+          var tr = trace.meta.traffic;
+          var roof = trace.meta.roofline;
+          var tiled = null;
+          roof.points.forEach(function (p) { if (p.id === 'tiled') tiled = p; });
+          var cfg = trace.meta.config;
+
+          var html = '<div class="l01-group">' +
+            '<span class="l01-group-t">访存（HBM 元素数）</span>' +
+            metric('朴素 → 本分块', num(tr.naive_reads) + ' → ' + num(tr.tiled_reads),
+                   'move', 'reads') +
+            metric('复用倍数', num(tr.reuse, 3) + '×', 'move', 'reuse') +
+            metric('载入次数', num(tr.load_steps), 'move', 'load_steps') +
+            metric('SMEM tile 元素数', num(tr.smem_tile), 'move', 'smem_tile') +
+            '</div>';
+
+          html += '<div class="l01-group">' +
+            '<span class="l01-group-t">算术强度（FLOP/Byte）</span>' +
+            metric('朴素 → 本分块', num(tr.naive_ai) + ' → ' + num(tr.tiled_ai),
+                   'move', 'ai') +
+            metric('紧致上界', num(tiled.ceiling / 1e12) + ' TFLOP/s',
+                   tiled.bound === 'compute' ? 'good' : '', 'ceiling') +
+            metric('受限于', tiled.bound === 'compute' ? '算力' : '带宽',
+                   '', 'bound') +
+            metric('平衡点 ridge', num(roof.ridge), '', 'ridge') +
+            '</div>';
+
+          /* The B_K row, and why it is the quiet one.
+           *
+           * Under this traffic model each output block walks the whole K range,
+           * so chunking K changes only how the loads are GROUPED: total element
+           * traffic is MNK(1/B_M + 1/B_N) and B_K cancels — which is exactly
+           * why the tutorial's §4.3 closed form, B_M·B_N/(2(B_M+B_N)), has no
+           * B_K in it at all. What B_K does buy is the SMEM tile size, which is
+           * §4.2's stated reason for splitting K in the first place, and the
+           * number of load operations.
+           *
+           * A reader who is told "move all three sliders and watch the number
+           * change" and then finds B_K does nothing would reasonably conclude
+           * the lab is broken. So the page says which is which. */
+          /* The comparison B_K=current against B_K=8 is read from the trace
+           * SET, not computed: the page looks up the sibling configuration's
+           * own meta.traffic. So even this sentence quotes two published
+           * numbers rather than one published number and one product. */
+          var widest = traces[configId({ B_M: cfg.B_M, B_N: cfg.B_N, B_K: 8 })];
+          var widestTile = widest ? widest.meta.traffic.smem_tile : null;
+          html += '<div class="l01-bk">' +
+            '<b>B_K 为什么不改上面的元素量：</b>每个输出块都要走完整个 K 方向，' +
+            '把 K 再切细只改变这些载入的<b>分组方式</b>，不改总搬运量 —— ' +
+            '所以教程 §4.3 的闭式 <code>B_M·B_N / (2·(B_M+B_N))</code> 里根本没有 B_K。' +
+            'B_K 买到的是别的东西：本配置的 SMEM tile 是 ' +
+            '<b data-metric="smem_tile_widest">' + num(tr.smem_tile) + '</b> 个元素' +
+            (widestTile === null ? '' :
+              '，而 B_K=8 时是 ' + num(widestTile) + ' 个元素') +
+            '；载入次数按 1/B_K 增长。' +
+            '把三个滑杆都推一推：B_M、B_N 会移动 Roofline 上的点，' +
+            'B_K 只在上面的「载入次数 / SMEM tile」两格和这句话里出现。' +
+            '</div>';
+
+          return '<div class="l01-readout">' + html + '</div>';
+        }
+
+        /* ------------------------------------------------------ the panels */
+        var player = null;
+        var current = null;
+
+        function mount(id) {
+          var trace = traces[id];
+          current = id;
+          if (player) { try { player.destroy(); } catch (e) { /* already gone */ } }
+          stage.innerHTML = '';
+          var slot = document.createElement('main');
+          stage.appendChild(slot);
+
+          var cfg = trace.meta.config;
+
+          /* The stage's layer config. Layer ids are the `at` values the trace's
+           * tensors use; everything else here is presentation. L06's stage is
+           * the same call with two entries — HBM and SRAM — which is the whole
+           * reason the count is configurable. */
+          var stagePanel = LabEngine.tilingStage.panel({
+            id: 'stage',
+            label: '内存层级舞台',
+            layers: [
+              { id: 'HBM', label: 'Global Memory', sub: '容量最大，带宽最低（~900 GB/s）' },
+              { id: 'SMEM', label: 'Shared Memory', sub: '块内共享，带宽高一个数量级（~12 TB/s）' },
+              { id: 'REG', label: 'Register', sub: '线程私有，最快（~20 TB/s）' }
+            ],
+            /* Read as a plain-language caption on each block. The default is the
+             * tensor name, which is the right thing for a GPU-model trace; here
+             * the tensor names are the model's own, so the panel adds nothing. */
+            emptyText: '本步没有数据块在这一层 —— 朴素实现在这里跳过了 SMEM'
+          }, { trace: trace });
+
+          /* The Roofline, driven by this configuration's own meta.roofline.
+           * Its render ignores the cursor: the point is a property of the
+           * configuration, so it holds still while the replay runs and moves
+           * only when the sliders do — which is the behaviour the ticket asks
+           * for, and the reason it can be asserted at all. */
+          var roofPanel = LabEngine.roofline.panel({
+            id: 'roofline',
+            label: 'Roofline：这次分块买到了什么'
+          }, { trace: trace });
+
+          player = LabEngine.lab(trace, {
+            mount: slot,
+            title: 'GEMM 分块与数据搬运',
+            lead: '先把 C 的一个输出点展开成 K 次乘加，再铺满整个 8×8 的 C，然后引入 tiling：' +
+                  'A、B 的 tile 沿 K 迭代，从 HBM 搬到 SMEM，再从 SMEM 搬进寄存器做外积。' +
+                  '当前分块 B_M=' + cfg.B_M + '、B_N=' + cfg.B_N + '、B_K=' + cfg.B_K +
+                  '（' + trace.steps.length + ' 步）。',
+            tier: 'num',
+            speed: 1100,
+            panels: [stagePanel, roofPanel],
+            tutorial: {
+              href: '/AIInfraGuide/cuda/模块二-cuda编程与算子优化/41-cuda-gemm算子性能优化',
+              label: '返回教程正文：4.1 CUDA GEMM算子性能优化'
+            }
+          });
+
+          /* Compact proof panel. It carries the control group, so a green
+             verdict here means something -- see labs/assets/engine/verify.js. */
+          var proof = document.createElement('section');
+          proof.className = 'lab-panel lab-panel-extra';
+          proof.innerHTML = '<div class="lab-panel-hd"><span class="lab-panel-t">自检 · 引擎正确性</span>' +
+            '<span class="lab-panel-sub">在浏览器里真跑，不是预期值</span></div>' +
+            '<div class="lab-panel-bd" style="padding:10px 12px"></div>';
+          slot.appendChild(proof);
+          LabEngine.verify.panel(proof.querySelector('.lab-panel-bd'), trace, player.index);
+
+          /* The stage and the Roofline are the two pictures this page is about,
+             and the DAG is the index to them — so they go first, above the
+             engine's own block, in the order the argument is made. The engine's
+             own panels keep their order; this is the page choosing which of its
+             views lead. */
+          var stageEl = document.querySelector('[data-panel="stage"]');
+          if (stageEl) {
+            stageEl.classList.add('lab-stage-panel');
+            document.querySelector('.lab-panel-dag').before(stageEl);
           }
-        });
+          var roofEl = document.querySelector('[data-panel="roofline"]');
+          if (roofEl) {
+            roofEl.classList.add('lab-roof-panel');
+            document.querySelector('.lab-panel-dag').before(roofEl);
+          }
 
-        /* Compact proof panel. It carries the control group, so a green verdict
-           here means something -- see labs/assets/engine/verify.js. */
-        var proof = document.createElement('section');
-        proof.className = 'lab-panel lab-panel-extra';
-        proof.innerHTML = '<div class="lab-panel-hd"><span class="lab-panel-t">自检 · 引擎正确性</span>' +
-          '<span class="lab-panel-sub">在浏览器里真跑，不是预期值</span></div>' +
-          '<div class="lab-panel-bd" style="padding:10px 12px"></div>';
-        document.getElementById('lab').appendChild(proof);
-        LabEngine.verify.panel(proof.querySelector('.lab-panel-bd'), trace, player.index);
+          readoutHost.innerHTML = readout(trace);
 
-        /* The stage panel renders into the engine's container, which the player
-           places after the DAG. On L01 the memory traffic is the subject and
-           the DAG is the index to it, so the stage goes first — the engine's
-           own panels keep their order, this is the page choosing which of its
-           views leads. */
-        var panelEl = document.querySelector('[data-panel="stage"]');
-        if (panelEl) {
-          panelEl.classList.add('lab-stage-panel');
-          document.querySelector('.lab-panel-dag').before(panelEl);
+          /* The player handle, for the acceptance harness in
+           * scripts/verify-tiling-stage.py and scripts/verify-l01-params.py.
+           * Exposing it is harmless in production and it is the only way a
+           * harness can assert against the same object the page drives, rather
+           * than against a re-implementation of it. */
+          window.__p = player;
+          window.__labTrace = trace;
+          window.__labConfig = id;
+          window.__labManifest = manifest;
+          window.__labTraces = traces;
+          return player;
         }
 
-        /* The player handle, for the acceptance harness in
-         * scripts/verify-tiling-stage.py. Exposing it is harmless in production
-         * and it is the only way the harness can assert against the same object
-         * the page drives, rather than against a re-implementation of it. */
-        window.__p = player;
-        window.__labTrace = trace;
+        /* ------------------------------------------------------ the sliders */
+        function buildParamBar() {
+          var state = valueFromId(current);
+          var html = '<div class="l01-params"><div class="l01-params-row">';
+          PARAMS.forEach(function (p) {
+            var key = p[0];
+            var opts = manifest.params[key];
+            var i = opts.indexOf(state[key]);
+            html += '<div class="l01-param">' +
+              '<span class="l01-param-label">' + p[1] + '</span>' +
+              '<span class="l01-param-label l01-param-name">' + esc(key) + '</span>' +
+              '<input type="range" min="0" max="' + (opts.length - 1) + '" step="1" value="' + i +
+                '" data-param="' + key + '" aria-label="' + esc(p[1]) + '">' +
+              '<span class="l01-param-val" data-param-val="' + key + '">' +
+                esc(String(state[key])) + '</span>' +
+              '</div>';
+          });
+          html += '<span class="l01-param-hint">改动会重新载入对应配置的 trace，' +
+            '页面上的数字与两颗点随之变化（' + manifest.traces.length +
+            ' 组合法分块，全部由同一个脚本生成）</span>';
+          html += '</div><div class="l01-params-note" id="l01-params-note" hidden></div></div>';
+
+          paramsHost.innerHTML = html;
+          Array.prototype.forEach.call(
+            paramsHost.querySelectorAll('input[data-param]'),
+            function (input) {
+              input.addEventListener('input', function () {
+                var key = input.dataset.param;
+                var opts = manifest.params[key];
+                var next = valueFromId(current);
+                next[key] = opts[Number(input.value)];
+                apply(next);
+              });
+            }
+          );
+        }
+
+        function note(msg) {
+          var el = document.getElementById('l01-params-note');
+          if (!el) return;
+          el.hidden = !msg;
+          el.textContent = msg || '';
+        }
+
+        function apply(values) {
+          var id = configId(values);
+          if (manifest.traces.indexOf(id) === -1) {
+            /* Reported rather than silently ignored: a slider that moves and
+               does nothing is worse than one that explains itself. Reachable
+               only if the grid ever stops being a full product — every (2, 4,
+               8) tile divides M=N=K=8, so today no position is empty. */
+            note('配置 ' + id + ' 没有对应的 trace（生成脚本没有产出这一组）。' +
+                 '能整除 8 的 B_M/B_N/B_K 组合都被生成了，所以这一格是空的。');
+            buildParamBar();
+            return;
+          }
+          note('');
+          var url = new URL(location.href);
+          url.searchParams.set('cfg', id);
+          url.searchParams.set('step', '0');
+          try { history.replaceState(null, '', url); } catch (e) { /* file:// */ }
+          mount(id);
+          buildParamBar();
+        }
+
+        /* Deep links: ?cfg= and ?step=, each announced when out of range rather
+           than silently ignored — the same terms the player uses. */
+        var query = new URLSearchParams(location.search);
+        var messages = [];
+        var requestedCfg = query.get('cfg');
+        if (requestedCfg && manifest.traces.indexOf(requestedCfg) === -1) {
+          messages.push('深链里的 ?cfg=' + requestedCfg + ' 不在本页内联的 ' +
+            manifest.traces.length + ' 个配置里，已载入默认配置 ' + manifest.default + '。');
+        }
+        var startId = requestedCfg && manifest.traces.indexOf(requestedCfg) !== -1
+          ? requestedCfg : manifest.default;
+        valueFromId(startId);      // fail fast if the manifest's naming drifts
+        mount(startId);
+        buildParamBar();
+
+        var requestedStep = query.get('step');
+        if (requestedStep !== null) {
+          var n = parseInt(requestedStep, 10);
+          var len = traces[startId].steps.length;
+          if (isNaN(n) || n < 0 || n > len - 1) {
+            messages.push('深链里的 ?step=' + requestedStep + ' 超出范围（本配置共 ' +
+              len + ' 步），已停在第一步。');
+          }
+        }
+        if (messages.length) {
+          banner.hidden = false;
+          banner.textContent = messages.join(' ');
+        }
+
+        document.getElementById('lab-provenance').innerHTML =
+          '本页每个数字都来自一次真实的 numpy 运行，不是手编的演示数据。' +
+          'trace 由 <code>labs/traces/gemm_tiling.py</code> 生成，它做四件事：' +
+          '① 用朴素 k 序循环算一遍 C，再用当前分块循环算一遍，断言两者 <b>逐位相同</b>' +
+          '（分块改变的是搬运顺序，不该改变算术结果）—— 这条断言对 <b>全部 ' +
+          manifest.traces.length + ' 组</b>分块各跑一次；' +
+          '② 与 <b>torch</b> 的 float64 matmul 对拍；' +
+          '③ 把访存次数、算术强度、以及 Roofline 上的点算出来写进 trace 的 ' +
+          '<code>meta.traffic</code> / <code>meta.roofline</code> —— ' +
+          '滑杆只是在这些<b>已经生成好的配置之间</b>切换，浏览器里不算任何东西；' +
+          '④ 用引擎的契约 lint 自查，并跑一组「故意破坏」的对照组 —— 破坏必须被抓到，' +
+          '否则那份「0 gap」不算数。不通过就拒绝写文件。' +
+          '引擎本身在 <code>labs/assets/engine/</code>，' +
+          '内存层级舞台（<code>views/tiling-stage.js</code>）与 Roofline 图' +
+          '（<code>views/roofline.js</code>）是其中两个视图组件，都不含任何 GEMM 专属逻辑 ——' +
+          'L06 的 FlashAttention 双层舞台是同一份舞台代码换一份层配置。';
       })();
     </script>
   </body>
