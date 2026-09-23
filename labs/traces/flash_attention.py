@@ -526,14 +526,14 @@ def torch_reference(Q, K, V):
 
     The result crosses back through `.tolist()` rather than `.numpy()`, and that
     is deliberate rather than stylistic. `.numpy()` goes through torch's numpy
-    BRIDGE, which is compiled against the numpy ABI the wheel was built for -- so
-    a CI image that installs an unpinned numpy (2.x) next to `torch==2.2.0`
-    (built against 1.x) fails at that call with "Numpy is not available", after
-    having imported torch successfully and run every pure-torch operation in this
-    function without complaint. `.tolist()` is a plain tensor-to-Python
-    conversion with no numpy involved, so this reference keeps working across
-    that version skew and the failure mode is a wrong number rather than an
-    import error nobody can reproduce locally.
+    BRIDGE, which is compiled against the numpy ABI the wheel was built for, so
+    the call breaks with "Numpy is not available" whenever the installed numpy
+    and the torch wheel disagree on major version -- after torch has imported
+    fine and every pure-torch operation here has already run, which makes it read
+    as a broken script instead of a version skew. `.tolist()` is a plain
+    tensor-to-Python conversion with no numpy involved, so this reference works
+    under either numpy. (The workflow pins `numpy<2` against `torch==2.2.0` for
+    the same reason; this is the half that does not depend on the pin holding.)
     """
     Qt = torch.tensor(Q, dtype=torch.float64)
     Kt = torch.tensor(K, dtype=torch.float64)
