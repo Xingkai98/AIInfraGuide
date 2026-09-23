@@ -110,6 +110,26 @@ export const LAB_REGISTRY: Record<string, LabEntry> = {
     ],
     published: true,
   },
+  '模块三-分布式训练/21-集合通信原语详解': {
+    labId: 'L13',
+    title: 'Ring AllReduce 逐帧回放',
+    summary:
+      'N 卡环形：ReduceScatter 与 AllGather 各 N−1 步，每步看哪几条链路在传、每张卡的缓冲区里哪一块攒到了几份；通信量累计曲线与朴素中心化、Tree 两条对照共用一根轴。卡数可在 2 / 4 / 8 之间切换。',
+    page: `${LAB_BASE}/03-ring-allreduce.html`,
+    links: [
+      { label: '从第一步开始' },
+      // Step 3 is the LAST ReduceScatter step, and it is the only frame that
+      // shows what the first phase bought: every rank holds exactly one
+      // complete chunk, and a different one each. Every earlier step is a
+      // half-built picture whose point is not legible yet.
+      { label: '跳到 ReduceScatter 收尾（每卡各攒出一块）', search: '?n=4&step=3' },
+      // 8 ranks, AllGather done: the widest ring on offer, and the frame where
+      // the 8× gap between the hub's link and the ring's is at full height in
+      // the accumulator.
+      { label: '跳到 8 卡全部收齐', search: '?n=8&step=14' },
+    ],
+    published: true,
+  },
 };
 
 /**
