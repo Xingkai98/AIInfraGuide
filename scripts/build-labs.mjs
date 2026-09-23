@@ -46,7 +46,15 @@ for (const [from, to] of STAGED) {
   if (!existsSync(fromPath)) continue;
   const toPath = path.join(destRoot, to);
   await mkdir(toPath, { recursive: true });
-  await cp(fromPath, toPath, { recursive: true });
+  /* `pages/shots/` holds the acceptance screenshots. They are committed as
+   * review assets — so a reader can see what each lab renders without running
+   * the harness — but they are not part of the site: serving them costs ~6 MB
+   * and grows with every lab. Excluded here rather than kept in a sibling
+   * directory because the harness writes them next to the page they document. */
+  await cp(fromPath, toPath, {
+    recursive: true,
+    filter: (src) => path.basename(src) !== 'shots',
+  });
   staged += await countFiles(fromPath);
 }
 
