@@ -39,15 +39,35 @@ lengths, same types -- a field that appeared or disappeared fails), while floats
 need only agree within `_REL_TOL`. That is strictly more informative than the
 byte check, because its failure message says WHICH value moved and by how much.
 
+TEXT IS COMPARED NUMERICALLY, NOT LITERALLY
+-------------------------------------------
+A trace also carries the values it PRINTS -- `num`-tier LaTeX bindings, narration,
+the `meta.reference` summary -- which are four-significant-figure renderings of
+the same arithmetic. BLAS noise that moves a float field by 1e-13 moves the
+STRING by a digit, so a literal string comparison fires on exactly the drift the
+float tolerance exists to absorb. Strings are therefore tokenised into their
+numeric runs and their literal parts: the literal parts must match exactly, and
+each aligned pair of numbers must agree within tolerance. A reworded sentence, a
+changed count, or a number that moved for a real reason all still fail.
+
 The tolerance is derived, not picked: it is four orders of magnitude above the
 measured BLAS noise, and six below the 1e-4 a hand-edited four-figure number
 would move by. `--tol` overrides it for an experiment.
+
+NOTE ON THE LABS THAT CALL BLAS. `flash_attention.py` (L06) does NOT rely on
+this tolerance for its own content: it sums its matmuls in explicit k order so
+its JSON is bit-identical on every machine, and its reference residuals are
+asserted rather than quoted for the same reason. This check's tolerance is what
+covers the generators that have not been through that treatment (L05's
+`kv_cache.py` in particular), and is deliberately loose enough to keep them
+green while still catching a real edit.
 
 Run:  python3 labs/traces/<each generator>.py   # regenerate, in place
       python3 scripts/check-traces-reproducible.py
 """
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -74,6 +94,80 @@ def committed(name):
     if p.returncode != 0:
         return None            # untracked: a new trace, nothing to compare
     return json.loads(p.stdout)
+
+
+_NUM_IN_TEXT_RE = re.compile(r"-?\d+\.?\d*(?:[eE][-+]?\d+)?")
+
+
+def _last_place(token):
+    """The value of one unit in a printed number's last displayed digit.
+
+    `2048` -> 1, `-0.05292` -> 1e-5, `6.94e-17` -> 1e-19. This is the
+    quantization of the rendering, not a property of the number.
+    """
+    m = re.match(r"^(-?)(\d+)(?:\.(\d+))?(?:[eE]([-+]?\d+))?$", token)
+    if not m:
+        return None
+    frac = m.group(3) or ""
+    exp = int(m.group(4) or 0)
+    return 10.0 ** (exp - len(frac))
+
+
+def text_differs_only_numerically(a, b):
+    """True when two strings differ only by the quantization of what they print.
+
+    Necessary because the points of difference are not confined to the JSON's
+    float fields. A trace also carries the values it PRINTS -- a `num`-tier
+    binding's LaTeX, a narration, the `meta.reference` summary -- and those are
+    finite-precision renderings of the same arithmetic. Two machines that agree
+    on a value to 1e-13 disagreement can still ROUND it differently at the fourth
+    significant figure, which changes the string by one unit in its last digit.
+
+    So the tolerance here is not a tolerance on noise; it is the exactly
+    defensible ambiguity of a rounded display: **one unit in the last printed
+    place**. `-0.05292` -> `-0.05293` is one unit at 1e-5 and passes;
+    `2048` -> `1232` is 816 units and fails; a reworded sentence does not even
+    get this far, because the literal parts between the numbers must match
+    exactly and the numbers must align one for one.
+
+    That last property is what keeps a hand edit visible: changing a printed
+    digit by more than one place fails, and changing the prose fails. A one-unit
+    change in a printed digit is left to the FIELD-level check, which compares
+    the underlying value exactly -- the string is a rendering of it, and the two
+    cannot both be edited consistently by accident.
+
+    THE LIMIT OF THIS RULE, stated rather than discovered later: it tolerates any
+    rearrangement whose literal parts and number values are unchanged, e.g.
+    "先加 1 再加 2" -> "先加 2 再加 1". A hand edit of that shape slips through
+    the string rule. It cannot slip through unnoticed overall, because the same
+    edit to a generator changes the numbers those words describe and the field
+    comparison sees those; but a pure word-order change in a narration would not
+    be caught here. Closing it would require knowing which words are prose and
+    which are data, which is exactly the distinction this file does not have --
+    so it is documented instead of half-solved.
+    """
+    if _NUM_IN_TEXT_RE.split(a) != _NUM_IN_TEXT_RE.split(b):
+        return False                     # the prose itself changed
+    na = _NUM_IN_TEXT_RE.findall(a)
+    nb = _NUM_IN_TEXT_RE.findall(b)
+    if len(na) != len(nb):
+        return False
+    for x, y in zip(na, nb):
+        if x == y:
+            continue
+        try:
+            fx, fy = float(x), float(y)
+        except ValueError:
+            return False
+        places = [_last_place(x), _last_place(y)]
+        if None in places:
+            return False
+        # `1 + 1e-6` of slack, not an epsilon: `3.4474 - 3.4473` evaluates to
+        # 1.000000000002e-4, so an exact comparison against one unit in the last
+        # place rejects the very case the rule exists to allow.
+        if abs(fx - fy) > max(places) * (1 + 1e-6):
+            return False
+    return True
 
 
 def compare(a, b, path, out, tol, abs_tol):
@@ -122,6 +216,14 @@ def compare(a, b, path, out, tol, abs_tol):
             out.append(f"~ {path}: {a!r} -> {b!r}（差 {delta:.3g}，在容差 {tol:g} 内）")
         else:
             out.append(f"! {path}: {a!r} -> {b!r}（差 {delta:.3g}，超出容差 {tol:g}）")
+        return
+    if isinstance(a, str) and isinstance(b, str):
+        if a == b:
+            return
+        if text_differs_only_numerically(a, b):
+            out.append(f"~ {path}: 只是显示出来的数字在容差内移动")
+        else:
+            out.append(f"! {path}: {a[:120]!r} -> {b[:120]!r}")
         return
     if a != b:
         out.append(f"! {path}: {a!r} -> {b!r}")

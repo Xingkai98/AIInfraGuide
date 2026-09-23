@@ -345,6 +345,67 @@ def blank_store(n, d, Q, K, V, with_sp=True):
     return store
 
 
+def mm(X, Y):
+    """`X @ Y` in float64, with the k loop written out in order.
+
+    WHY NOT JUST USE `@`. Because the trace is a committed artifact whose values
+    the page PRINTS, and `@` dispatches to a BLAS kernel whose summation order
+    depends on the CPU and the BLAS build. The result is correct to within
+    round-off and NOT reproducible: regenerating on another machine moved values
+    in the fourth significant figure the page displays (`-0.05292` -> `-0.05293`)
+    and rewrote the prose in `meta.reference` that quotes the residual. A reader
+    regenerating this file got a different page, which is exactly the property
+    the committed-JSON workflow exists to prevent.
+
+    Written out rather than reassociated or FMA'd, so the k order is 0..K-1 on
+    every machine -- the same device `gemm_tiling.py` uses for its scalar model,
+    and for the same reason ("plain Python floats... so the k-order really is
+    0..7"). The matrices here are at most 128x16, so the loops cost ~10ms; a
+    blocked BLAS kernel would be faster and would not be reproducible.
+    """
+    x = np.asarray(X, dtype=np.float64)
+    y = np.asarray(Y, dtype=np.float64)
+    if x.ndim != 2 or y.ndim != 2:
+        raise ValueError("mm expects 2-D operands")
+    n, k = x.shape
+    k2, m = y.shape
+    if k != k2:
+        raise ValueError(f"mm: {x.shape} @ {y.shape} does not contract")
+    out = np.zeros((n, m), dtype=np.float64)
+    for i in range(n):
+        xi = x[i]
+        oi = out[i]
+        for p in range(k):
+            a = xi[p]
+            if a == 0.0:
+                continue
+            yp = y[p]
+            for j in range(m):
+                oi[j] += a * yp[j]
+    return out
+
+
+def dot(a, b):
+    """`a · b` with the same in-order guarantee as `mm`."""
+    x = np.asarray(a, dtype=np.float64).ravel()
+    y = np.asarray(b, dtype=np.float64).ravel()
+    acc = 0.0
+    for i in range(x.shape[0]):
+        acc += x[i] * y[i]
+    return acc
+
+
+def l2norm(a):
+    """Frobenius norm, in order. `np.linalg.norm` routes through a BLAS
+    reduction, so its last bits are machine-dependent too -- and this number is
+    shown to the reader in the correction amplifier."""
+    x = np.asarray(a, dtype=np.float64).ravel()
+    acc = 0.0
+    for i in range(x.shape[0]):
+        acc += x[i] * x[i]
+    return math.sqrt(acc)
+
+
 def standard_attention(Q, K, V, mem):
     """The baseline FlashAttention replaces: three kernels, S and P materialised.
 
@@ -360,7 +421,7 @@ def standard_attention(Q, K, V, mem):
     scale = 1.0 / math.sqrt(Q.shape[1])
     Qm = mem.read("Q", (slice(None), slice(None)))
     Km = mem.read("K", (slice(None), slice(None)))
-    S = (Qm @ Km.T) * scale
+    S = mm(Qm, Km.T) * scale
     mem.write("S", (slice(None), slice(None)), S)
     Sm = mem.read("S", (slice(None), slice(None)))
     P = np.exp(Sm - Sm.max(axis=1, keepdims=True))
@@ -368,7 +429,7 @@ def standard_attention(Q, K, V, mem):
     mem.write("P", (slice(None), slice(None)), P)
     Pm = mem.read("P", (slice(None), slice(None)))
     Vm = mem.read("V", (slice(None), slice(None)))
-    O = Pm @ Vm
+    O = mm(Pm, Vm)
     mem.write("O", (slice(None), slice(None)), O)
     return np.asarray(O)
 
@@ -442,7 +503,7 @@ def flash_attention(Q, K, V, br, bc, mem, correct=True, record=False):
             # point of the lab, so their cost is measured rather than assumed to
             # be zero.
             mark = mem.mark()
-            S = (Qi @ Kj.T) * scale
+            S = mm(Qi, Kj.T) * scale
             s_cost = mem.since(mark)
 
             mark = mem.mark()
@@ -465,7 +526,7 @@ def flash_attention(Q, K, V, br, bc, mem, correct=True, record=False):
             l_cost = mem.since(mark)
 
             mark = mem.mark()
-            O_new = (alpha * li / l_new)[:, None] * Oi + (P / l_new[:, None]) @ Vj
+            O_new = (alpha * li / l_new)[:, None] * Oi + mm(P / l_new[:, None], Vj)
             o_cost = mem.since(mark)
 
             mark = mem.mark()
@@ -731,8 +792,8 @@ def step_corr(fr, fr_bad):
     """
     kind = correction_kind(fr)
     r = int(np.argmin(fr["alpha"]))
-    o_ok = float(np.linalg.norm(fr["O_new"]))
-    o_bad = float(np.linalg.norm(fr_bad["O_new"]))
+    o_ok = l2norm(fr["O_new"])
+    o_bad = l2norm(fr_bad["O_new"])
     bias = abs(o_bad - o_ok)
     return {
         "kind": kind,
@@ -758,8 +819,8 @@ def build_correction(frames, frames_bad, O_flash, O_bad):
     per_block = []
     for f in sorted(frames, key=lambda f: (f["j"], f["i"])):
         kind = correction_kind(f)
-        o_ok = float(np.linalg.norm(f["O_new"]))
-        o_bad = float(np.linalg.norm(bad_by[(f["i"], f["j"])]["O_new"]))
+        o_ok = l2norm(f["O_new"])
+        o_bad = l2norm(bad_by[(f["i"], f["j"])]["O_new"])
         per_block.append({
             "n": len(per_block) + 1,
             "kind": kind,
@@ -775,8 +836,8 @@ def build_correction(frames, frames_bad, O_flash, O_bad):
         "rescales": sum(1 for e in per_block if e["kind"] == "rescale"),
         "rows": sum(e["rows_scaled"] for e in per_block),
         "rows_total": sum(len(f["alpha"]) for f in frames),
-        "final_o_correct": float(np.linalg.norm(O_flash)),
-        "final_o_uncorrected": float(np.linalg.norm(O_bad)),
+        "final_o_correct": l2norm(O_flash),
+        "final_o_uncorrected": l2norm(O_bad),
         "final_bias_abs": final_abs,
         "final_bias_rel": final_abs / float(np.max(np.abs(O_flash))),
         "note": "「不修正」= 同一条递推里 α 恒为 1，其余一字不改。factor 取本块 min α、"
@@ -908,7 +969,17 @@ def build_trace(n, d, m, title, source):
     d_std = max_abs_diff(O_flash, O_std)
     d_torch = max_abs_diff(O_flash, O_torch)
     d_xcheck = max_abs_diff(O_std, O_torch)
-    for label, delta in (("numpy 标准实现", d_std), ("torch 参考实现", d_torch)):
+
+    # The residuals against torch are `O(n eps)` NOISE whose leading digits come
+    # from whichever BLAS built `O_torch`, so they are not reproducible even
+    # though everything above is -- and an earlier version of this file quoted
+    # them in `meta.reference`, which meant two machines produced two different
+    # prose strings for the same trace ("6.94e-17" vs "5.55e-17"). The page now
+    # quotes the derived BOUND instead, which is a property of the algorithm; the
+    # per-machine residuals appear only here, in an assertion, where a value that
+    # changes between runs is exactly what is wanted.
+    for label, delta in (("numpy 标准实现", d_std), ("torch 参考实现", d_torch),
+                         ("numpy 标准实现 vs torch", d_xcheck)):
         if delta > bound:
             raise AssertionError(
                 f"FA 与 {label} 的最大偏差 {delta:.3e} 超过推导上界 {bound:.3e} —— "
@@ -1131,7 +1202,7 @@ def build_trace(n, d, m, title, source):
                  b("QL", r"Q_i[0]", r"Q_{i}[0,:]", vec_tex(list(fr["Qi"][0]))),
                  b("S00", r"(Q_i K_j^\top)[0,0]",
                    r"(Q_{i} K_{j}^\top)[0,0]",
-                   fmt(float(fr["Qi"][0] @ fr["Kj"][0]))),
+                   fmt(dot(fr["Qi"][0], fr["Kj"][0]))),
                  b("SNUM", r"S_{ij}[0,0]", r"S_{ij}[0,0]", fmt(float(fr["S"][0][0])))],
                 ["Q_i", "K_j"], ["S"],
                 {"S": mat(fr["S"])},
@@ -1385,9 +1456,9 @@ def build_trace(n, d, m, title, source):
          b("SPC", r"\text{次}", "0", "0")],
         ["Q", "K", "V"], [],
         {},
-        f"回放结束。两个实现的输出一致 —— 与 torch 参考实现的最大偏差是 {disp(d_torch)}，"
-        f"在设计推算的求和顺序上界 {disp(bound)} 之内（numpy 标准实现与 torch 之间是 "
-        f"{disp(d_xcheck)}）。但 HBM 访问量差了 {disp(ratio)} 倍：标准实现 "
+        f"回放结束。三个实现（分块递推、numpy 标准版、torch）的输出一致，两两之间都在"
+        f"按求和顺序推算的上界 {disp(bound)} 之内 —— 分块改变的是搬运和求和顺序，"
+        f"不是结果。但 HBM 访问量差了 {disp(ratio)} 倍：标准实现 "
         f"{measured_std['elements']} 个元素，FlashAttention {measured_flash['elements']} 个。"
         f"差别全在 S、P 上：标准实现把它们各写一遍、各读一遍，FlashAttention 的访问日志里"
         f"这两个名字共出现 <b>0</b> 次。{slower_hint}",
@@ -1439,12 +1510,14 @@ def build_trace(n, d, m, title, source):
                        "n_blocks": n_pairs, "n_pairs": n_pairs, "n_steps": len(steps)},
             "loop_order": LOOP_ORDER_NOTE,
             "reference": (
-                f"FA 输出与 numpy 标准实现最大偏差 {d_std:.3g}、与 torch.softmax 参考 "
-                f"{d_torch:.3g}，均在设计推算的求和顺序上界 {bound:.3g} 之内"
-                f"（相对容差 {_CHECK_REL_TOL:g}，float64）；漏掉修正因子的影子递推偏差 "
-                f"{d_shadow:.3g}，被同一判据抓到；HBM 访问 S/P：FA 0 次、标准实现 "
-                f"{std_sp_accesses} 次；IO 标准 {measured_std['elements']} → FA "
-                f"{measured_flash['elements']} 个元素"
+                # The residuals are asserted, not quoted -- see the note at the
+                # assertion. This line is a statement about the algorithm, and it
+                # has to read the same on every machine that regenerates it.
+                f"FA、numpy 标准实现、torch.softmax 三者输出两两一致，偏差均在设计推算的"
+                f"求和顺序上界 {bound:.3g} 之内（相对容差 {_CHECK_REL_TOL:g}，float64）；"
+                f"漏掉修正因子的影子递推被同一判据抓到（影子递推读取代价与正确版逐位"
+                f"相同）；HBM 访问 S/P：FA 0 次、标准实现 {std_sp_accesses} 次；"
+                f"IO 标准 {measured_std['elements']} → FA {measured_flash['elements']} 个元素"
             ),
             "exposure": {
                 "claim": "S 和 P 在整趟回放里从不落到 HBM",
