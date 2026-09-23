@@ -338,7 +338,16 @@ labs/
 
 另配一个 `--inline` 打包脚本按需生成单文件分享版，**但必须用"聪明版"写法**：JS/CSS/trace 以**文本**内联，base64 **只用于字体**（对已压缩的 woff2，gzip 后 base64 仅 +1%；而对文本文件 base64 会破坏 gzip 的 LZ77 匹配，多花 50%）。朴素全 base64 版实测比正确版多 17%。
 
-**站点集成**：lab 页面放 `public/labs/`，加一个 Astro 的 `/labs` 索引页（含依赖 DAG），并在对应教程正文的 `<Content />` 之前插入入口卡片。**入口卡片通过 `src/utils/` 下的映射表驱动，不由 frontmatter 字段驱动**——后者需要改动约 21 篇教程正文，会显著放大从 upstream 合并时的冲突面。全部 lab 相关改动收敛在新文件里。
+**目录契约**（T02 落地时细化，比本节早期版本的说法更好）：`labs/` 是**入库的源码树**，`public/labs/` 是**它的 gitignore 构建产物**，由 `scripts/build-labs.mjs` 作为 `npm run build` 与 `npm run dev` 的第一步生成。选这个拆分而不是把源码直接放 `public/` 下，有一个结构性理由：**`labs/traces/` 绝不能发布出去**，而这个布局让这条保证**由构造保证**，而不是靠一条可能写错的排除规则。附带好处是暂存时会先清空目标目录，删掉的 lab 页不会残留成陈旧产物。
+
+**站点集成**：加一个 Astro 的 `/labs` 索引页（含依赖 DAG，数据在 `src/utils/labRoadmap.ts`），并在对应教程正文的 `<Content />` 之前插入入口卡片（`src/components/LabEntryCard.astro`）。**入口卡片通过 `src/utils/labRegistry.ts` 驱动，不由 frontmatter 字段驱动**——后者需要改动约 21 篇教程正文，会显著放大从 upstream 合并时的冲突面。实测结果：`docs/guides/` **零改动**，`GuideContent.astro` 只加了 10 行。
+
+**两个只有检查产物才发现得出来的坑**（写在这里免得后面 17 个 lab 重踩）：
+
+1. **`data-pagefind-ignore` 必须包在 `<body>` 上，加在 `<meta>` 标签上完全无效**——Pagefind 照样索引。构建日志看页数正常，要解压索引分片才能发现。
+2. **暂存会把 `labs/pages/x.html` 拍平到 `public/labs/x.html`**，于是页面与 `assets/` 同级，`../assets/` 会 404 掉整个 KaTeX。正确写法是 `./assets/`。已加构建期资源解析检查并做了反向测试。
+
+**guide id 的格式陷阱**：Astro 内容集合的 glob loader 会 **slug 化** id 且**含完整目录路径**——`5.2-CUDA Online Softmax实现.md` → `模块二-cuda编程与算子优化/52-cuda-online-softmax实现`。照文件名手写 key **不会报错，只会静默不渲染卡片**。`labRegistry.ts` 文件头写明了格式与获取真实 key 的方法（构建后读产物），并有断言让未知 guide id 直接构建失败。
 
 **KaTeX vendoring**：`npm i katex` 后把 `dist/` 拷进 `labs/assets/vendor/katex/`，**保持原始目录结构**（`katex.min.css` 必须与 `fonts/` 同级，否则 CSS 里的相对字体路径会断）。**只带 woff2**（浏览器只取这一种；带上 ttf/woff 会让 vendor 目录胖 3 倍）；**字体取全量 20 个**，这是明确的保守取舍——接受首访从约 145 KB 涨到约 349 KB，换取不冒任何缺字形风险（`\bigoplus`、`\mathbb` 等生僻符号）。
 
@@ -388,5 +397,5 @@ P0 必须先做且要扎实——L06 会用到 L00 的双层内存舞台，L13/L
 三轮 batch grill 全部问完（完整索引见 wayfinder map）。本文档的早期版本列过三个「待定」问题，均已落定：
 
 1. **自包含程度** → 方案 A 共享 assets + 智能 `--inline`。字体：**只 vendor woff2、但取全量 20 个**（不裁剪）——这是一个明确的保守取舍，见 §四。
-2. **站点集成方式** → `public/labs/` + Astro `/labs` 索引页 + 映射工具驱动的入口卡片。
+2. **站点集成方式** → `labs/` 源码树（构建期暂存到 `public/labs/`）+ Astro `/labs` 索引页 + `labRegistry.ts` 驱动的入口卡片。
 3. **Lab 取舍** → 本轮 P0–P4 共 17 个；P5 排后，其正文缺口已单独立票。
