@@ -1,0 +1,237 @@
+/* L00 engine · view: memory-hierarchy stage — styles.
+ *
+ * A separate file from lab.css on purpose: lab.css belongs to the engine core
+ * (issue #13) and is shared by every lab, while this is one view component's
+ * own chrome. Keeping them apart means a change here cannot regress the
+ * player, the DAG or the tensor inspector, and a lab that does not use the
+ * stage never downloads it.
+ *
+ * Colours come from lab.css's custom properties, which are declared on
+ * .lab-root and therefore already in scope — so the stage is theme-aware
+ * without restating either palette.
+ *
+ * A layer bands are sized by content, not by a fixed height: the HBM row holds
+ * 8x8 matrices and the REG row holds 4-element fragments, and forcing them to
+ * the same height would waste a screenful of space to no effect.
+ */
+
+.lab-stage {
+  padding: 10px 12px 14px;
+  font-size: 12px;
+}
+
+/* ---- phase strip: where the cursor is in the replay ---- */
+.lab-stage-phases {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.lab-stage-phase {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 2px 9px;
+  border: 1px solid var(--lab-line);
+  border-radius: 999px;
+  color: var(--lab-dim);
+  background: var(--lab-panel-2);
+  font-size: 11.5px;
+}
+.lab-stage-phase b {
+  color: var(--lab-faint);
+  font-weight: 500;
+  font-size: 10px;
+}
+.lab-stage-phase-on {
+  border-color: var(--lab-accent);
+  color: #ffffff;
+  background: var(--lab-accent);
+}
+.lab-stage-phase-on b { color: rgba(255, 255, 255, 0.75); }
+
+/* ---- a layer band ---- */
+.lab-stage-layer {
+  border: 1px solid var(--lab-line);
+  border-radius: 10px;
+  background: var(--lab-panel-2);
+  padding: 8px 10px 10px;
+}
+.lab-stage-layer-empty {
+  background: transparent;
+  border-style: dashed;
+  opacity: 0.72;
+}
+.lab-stage-layer-hd {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+.lab-stage-layer-id {
+  font: 700 13px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--lab-accent);
+  letter-spacing: 0.02em;
+}
+.lab-stage-layer-label { color: var(--lab-fg); font-weight: 600; }
+.lab-stage-layer-sub { color: var(--lab-faint); font-size: 11px; }
+.lab-stage-layer-count {
+  margin-left: auto;
+  color: var(--lab-faint);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+.lab-stage-layer-empty .lab-stage-layer-id { color: var(--lab-faint); }
+
+/* ---- blocks inside a layer ---- */
+.lab-stage-slots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+  align-items: flex-start;
+}
+.lab-stage-none {
+  color: var(--lab-faint);
+  font-style: italic;
+  font-size: 11.5px;
+  padding: 5px 2px;
+}
+.lab-stage-block {
+  border: 1px solid var(--lab-line);
+  border-radius: 8px;
+  background: var(--lab-panel);
+  padding: 6px 7px 7px;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+/* Read and write tinting mirrors the tensor inspector's badges, so "which
+ * panel is lit" means the same thing in both. */
+.lab-stage-block.lab-stage-read {
+  border-color: color-mix(in srgb, var(--lab-accent) 45%, transparent);
+  background: color-mix(in srgb, var(--lab-accent) 5%, var(--lab-panel));
+}
+.lab-stage-block.lab-stage-wrote {
+  border-color: color-mix(in srgb, var(--lab-accent-2) 55%, transparent);
+  background: color-mix(in srgb, var(--lab-accent-2) 7%, var(--lab-panel));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--lab-accent-2) 25%, transparent);
+}
+.lab-stage-block-hd {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 5px;
+  flex-wrap: wrap;
+}
+.lab-stage-block-id {
+  font: 600 11.5px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--lab-fg);
+}
+.lab-stage-block-shape {
+  color: var(--lab-accent-2);
+  font: 500 10.5px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.lab-stage-block-at {
+  color: var(--lab-faint);
+  font-size: 10px;
+}
+.lab-stage-block-src {
+  color: var(--lab-faint);
+  font-size: 9.5px;
+  margin-left: auto;
+}
+
+/* ---- cell grid + heat map ---- */
+.lab-stage-grid {
+  display: grid;
+  gap: 1px;
+}
+.lab-stage-cell {
+  min-width: 20px;
+  padding: 2px 3px;
+  border: 1px solid var(--lab-line);
+  border-radius: 2px;
+  background: var(--lab-panel-2);
+  color: var(--lab-fg);
+  font: 10.5px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-align: center;
+}
+.lab-stage-cell-dark { color: #ffffff; border-color: transparent; }
+.lab-stage-cell-empty { background: transparent; border-style: dashed; }
+/* The sub-region this step is actually carrying, outlined rather than filled so
+ * the heat map underneath stays readable. */
+.lab-stage-cell-span {
+  outline: 1.5px solid var(--lab-accent-2);
+  outline-offset: -1.5px;
+}
+.lab-stage-block-span { border-color: var(--lab-accent-2); }
+/* Resident but left over from a phase the cursor has moved past: still in the
+ * layer, no longer part of what is being watched. Dimmed rather than hidden --
+ * registers really do keep the value. */
+.lab-stage-block.lab-stage-carried {
+  opacity: 0.5;
+  border-style: dashed;
+}
+.lab-stage-block.lab-stage-carried .lab-stage-block-src {
+  color: var(--lab-dim);
+  font-style: italic;
+}
+
+/* ---- the lanes between layers, where the traffic shows ---- */
+.lab-stage-lane {
+  padding: 3px 0 3px 20px;
+  min-height: 16px;
+}
+.lab-stage-lane-idle {
+  color: var(--lab-faint);
+  font: 10px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+  opacity: 0.5;
+}
+.lab-stage-lane-on .lab-stage-rail { margin-bottom: 2px; }
+
+.lab-stage-rail {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 2px 0;
+}
+.lab-stage-rail-bar {
+  display: block;
+  height: 4px;
+  min-width: 14px;
+  border-radius: 2px;
+  background: linear-gradient(90deg,
+    color-mix(in srgb, var(--lab-accent) 55%, transparent),
+    var(--lab-accent));
+}
+.lab-stage-rail-same .lab-stage-rail-bar {
+  background: linear-gradient(90deg,
+    color-mix(in srgb, var(--lab-accent-2) 50%, transparent),
+    var(--lab-accent-2));
+}
+.lab-stage-rail-n {
+  font: 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--lab-dim);
+  white-space: nowrap;
+}
+.lab-stage-rail-tag {
+  font-size: 9.5px;
+  color: var(--lab-accent-2);
+  border: 1px dashed color-mix(in srgb, var(--lab-accent-2) 50%, transparent);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+.lab-stage-arrow {
+  color: var(--lab-faint);
+  font-size: 10px;
+}
+/* The register-resident FMA is not a transfer between layers; it is drawn
+ * inside the REG band and deliberately reads as secondary. */
+.lab-stage-inband {
+  margin-top: 5px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--lab-line);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lab-stage-block { transition: none; }
+}

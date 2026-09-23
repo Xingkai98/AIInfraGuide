@@ -45,6 +45,23 @@ what keeps "every number on the page is the output of one of these scripts"
 literally true for a parameterised lab: `T` is applied as `x/T` here, not on the
 page, and a configuration with no trace behind it is unreachable by construction.
 
+`online_softmax.py` (L00) is the first generator to land, `gemm_tiling.py` (L01)
+the second.
+
+## Two optional step fields a trace may use
+
+`online_softmax.py` needs neither; `gemm_tiling.py` introduced both. Both live
+on the step, so `resolve(trace, i)` stays a pure function of the cursor.
+
+- **`step.spans`** — the sub-region of a resident block the step touches, one
+  `[lo, hi)` range per axis (`{"A": [[0, 4], [0, 4]]}`). Lets the memory-hierarchy
+  stage outline the 4×4 tile being carried rather than tinting all of A.
+- **`step.flows`** — how much data crossed which layer boundary:
+  `{from, to, elements, bytes?}`. Not derivable from `reads`/`writes`: an
+  accumulator update and a block store both look like a write, and only one of
+  them moves anything. The generator's docstring works through the two cases
+  that make the derivation wrong.
+
 ## Environment
 
 Verified locally: `python3.12`, `numpy 1.26`, `torch 2.2.0` (CPU).
