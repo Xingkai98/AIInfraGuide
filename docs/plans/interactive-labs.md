@@ -54,34 +54,66 @@ labs/
 - **数值可对拍** —— 每个 trace 脚本带断言，与 PyTorch 参考实现比对，CI 里跑，防止动画与算法脱节。
 - **引擎与内容解耦** —— 新增 lab = 写一个 trace 脚本 + 一份视图配置，不用重写播放器。
 
-### 轨迹数据模型（草案）
+### 轨迹数据模型
+
+> **本节的字段是 P01 原型验证后的结果**，不是草案。原型（`prototype/`）用一份手写的 10 步 online softmax trace 真跑过，报告见 `docs/research/engine-prototype-findings.md`。标 **⚠️ 已修正** 的字段是原型发现的设计缺口。
 
 ```jsonc
 {
   "meta": { "title": "Online Softmax", "source": "docs/guides/模块二/5.2", "config": { "N": 8, "Bc": 4 } },
   "tensors": {
-    "x":   { "shape": [8], "dtype": "fp32" },
+    // ⚠️ 已修正：必须给 init。没有任何 step 写 x，但第一步就读它；
+    // 没有 init，render(trace, 0) 从第一步起就是错的（纯函数重建的必要条件）
+    "x":   { "shape": [8], "dtype": "fp32", "at": "HBM", "role": "input",
+             "init": [0.83, -0.20, 1.40, 0.35, 0.12, -1.05, 2.10, 0.44] },
     "Q_i": { "shape": [4, 16], "label": "SRAM" }
   },
   "graph": {
-    "nodes": [ { "id": "step1.max", "op": "max", "phase": "统计量更新" } ],
+    "nodes": [ { "id": "step1.max", "kind": "op", "phase": "统计量更新" } ],
     "edges": [ { "from": "x", "to": "step1.max", "tensor": "x_block" } ]
   },
   "steps": [
     {
       "id": "step1.max",
       "title": "第 1 块：更新运行最大值 m",
-      "formula": "m^{(j)} = \\max\\left(m^{(j-1)},\\; \\max_i x^{(j)}_i\\right)",
-      "bindings": { "j": 1, "m^{(j-1)}": "-\\infty", "\\max_i x^{(j)}_i": "0.83", "m^{(j)}": "0.83" },
-      "reads": ["x_block"], "writes": ["m"],
-      "state": { "m": 0.83, "l": 1.0 },
+      "formula": "m^{(j)} = \\max\\left(\\slot{MOLD},\\; \\slot{BLKMAX}\\right)",
+      "bindings": {
+        // ⚠️ 已修正：slot 的值一律是 LaTeX 片段，且每档显式给出，不靠猜
+        "MOLD":   { "sym": "m^{(j-1)}",     "idx": "m^{(0)}",  "num": "-\\infty" },
+        "BLKMAX": { "sym": "\\max_i x^{(j)}_i", "idx": "\\max_i x^{(1)}_i", "num": "0.83" }
+      },
+      "reads": ["x"], "writes": ["m"],
+      // ⚠️ 已修正：state = "这一步之后所有发生变化的张量值（含中间张量）"，
+      // 且**记全量不记 delta** —— 这是"任意跳转不需要反向操作"的前提条件
+      "state": { "m": "0.83", "l": "1.0" },
+      "regions": { "CORR": "\\exp(\\slot{MOLD} - \\slot{MNEW})" },
       "narration": "第一次进来时 m 是 -∞，所以直接取本块最大值。"
     }
   ]
 }
 ```
 
-通用视图组件四种：**DAG 画布 / 张量检查器 / 公式面板 / 时间轴**。每种 lab 再挂各自主视图。
+**P01 验证后新增/修正的契约要点**：
+
+| 要点 | 说明 |
+|---|---|
+| **`tensors[].init`** | 已修正。每个被读的张量必须有初始值来源，否则纯函数重建从第一步就是错的。 |
+| **±∞ / NaN 哨兵** | 已修正。JSON 表示不了 `-Infinity`。原型靠 Python `json.dumps` 输出裸 `-Infinity`（合法 JS、非法 JSON）绕过，正式版**必须定一个哨兵**（推荐字符串 `"-\infty"`）。 |
+| **`step.state` 语义** | 已修正。写死为「这一步之后所有发生变化的张量值（含中间张量），记**全量**不记 delta」。 |
+| **slot 值一律是 LaTeX** | 已修正。否则 trace 作者写 `1/2` 会拿到斜体分数。`-∞` 要写成 `-\infty`。 |
+| **`kind` 字段** | 保留（原型实测：`comm` 虚线框紫点 / `state` 点线框绿点 / `op` 实线蓝点，视觉上确实可区分）。 |
+| **`regions`** | 新增。公式中需要框出高亮的片段（如修正因子），用 `\region{...}` 标记。 |
+
+**留给后续 lab 的两个真问题**（P0 不用管，但契约要给逃生舱）：
+
+- **`kind: "alloc"`**（改外部资源、不改张量，如 PagedAttention 分配物理块）的 `state` 写什么？→ L09 定。
+- **KV cache 逐 token 追加**若不想记全量快照（O(N²) 体积），需要 delta + 反向操作。→ L05/L09 定。契约**预留**可选的 `snapshot` / `inverse` 字段，**但现在不实现**——别为了 L05/L09 给所有 lab 增加复杂度。
+
+**通用视图组件四种**：**DAG 画布 / 张量检查器 / 公式面板 / 时间轴**。每种 lab 再挂各自主视图。
+
+**DAG 分层必须补「顺序边」**（P01 实测的硬结论）：只按数据依赖分层，`load` 这类「只读不写、无前驱」的步骤会卡在第 0 层，层宽随块数线性增长（10→74 节点时最宽层从 3 涨到 19），画布变成 8:1 的横条。补上合成的顺序边（`step i → i+1`，只参与分层、不画出来）后每层恰好 1 个节点。再叠折行策略（层数 > 10 时每 6–8 层折一段），42 节点从「一团绞线」变成 1024×633 的可读图。
+
+**lint 是 trace 的一部分**：原型的 `lint()` 规则（读写一致性、graph/steps 一致性、三档完整性、三元组形状、`state` 里的未声明张量、narration 混入 LaTeX）应搬到 Python 侧或 CI 里，`labs/traces/*.py` 输出 JSON 后立刻自查。原型验证过 lint 的有效性：干净 trace 报 0，故意破坏的副本报 11 个。
 
 ---
 
@@ -308,7 +340,17 @@ labs/
 
 **站点集成**：lab 页面放 `public/labs/`，加一个 Astro 的 `/labs` 索引页（含依赖 DAG），并在对应教程正文的 `<Content />` 之前插入入口卡片。**入口卡片通过 `src/utils/` 下的映射表驱动，不由 frontmatter 字段驱动**——后者需要改动约 21 篇教程正文，会显著放大从 upstream 合并时的冲突面。全部 lab 相关改动收敛在新文件里。
 
-**KaTeX vendoring**：`npm i katex` 后把 `dist/` 拷进 `labs/assets/vendor/katex/`，**保持原始目录结构**（`katex.min.css` 与 `fonts/` 同级，否则 CSS 里的相对字体路径会断）。**只带 woff2**（浏览器只取这一种；带上 ttf/woff 会让 vendor 目录胖 3 倍）；**字体取全量 20 个**，这是明确的保守取舍——接受首访从约 145 KB 涨到约 349 KB，换取不冒任何缺字形风险（`\bigoplus`、`\mathbb` 等生僻符号）。公式渲染拆成「静态骨架 + 动态数值 span」，拖动时间轴时只更新数值文本，不重跑 KaTeX。
+**KaTeX vendoring**：`npm i katex` 后把 `dist/` 拷进 `labs/assets/vendor/katex/`，**保持原始目录结构**（`katex.min.css` 必须与 `fonts/` 同级，否则 CSS 里的相对字体路径会断）。**只带 woff2**（浏览器只取这一种；带上 ttf/woff 会让 vendor 目录胖 3 倍）；**字体取全量 20 个**，这是明确的保守取舍——接受首访从约 145 KB 涨到约 349 KB，换取不冒任何缺字形风险（`\bigoplus`、`\mathbb` 等生僻符号）。
+
+**公式渲染**（⚠️ 本节此前写「拆成静态骨架 + 动态数值 span，只更新数值文本」，**P01 实测证明照做会在屏幕上打出 LaTeX 源码**）：
+
+原因是**触发替换的恰恰是符号式公式**——`\slot{BLKMAX}` 在符号档要替换成 `\max_i x^{(j)}_i`，这本身就是 LaTeX，直接 `textContent` 会把反斜杠原样打到屏幕上。原型里真出现了。
+
+**正确做法**（已验证）：骨架按「步骤 × 档位」构建一次并复用，每个 slot 的值**单独跑一次小 KaTeX 渲染**塞进 KaTeX 自己生成的 `<span>`。三个实测细节：`\htmlId` / `\htmlClass` 必须配 `trust: true`（否则静默不生成元素）；**不要用 KaTeX 的 macro 回调取双花括号参数**（KaTeX 交回的是反序词法 token，`\slot{MOLD}` 到手是 `"DLOM"`），改为自己写花括号配对的预处理；`\region` 的 body 里常嵌 `\slot`，预处理**必须递归**。
+
+`\region` 高亮用 `\htmlClass` 即可，**不要用 Range / `surroundContents`**——跨 KaTeX 的 span 边界时必然抛 `InvalidStateError`（原型已排除这条死路）。
+
+**性能不是这么做的理由**：实测全量渲染只要 **0.35 ms/帧**（60fps 预算的 2%），骨架复用 0.008 ms/帧——**两者都不是瓶颈**。真正的大头是 DOM（重绘 DAG 的 `innerHTML` 重建要 0.47 ms/帧，比 KaTeX 还大）。所以：**拆分方案值得做，但理由应该是它顺带解决了 `\region` 高亮**；若 `\region` 用别的方式实现，每帧全量重渲 KaTeX 是最简单且够快的方案。优化精力应花在 DOM 增量更新（改 class 而非重建，顺带解决节点焦点丢失）上。
 
 ---
 
