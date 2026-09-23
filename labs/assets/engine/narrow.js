@@ -47,10 +47,12 @@
     html += '<h1 class="lab-narrow-title">' + esc(title) + '</h1>';
     if (lead) html += '<p class="lab-narrow-lead">' + esc(lead) + '</p>';
 
-    var facts = [];
-    if (cfg.N !== undefined) facts.push('N = ' + cfg.N);
-    if (cfg.Bc !== undefined) facts.push('Bc = ' + cfg.Bc);
-    if (cfg.n_blocks !== undefined) facts.push('块数 = ' + cfg.n_blocks);
+    /* The trace's own `meta.config` is rendered as-is. Naming the keys here
+     * would make this shared component know about one lab's parameters — and
+     * the next lab's would be different. `label` is the only optional key. */
+    var facts = Object.keys(cfg)
+      .filter(function (k) { return k !== 'label' && cfg[k] !== null && typeof cfg[k] !== 'object'; })
+      .map(function (k) { return k + ' = ' + cfg[k]; });
     facts.push('共 ' + trace.steps.length + ' 步');
     if (facts.length) {
       html += '<div class="lab-narrow-facts">' +
