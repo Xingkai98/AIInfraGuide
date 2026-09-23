@@ -6,11 +6,12 @@ built artifact in `public/labs/` (so it exercises the same inlined trace and
 flattened asset paths a reader gets), asserts the acceptance criteria one by
 one, and only then takes screenshots.
 
-Run:  npx python3 ... (see README) — needs `npm run build:labs` first and
-`pip install playwright && playwright install chromium`.
+Run:  npm run build:labs && python3 scripts/verify-labs.py
+Needs `pip install playwright && playwright install chromium`.
 
 Everything it checks is printed; a non-zero exit means at least one acceptance
-criterion failed. Screenshots land in `labs/pages/shots/`.
+criterion failed. Screenshots land in `labs/pages/shots/` (committed, so a
+reviewer can see the rendered result without running this).
 """
 
 import json
@@ -19,11 +20,13 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
-HERE = Path(__file__).resolve().parent
-REPO = HERE.parent.parent
+# This lives in scripts/ but verifies labs/, so paths are stated relative to the
+# repo root rather than to this file's directory — the two differ, and getting
+# it wrong fails silently as "page not found".
+REPO = Path(__file__).resolve().parent.parent
 PAGE = REPO / "public" / "labs" / "00-online-softmax.html"
-SHOTS = HERE / "shots"
-SHOTS.mkdir(exist_ok=True)
+SHOTS = REPO / "labs" / "pages" / "shots"
+SHOTS.mkdir(parents=True, exist_ok=True)
 
 W, H = 1600, 1000
 

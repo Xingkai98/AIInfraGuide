@@ -37,10 +37,10 @@ labs/
 构建时替换成 `labs/traces/NAME.json` 的内容（包在 `window.LabTraces.NAME` 里）。
 这样页面与 JSON 不可能漂移 —— 它们就是同一份数据。JSON 缺失会直接构建失败。
 
-**引擎的验收脚本**：`python3 labs/pages/verify.py`（需先 `npm run build:labs`）。
-它在真 Chromium 里跑完整条验收清单并出截图到 `labs/pages/shots/`。
-其中「任意跳转」同时跑纯函数重建与**故意做错的有状态对照组** —— 只有对照组确实失败，
-纯函数的「0 次不一致」才算数。
+**引擎的验收脚本**：`npm run build:labs && python3 scripts/verify-labs.py`。
+它在真 Chromium 里跑完整条验收清单并出截图到 `labs/pages/shots/`（截图入库，
+审阅时不必自己跑一遍）。其中「任意跳转」同时跑纯函数重建与**故意做错的有状态对照组** ——
+只有对照组确实失败，纯函数的「0 次不一致」才算数；两者都过时脚本会报「无区分力」而不是通过。
 
 `labs/pages/*.html` 会被 `scripts/build-labs.mjs` **拍平**拷进 `public/labs/`，再由 Astro 原样复制到 `dist/`。所以：
 

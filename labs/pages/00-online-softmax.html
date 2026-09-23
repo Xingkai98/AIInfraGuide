@@ -105,7 +105,8 @@
         var traces = window.LabTraces || {};
         var trace = traces['online-softmax'];
         if (!trace) {
-          document.getElementById('lab').textContent = 'trace 未加载：assets/traces/online-softmax.js 缺失。';
+          document.getElementById('lab').textContent =
+            'trace 未加载：本页的 trace 占位符没有被构建脚本替换。';
           return;
         }
 
@@ -141,7 +142,7 @@
         document.getElementById('lab').appendChild(proof);
         LabEngine.verify.panel(proof.querySelector('.lab-panel-bd'), trace, player.index);
 
-        /* The player handle, for the acceptance harness in verify.py. Exposing
+        /* The player handle, for the acceptance harness in scripts/verify-labs.py. Exposing
          * it is harmless in production and it is the only way the harness can
          * assert against the same object the page drives, rather than against a
          * re-implementation of it. */
