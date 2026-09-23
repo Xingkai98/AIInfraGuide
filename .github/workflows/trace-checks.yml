@@ -62,13 +62,16 @@ jobs:
 
       # The generated JSON is committed, and the pages are built from it, so a
       # hand-edited or stale JSON would ship. Re-running the generators above
-      # must reproduce it byte for byte. The scripts are deterministic by
-      # construction (fixed inputs, no sampling), which is what makes this a
-      # valid check rather than a flaky one.
+      # must reproduce what is committed.
+      #
+      # NOT `git diff --exit-code`. The inputs are fixed, but the ARITHMETIC is
+      # not: a trace recording `A @ B` records what the BLAS kernel on THIS
+      # machine produced, and its summation order depends on the CPU -- so the
+      # byte-for-byte requirement was unsatisfiable for any trace that does a
+      # matmul (four of the six generators, including L05's kv-cache.json, which
+      # was already failing this on `feat/interactive-labs`). The replacement
+      # compares structure and strings exactly and floats within a tolerance
+      # derived from the measured drift; see the script's docstring for why that
+      # is strictly MORE informative than the byte diff, not weaker.
       - name: Check that committed traces are up to date
-        run: |
-          if ! git diff --exit-code -- labs/traces/; then
-            echo "::error::A committed trace does not match its generator's output."
-            echo "Run the scripts in labs/traces/ and commit the regenerated JSON."
-            exit 1
-          fi
+        run: python scripts/check-traces-reproducible.py
