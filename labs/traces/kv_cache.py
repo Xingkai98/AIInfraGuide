@@ -551,7 +551,14 @@ def build_trace(cfg, p):
         # --- check 1 & 2: the cache path agrees with both uncached references.
         ctx = before + ids_this
         torch_out = torch_forward_uncached(ctx, cfg, p)
-        checks.append((f"{pid}.vs-torch", logits, np.asarray(torch_out.numpy())))
+        # `.tolist()`, not `.numpy()`: the latter goes through torch's numpy
+        # BRIDGE, which is compiled against the ABI the wheel was built for. CI
+        # installs numpy unpinned (2.x today) next to `torch==2.2.0` (built
+        # against 1.x), and that call then raises "Numpy is not available" --
+        # after every pure-torch operation in the reference has already run, so
+        # the failure reads as a broken script rather than as a version skew.
+        # The conversion is bit-identical and involves no numpy at all.
+        checks.append((f"{pid}.vs-torch", logits, np.asarray(torch_out.tolist())))
         no_cache_logits, _, _, _, _, _ = cached_forward(ctx, cfg, p, None, None, pid)
         checks.append((f"{pid}.vs-own-no-cache", logits, no_cache_logits))
 
