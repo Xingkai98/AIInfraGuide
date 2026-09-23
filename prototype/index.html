@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>PROTOTYPE — 引擎抽象验证 (issue #12)</title>
+<link rel="stylesheet" href="vendor/katex/katex.min.css">
+<style>
+  :root{
+    --bg:#12151b; --panel:#1a1f28; --panel2:#212733; --line:#2e3644;
+    --fg:#dde3ec; --dim:#8b97a8; --faint:#5b6675;
+    --accent:#4ea1ff; --accent2:#ffcc66; --ok:#5fd39a; --bad:#ff6b6b;
+    --slot:#ffcc66; --region:#ff8fb1;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:13px/1.5 -apple-system,"Segoe UI",system-ui,"Noto Sans CJK SC",sans-serif}
+  h1{font-size:15px;margin:0;font-weight:600}
+  .proto-banner{background:#4a2b1a;border-bottom:1px solid #7a4a2a;color:#ffb87a;
+    padding:5px 14px;font-size:11.5px;letter-spacing:.02em}
+  .proto-banner b{color:#ffd9a8}
+  header{padding:10px 14px 8px;border-bottom:1px solid var(--line);
+    display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+  header .meta{color:var(--dim);font-size:11.5px}
+  header .meta code{color:var(--accent);font-size:11px}
+  .wrap{padding:10px 14px 40px;display:flex;flex-direction:column;gap:10px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:6px}
+  .panel > .hd{display:flex;align-items:center;gap:10px;padding:7px 11px;
+    border-bottom:1px solid var(--line);font-size:11.5px;color:var(--dim)}
+  .panel > .hd .t{color:var(--fg);font-weight:600;font-size:12px}
+  .panel > .bd{padding:11px}
+  .row2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.25fr);gap:10px}
+  .ctl{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--dim);margin-left:auto}
+  button,select{background:var(--panel2);color:var(--fg);border:1px solid var(--line);
+    border-radius:4px;padding:3px 9px;font:inherit;font-size:11.5px;cursor:pointer}
+  button:hover{border-color:var(--accent);color:#fff}
+  button.on{background:#25456b;border-color:var(--accent);color:#fff}
+  button:disabled{opacity:.45;cursor:default}
+  select{padding:2px 6px}
+  .seg{display:inline-flex;gap:0}
+  .seg button{border-radius:0;margin-left:-1px}
+  .seg button:first-child{border-radius:4px 0 0 4px;margin-left:0}
+  .seg button:last-child{border-radius:0 4px 4px 0}
+
+  /* ---------- DAG ---------- */
+  #dagbox{overflow:hidden;background:#161a22;border-radius:5px}
+  #dag{display:block;width:100%;height:auto}
+  .nd rect{fill:#232a36;stroke:#3c4658;stroke-width:1.2;rx:5}
+  .nd text{fill:#c3cddc;font:600 9.5px/1 ui-monospace,monospace;text-anchor:middle}
+  .nd .sub{fill:#6f7c8e;font:400 7.5px/1 ui-monospace,monospace}
+  .nd{transition:opacity .18s}
+  .nd .halo{fill:none;stroke:transparent;stroke-width:2.5;rx:7}
+  .nd.visited rect{fill:#1d232c;stroke:#333c4b}
+  .nd.visited text{fill:#7b8698}
+  .nd.visited .sub{fill:#535d6c}
+  .nd.current rect{fill:#1e3a5c;stroke:var(--accent);stroke-width:1.8}
+  .nd.current text{fill:#eaf2ff}
+  .nd.current .halo{stroke:rgba(78,161,255,.30)}
+  .nd.future{opacity:.30}
+  .nd.kind-comm rect{stroke-dasharray:3 2.5}
+  .nd.kind-state rect{stroke-dasharray:1 2.5}
+  .kinddot{fill:#7a8698}
+  .kind-comm .kinddot{fill:#c98cff}
+  .kind-state .kinddot{fill:#5fd39a}
+  .kind-op .kinddot{fill:#4ea1ff}
+  .eg{stroke:#39424f;stroke-width:1.1;fill:none;marker-end:url(#arw)}
+  .eg.visited{stroke:#4a566a}
+  .eg.current{stroke:var(--accent);stroke-width:2}
+  .eglbl{fill:#5d6878;font:400 7px ui-monospace,monospace;text-anchor:middle}
+  .eglbl.current{fill:var(--accent)}
+  .nd{cursor:pointer}
+
+  /* ---------- tensors ---------- */
+  .trow{display:grid;grid-template-columns:118px 1fr;gap:9px;align-items:center;
+    padding:6px 8px;border-radius:4px;border:1px solid transparent}
+  .trow.wrote{background:#2a2113;border-color:#6d5424}
+  .trow.read{background:#151d2b;border-color:#2b3f5c}
+  .tname{font:600 11.5px/1.35 ui-monospace,monospace}
+  .tname .at{color:var(--faint);font-weight:400;font-size:10px}
+  .tname .shp{color:var(--accent2);font-weight:400;font-size:10px}
+  .tval{font:13px/1.35 ui-monospace,monospace;word-break:break-all}
+  .tcell{display:inline-block;min-width:52px;padding:1px 5px;margin:1px 3px 1px 0;
+    background:#1b2129;border:1px solid var(--line);border-radius:3px;text-align:right}
+  .tcell.chg{background:#3a2c12;border-color:var(--accent2);color:#ffe3a3}
+  .tval .inf{color:var(--region);font-style:italic}
+  .badge{font-size:9.5px;padding:1px 5px;border-radius:3px;border:1px solid var(--line);
+    color:var(--dim);margin-left:5px}
+  .badge.w{color:var(--accent2);border-color:#6d5424}
+  .tg{display:inline-flex;gap:0;margin-left:8px}
+  .tg button{padding:1px 7px;font-size:10px;border-radius:0;margin-left:-1px}
+  .tg button:first-child{border-radius:3px 0 0 3px;margin-left:0}
+  .tg button:last-child{border-radius:0 3px 3px 0}
+
+  /* ---------- formula ---------- */
+  #fx{font-size:19px;min-height:58px;display:flex;align-items:center;
+    background:#161a22;border-radius:5px;padding:12px 14px;overflow-x:auto}
+  #fx .katex{color:#e8eefa}
+  .slot-m0,.slot-l0,.slot-a0,.slot-J,.slot-LO,.slot-HI,.slot-VALS,.slot-MOLD,
+  .slot-BLKMAX,.slot-MNEW,.slot-LOLD,.slot-SUM,.slot-LNEW,.slot-AOLD,.slot-WSUM,
+  .slot-ANEW,.slot-ACC,.slot-L,.slot-ONUM{color:var(--slot)}
+  .slot{color:var(--slot);padding:0 1px;border-radius:2px}
+  /* the "correction factor amplifier" from L00: a box you can point at */
+  #fx .regionboxed{background:rgba(255,143,177,.14);border-radius:3px;
+    box-shadow:inset 0 1.5px 0 var(--region),inset 0 -1.5px 0 var(--region)}
+  #fx .regionboxed:first-child{box-shadow:inset 0 1.5px 0 var(--region),
+    inset 0 -1.5px 0 var(--region),inset 2px 0 0 var(--region)}
+  #fx .regionboxed:last-child{box-shadow:inset 0 1.5px 0 var(--region),
+    inset 0 -1.5px 0 var(--region),inset -2px 0 0 var(--region)}
+  #fxbox{padding:0 0 2px}
+  .fnote{font-size:11px;color:var(--faint);margin-top:7px}
+  .fnote b{color:var(--dim)}
+  #narration{margin-top:9px;padding:8px 10px;background:#20262f;border-left:2.5px solid var(--accent2);
+    border-radius:0 4px 4px 0;font-size:12px;min-height:52px}
+  #narration .h{color:var(--accent2);font-weight:600}
+  .regionbox{margin-top:9px;padding:7px 10px;border:1px dashed var(--region);border-radius:4px;
+    font-size:11px;color:#ffc2d4;display:none}
+  .regionbox.show{display:block}
+
+  /* ---------- timeline ---------- */
+  #tl{padding:10px 14px 12px}
+  .tlrow{display:flex;align-items:center;gap:9px}
+  #scrub{flex:1;cursor:pointer}
+  .chips{display:flex;gap:3px;margin-top:9px;flex-wrap:wrap}
+  .chip{font:10.5px ui-monospace,monospace;padding:2.5px 7px;border-radius:3px;
+    border:1px solid var(--line);background:var(--panel2);color:var(--dim);cursor:pointer}
+  .chip.current{background:#25456b;border-color:var(--accent);color:#fff}
+  .chip.done{color:#8ea8c8}
+  .chip.comm{font-style:italic}
+  #pos{font:600 12px ui-monospace,monospace;color:var(--accent);min-width:72px;text-align:right}
+
+  /* ---------- self-check ---------- */
+  #tests .k{color:var(--dim)}
+  table{border-collapse:collapse;width:100%;font-size:11.5px}
+  th,td{text-align:left;padding:4px 8px;border-bottom:1px solid var(--line)}
+  th{color:var(--dim);font-weight:500;font-size:10.5px}
+  td.n{font:11px ui-monospace,monospace;text-align:right;color:var(--accent2)}
+  .pass{color:var(--ok)} .fail{color:var(--bad)}
+  .verdict{font-size:12.5px;padding:9px 11px;border-radius:4px;margin-bottom:10px}
+  .verdict.ok{background:#16301f;border:1px solid #2c6b45;color:#a6e9c6}
+  .verdict.bad{background:#361a1a;border:1px solid #7a3232;color:#ffbdbd}
+  .sub{color:var(--dim);font-size:11px}
+  pre{margin:6px 0;padding:8px;background:#141821;border-radius:4px;overflow:auto;
+    font-size:10.5px;color:#9fb0c6;max-height:170px}
+</style>
+</head>
+<body>
+<div class="proto-banner">
+  <b>PROTOTYPE — 一次性验证件，不是产品代码。</b>
+  为 GitHub issue #12 而建，验证引擎的四个高风险假设。产出目录 <code>prototype/</code>，验证完即可删除。
+</div>
+
+<header>
+  <h1 id="ttl">引擎抽象原型</h1>
+  <span class="meta" id="sub"></span>
+  <span class="meta" style="margin-left:auto">
+    深链 <code id="url">?step=0</code> ·
+    键盘 <code>←/→</code> <code>空格</code> <code>Home/End</code>
+  </span>
+</header>
+
+<div class="wrap">
+
+  <!-- ================= DAG ================= -->
+  <div class="panel">
+    <div class="hd">
+      <span class="t">执行 DAG</span>
+      <span class="sub" id="dagstat"></span>
+      <span class="ctl">
+        图规模
+        <select id="inflate">
+          <option value="0">真实 trace（10 节点）</option>
+          <option value="2">合成 14 节点（3 块）</option>
+          <option value="4">合成 22 节点（5 块）</option>
+          <option value="8">合成 38 节点（9 块）</option>
+          <option value="16">合成 70 节点（17 块）</option>
+        </select>
+        布局
+        <select id="wrap">
+          <option value="0">单排（不折行）</option>
+          <option value="8">折行 · 每段 8 层</option>
+          <option value="6">折行 · 每段 6 层</option>
+          <option value="4">折行 · 每段 4 层</option>
+        </select>
+        边
+        <span class="seg">
+          <button id="e-straight">直线</button>
+          <button id="e-arc">弧线</button>
+        </span>
+        <button id="e-seq" title="用 trace 顺序补一批合成边参与分层">顺序边</button>
+      </span>
+    </div>
+    <div class="bd" style="padding:8px">
+      <div id="dagbox"><svg id="dag"></svg></div>
+    </div>
+  </div>
+
+  <div class="row2">
+    <!-- ================= tensors ================= -->
+    <div class="panel">
+      <div class="hd">
+        <span class="t">张量检查器</span>
+        <span class="ctl">
+          视图
+          <span class="tg" id="when">
+            <button data-w="after">本步结束后</button>
+            <button data-w="before">本步开始前</button>
+          </span>
+        </span>
+      </div>
+      <div class="bd" id="tensors"></div>
+    </div>
+
+    <!-- ================= formula ================= -->
+    <div class="panel">
+      <div class="hd">
+        <span class="t">公式面板</span>
+        <span class="ctl">
+          档位
+          <span class="tg" id="tier">
+            <button data-t="sym">符号式</button>
+            <button data-t="idx">代入索引</button>
+            <button data-t="num">代入数值</button>
+          </span>
+          <button id="perfbtn">跑性能实测</button>
+        </span>
+      </div>
+      <div class="bd" id="fxbox">
+        <div id="fx"></div>
+        <div class="fnote" id="fxnote"></div>
+        <div class="regionbox" id="regionbox"></div>
+        <div id="narration"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= timeline ================= -->
+  <div class="panel">
+    <div class="hd"><span class="t">时间轴</span>
+      <span class="sub">任意跳转 = 纯函数 render(trace, i)，无反向操作</span>
+    </div>
+    <div id="tl">
+      <div class="tlrow">
+        <button id="b-home" title="Home">⏮</button>
+        <button id="b-prev" title="←">◀</button>
+        <button id="b-play" title="空格">▶ 播放</button>
+        <button id="b-next" title="→">▶</button>
+        <button id="b-end" title="End">⏭</button>
+        <input type="range" id="scrub" min="0" max="9" value="0" step="1">
+        <span id="pos"></span>
+      </div>
+      <div class="chips" id="chips"></div>
+    </div>
+  </div>
+
+  <!-- ================= self-check ================= -->
+  <div class="panel">
+    <div class="hd"><span class="t">自检</span>
+      <span class="sub">在浏览器里真跑，不是预期</span>
+      <span class="ctl"><button id="run">重新运行</button></span>
+    </div>
+    <div class="bd" id="tests"></div>
+  </div>
+
+</div>
+
+<script src="vendor/katex/katex.min.js"></script>
+<script src="trace.js"></script>
+<script src="engine.js"></script>
+</body>
+</html>
