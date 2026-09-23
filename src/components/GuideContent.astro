@@ -2,7 +2,9 @@
 import { type CollectionEntry, render } from 'astro:content';
 import GuideSidebar from './GuideSidebar.astro';
 import TableOfContents from './TableOfContents.astro';
+import LabEntryCard from './LabEntryCard.astro';
 import { GUIDE_CATEGORIES, type CategorySlug } from '../utils/categories';
+import { getLabForGuide } from '../utils/labRegistry';
 
 interface Props {
   guide: CollectionEntry<'guides'>;
@@ -27,6 +29,11 @@ const getPath = (path: string) => {
   const base = import.meta.env.BASE_URL;
   return base === '/' ? path : `${base.replace(/\/$/, '')}${path}`;
 };
+
+// Entry point to this tutorial's interactive lab, if it has one. Resolved from
+// src/utils/labRegistry.ts rather than a frontmatter field, so lab wiring never
+// touches the tutorial markdown (and never conflicts with upstream merges).
+const lab = getLabForGuide(guide.id);
 ---
 
 <div class="max-w-[1500px] mx-auto px-6 py-12 flex gap-10">
@@ -73,6 +80,9 @@ const getPath = (path: string) => {
         </div>
       )}
     </header>
+
+    <!-- Interactive lab entry point -->
+    {lab && <LabEntryCard lab={lab} />}
 
     <!-- Article Body -->
     <div
