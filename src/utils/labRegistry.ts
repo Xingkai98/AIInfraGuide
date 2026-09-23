@@ -110,6 +110,27 @@ export const LAB_REGISTRY: Record<string, LabEntry> = {
     ],
     published: true,
   },
+  '模块四-推理优化/第2章-推理引擎核心技术/22-continuous-batching': {
+    labId: 'L10',
+    title: 'Continuous Batching 调度回放',
+    summary:
+      '每个 tick 一次完整调度：running 队列各生成一步、剩余预算拉新请求、完成即退随退随补；旁边是同一个算法的 Static Batching，两图共用一根时间轴。',
+    page: `${LAB_BASE}/02-continuous-batching.html`,
+    links: [
+      { label: '从第一步开始' },
+      // Tick 8 is the first tick where static holds a seat for nothing: R1, R3
+      // and R4 have all generated their last token, and their batch still has
+      // eleven ticks to run because R2 needs twenty. Steps 0–7 are the batch
+      // filling up, where the two arms have not diverged yet and a reader would
+      // see two identical charts.
+      { label: '跳到槽位第一次开始空转', search: '?scenario=base&step=8' },
+      // The burst scenario's continuous arm is the only place preemption fires
+      // at all, and tick 12 is its first victim — the moment "显存耗尽时抢占"
+      // stops being a sentence in the tutorial and becomes a red block.
+      { label: '跳到 KV 不够、第一次抢占', search: '?scenario=burst&step=12' },
+    ],
+    published: true,
+  },
 };
 
 /**

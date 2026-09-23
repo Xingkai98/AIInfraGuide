@@ -1,0 +1,33 @@
+{
+ "set": "continuous-batching",
+ "lab": "L10",
+ "default": "continuous-batching-continuous-base",
+ "params": {
+  "schedule": [
+   "static",
+   "continuous"
+  ],
+  "scenario": [
+   "base",
+   "burst"
+  ]
+ },
+ "traces": [
+  "continuous-batching-static-base",
+  "continuous-batching-continuous-base",
+  "continuous-batching-static-burst",
+  "continuous-batching-continuous-burst"
+ ],
+ "labels": {
+  "continuous-batching-static-base": "Static Batching · 稳态到达",
+  "continuous-batching-continuous-base": "Continuous Batching · 稳态到达",
+  "continuous-batching-static-burst": "Static Batching · 突发到达",
+  "continuous-batching-continuous-burst": "Continuous Batching · 突发到达"
+ },
+ "notes": {
+  "continuous-batching-static-base": "请求分散到达，KV 池够用，不会被抢占 —— 看的是调度策略本身",
+  "continuous-batching-continuous-base": "请求分散到达，KV 池够用，不会被抢占 —— 看的是调度策略本身",
+  "continuous-batching-static-burst": "请求几乎同时到达、生成更长，KV 池很小 —— continuous 会被迫抢占，static 靠「整批不放」避开抢占、代价是槽位",
+  "continuous-batching-continuous-burst": "请求几乎同时到达、生成更长，KV 池很小 —— continuous 会被迫抢占，static 靠「整批不放」避开抢占、代价是槽位"
+ }
+}

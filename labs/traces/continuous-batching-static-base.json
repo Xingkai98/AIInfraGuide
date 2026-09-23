@@ -1,0 +1,4601 @@
+{
+ "meta": {
+  "lab": "L10",
+  "title": "Static Batching 调度回放（稳态到达）",
+  "source": "docs/guides/模块四-推理优化/第2章-推理引擎核心技术/2.2-Continuous Batching.md",
+  "config": {
+   "schedule": "static",
+   "scenario": "base",
+   "n_requests": 12,
+   "max_num_seqs": 4,
+   "token_budget": 32,
+   "block_size": 4,
+   "num_blocks": 30
+  },
+  "reference": "调度循环逐步模拟：40 步收干，63 个输出 token，槽位利用率 39.4%（63/160 个 slot·tick），空转 97 个 slot·tick（static 独有）；每个数字都用 torch 从逐 tick 占用矩阵独立重算过，整数逐位相同（np.array_equal），比值 float64 相对容差 1e-12",
+  "metrics": {
+   "makespan": 40,
+   "output_tokens": 63,
+   "mean_latency": 29.0,
+   "max_latency": 36.0,
+   "utilization": 0.39375,
+   "useful_slot_ticks": 63,
+   "stalled_slot_ticks": 97,
+   "idle_slot_ticks": 0,
+   "slots_total": 160,
+   "waiting_ticks": 188,
+   "throughput": 1.575,
+   "preemptions": 0,
+   "recompute_tokens": 0,
+   "kind_ticks": {
+    "prefill": 3,
+    "decode": 37,
+    "waiting": 33,
+    "stalled": 36,
+    "preempted": 0
+   },
+   "static_stall_closed_form": 97
+  }
+ },
+ "tensors": {
+  "waiting_q": {
+   "shape": [
+    12
+   ],
+   "dtype": "int",
+   "at": "调度器",
+   "role": "queue",
+   "init": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "note": "waiting 队列（优先级队列，这里用 FCFS）里有哪些请求，1 = 在排队"
+  },
+  "running_q": {
+   "shape": [
+    12
+   ],
+   "dtype": "int",
+   "at": "调度器",
+   "role": "queue",
+   "init": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "note": "running 列表：本 tick 结束时仍在批里的请求"
+  },
+  "done_q": {
+   "shape": [
+    12
+   ],
+   "dtype": "int",
+   "at": "调度器",
+   "role": "state",
+   "init": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "note": "已经生成完 output 个 token、KV 已归还的请求"
+  },
+  "computed": {
+   "shape": [
+    12
+   ],
+   "dtype": "int",
+   "at": "KV 显存",
+   "role": "state",
+   "init": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "note": "每个请求的 num_computed_tokens —— 被抢占时归零（重计算）"
+  },
+  "kv_blocks": {
+   "shape": [
+    12
+   ],
+   "dtype": "int",
+   "at": "KV 显存",
+   "role": "state",
+   "init": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "note": "每个请求占用的 KV block 数（block_size = 4）"
+  },
+  "batch_tokens": {
+   "shape": [],
+   "dtype": "int",
+   "at": "调度器",
+   "role": "counter",
+   "init": 0,
+   "note": "本 tick 从 token budget 里花掉的 token 数"
+  },
+  "kv_free": {
+   "shape": [],
+   "dtype": "int",
+   "at": "KV 显存",
+   "role": "counter",
+   "init": 30,
+   "note": "还剩多少空闲 KV block（共 30）"
+  },
+  "stalled": {
+   "shape": [],
+   "dtype": "int",
+   "at": "调度器",
+   "role": "counter",
+   "init": 0,
+   "note": "本 tick 里已经生成完、却还占着槽位的请求数（它们不再算 token，占的只是并发额度）"
+  }
+ },
+ "graph": {
+  "nodes": [
+   {
+    "id": "t0",
+    "title": "tick 0 · 4 个 prefill",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "预热"
+   },
+   {
+    "id": "t1",
+    "title": "tick 1 · 3 个 decode，1 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "预热"
+   },
+   {
+    "id": "t2",
+    "title": "tick 2 · 2 个 decode，2 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "预热"
+   },
+   {
+    "id": "t3",
+    "title": "tick 3 · 1 个 decode，3 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "预热"
+   },
+   {
+    "id": "t4",
+    "title": "tick 4 · 1 个 decode，3 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "预热"
+   },
+   {
+    "id": "t5",
+    "title": "tick 5 · 1 个 decode，3 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "预热"
+   },
+   {
+    "id": "t6",
+    "title": "tick 6 · 1 个 decode，3 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "预热"
+   },
+   {
+    "id": "t7",
+    "title": "tick 7 · 1 个 decode，3 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "预热"
+   },
+   {
+    "id": "t8",
+    "title": "tick 8 · 1 个 decode，3 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "预热"
+   },
+   {
+    "id": "t9",
+    "title": "tick 9 · 1 个 decode，3 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "预热"
+   },
+   {
+    "id": "t10",
+    "title": "tick 10 · 1 个 decode，3 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "预热"
+   },
+   {
+    "id": "t11",
+    "title": "tick 11 · 1 个 decode，3 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "预热"
+   },
+   {
+    "id": "t12",
+    "title": "tick 12 · 1 个 decode，3 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "预热"
+   },
+   {
+    "id": "t13",
+    "title": "tick 13 · 1 个 decode，3 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "预热"
+   },
+   {
+    "id": "t14",
+    "title": "tick 14 · 1 个 decode，3 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "预热"
+   },
+   {
+    "id": "t15",
+    "title": "tick 15 · 1 个 decode，3 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "预热"
+   },
+   {
+    "id": "t16",
+    "title": "tick 16 · 1 个 decode，3 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "预热"
+   },
+   {
+    "id": "t17",
+    "title": "tick 17 · 1 个 decode，3 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "预热"
+   },
+   {
+    "id": "t18",
+    "title": "tick 18 · 1 个 decode，3 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "预热"
+   },
+   {
+    "id": "t19",
+    "title": "tick 19 · 1 个 decode，3 个空转，4 个完成",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "预热"
+   },
+   {
+    "id": "t20",
+    "title": "tick 20 · 4 个 prefill",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t21",
+    "title": "tick 21 · 3 个 decode，1 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t22",
+    "title": "tick 22 · 2 个 decode，2 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t23",
+    "title": "tick 23 · 2 个 decode，2 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t24",
+    "title": "tick 24 · 1 个 decode，3 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t25",
+    "title": "tick 25 · 1 个 decode，3 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t26",
+    "title": "tick 26 · 1 个 decode，3 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t27",
+    "title": "tick 27 · 1 个 decode，3 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t28",
+    "title": "tick 28 · 1 个 decode，3 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t29",
+    "title": "tick 29 · 1 个 decode，3 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t30",
+    "title": "tick 30 · 1 个 decode，3 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t31",
+    "title": "tick 31 · 1 个 decode，3 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t32",
+    "title": "tick 32 · 1 个 decode，3 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t33",
+    "title": "tick 33 · 1 个 decode，3 个空转，4 个完成",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "稳态"
+   },
+   {
+    "id": "t34",
+    "title": "tick 34 · 4 个 prefill",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "排空"
+   },
+   {
+    "id": "t35",
+    "title": "tick 35 · 4 个 decode",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "排空"
+   },
+   {
+    "id": "t36",
+    "title": "tick 36 · 3 个 decode，1 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "排空"
+   },
+   {
+    "id": "t37",
+    "title": "tick 37 · 2 个 decode，2 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "排空"
+   },
+   {
+    "id": "t38",
+    "title": "tick 38 · 2 个 decode，2 个空转",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "排空"
+   },
+   {
+    "id": "t39",
+    "title": "tick 39 · 1 个 decode，3 个空转，4 个完成",
+    "kind": "op",
+    "op": "schedule",
+    "phase": "排空"
+   }
+  ],
+  "edges": [
+   {
+    "from": "t0",
+    "to": "t1",
+    "tensor": ""
+   },
+   {
+    "from": "t1",
+    "to": "t2",
+    "tensor": ""
+   },
+   {
+    "from": "t2",
+    "to": "t3",
+    "tensor": ""
+   },
+   {
+    "from": "t3",
+    "to": "t4",
+    "tensor": ""
+   },
+   {
+    "from": "t4",
+    "to": "t5",
+    "tensor": ""
+   },
+   {
+    "from": "t5",
+    "to": "t6",
+    "tensor": ""
+   },
+   {
+    "from": "t6",
+    "to": "t7",
+    "tensor": ""
+   },
+   {
+    "from": "t7",
+    "to": "t8",
+    "tensor": ""
+   },
+   {
+    "from": "t8",
+    "to": "t9",
+    "tensor": ""
+   },
+   {
+    "from": "t9",
+    "to": "t10",
+    "tensor": ""
+   },
+   {
+    "from": "t10",
+    "to": "t11",
+    "tensor": ""
+   },
+   {
+    "from": "t11",
+    "to": "t12",
+    "tensor": ""
+   },
+   {
+    "from": "t12",
+    "to": "t13",
+    "tensor": ""
+   },
+   {
+    "from": "t13",
+    "to": "t14",
+    "tensor": ""
+   },
+   {
+    "from": "t14",
+    "to": "t15",
+    "tensor": ""
+   },
+   {
+    "from": "t15",
+    "to": "t16",
+    "tensor": ""
+   },
+   {
+    "from": "t16",
+    "to": "t17",
+    "tensor": ""
+   },
+   {
+    "from": "t17",
+    "to": "t18",
+    "tensor": ""
+   },
+   {
+    "from": "t18",
+    "to": "t19",
+    "tensor": ""
+   },
+   {
+    "from": "t19",
+    "to": "t20",
+    "tensor": ""
+   },
+   {
+    "from": "t20",
+    "to": "t21",
+    "tensor": ""
+   },
+   {
+    "from": "t21",
+    "to": "t22",
+    "tensor": ""
+   },
+   {
+    "from": "t22",
+    "to": "t23",
+    "tensor": ""
+   },
+   {
+    "from": "t23",
+    "to": "t24",
+    "tensor": ""
+   },
+   {
+    "from": "t24",
+    "to": "t25",
+    "tensor": ""
+   },
+   {
+    "from": "t25",
+    "to": "t26",
+    "tensor": ""
+   },
+   {
+    "from": "t26",
+    "to": "t27",
+    "tensor": ""
+   },
+   {
+    "from": "t27",
+    "to": "t28",
+    "tensor": ""
+   },
+   {
+    "from": "t28",
+    "to": "t29",
+    "tensor": ""
+   },
+   {
+    "from": "t29",
+    "to": "t30",
+    "tensor": ""
+   },
+   {
+    "from": "t30",
+    "to": "t31",
+    "tensor": ""
+   },
+   {
+    "from": "t31",
+    "to": "t32",
+    "tensor": ""
+   },
+   {
+    "from": "t32",
+    "to": "t33",
+    "tensor": ""
+   },
+   {
+    "from": "t33",
+    "to": "t34",
+    "tensor": ""
+   },
+   {
+    "from": "t34",
+    "to": "t35",
+    "tensor": ""
+   },
+   {
+    "from": "t35",
+    "to": "t36",
+    "tensor": ""
+   },
+   {
+    "from": "t36",
+    "to": "t37",
+    "tensor": ""
+   },
+   {
+    "from": "t37",
+    "to": "t38",
+    "tensor": ""
+   },
+   {
+    "from": "t38",
+    "to": "t39",
+    "tensor": ""
+   }
+  ]
+ },
+ "gantt": {
+  "rows": [
+   {
+    "id": "R1",
+    "label": "R1",
+    "sub": "到达 t=0 · prompt 8 · 生成 1"
+   },
+   {
+    "id": "R2",
+    "label": "R2",
+    "sub": "到达 t=0 · prompt 8 · 生成 20"
+   },
+   {
+    "id": "R3",
+    "label": "R3",
+    "sub": "到达 t=0 · prompt 8 · 生成 3"
+   },
+   {
+    "id": "R4",
+    "label": "R4",
+    "sub": "到达 t=0 · prompt 8 · 生成 2"
+   },
+   {
+    "id": "R5",
+    "label": "R5",
+    "sub": "到达 t=1 · prompt 8 · 生成 4"
+   },
+   {
+    "id": "R6",
+    "label": "R6",
+    "sub": "到达 t=1 · prompt 6 · 生成 14"
+   },
+   {
+    "id": "R7",
+    "label": "R7",
+    "sub": "到达 t=2 · prompt 8 · 生成 2"
+   },
+   {
+    "id": "R8",
+    "label": "R8",
+    "sub": "到达 t=2 · prompt 8 · 生成 1"
+   },
+   {
+    "id": "R9",
+    "label": "R9",
+    "sub": "到达 t=4 · prompt 8 · 生成 6"
+   },
+   {
+    "id": "R10",
+    "label": "R10",
+    "sub": "到达 t=5 · prompt 8 · 生成 3"
+   },
+   {
+    "id": "R11",
+    "label": "R11",
+    "sub": "到达 t=6 · prompt 8 · 生成 2"
+   },
+   {
+    "id": "R12",
+    "label": "R12",
+    "sub": "到达 t=7 · prompt 6 · 生成 5"
+   }
+  ],
+  "kinds": [
+   "prefill",
+   "decode",
+   "waiting",
+   "stalled",
+   "preempted"
+  ],
+  "kindsLabel": {
+   "prefill": "prefill（新请求上车）",
+   "decode": "decode（生成 1 个 token）",
+   "waiting": "waiting（排队等待）",
+   "stalled": "stalled（已完成 · 空转）",
+   "preempted": "preempted（被抢占）"
+  }
+ },
+ "steps": [
+  {
+   "id": "t0",
+   "title": "tick 0 · 4 个 prefill",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "预热",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "0",
+     "num": "0"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{0}|",
+     "num": "0"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{0}} p_r",
+     "num": "32"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{0}",
+     "num": "32"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens",
+    "computed",
+    "running_q"
+   ],
+   "state": {
+    "running_q": [
+     1,
+     1,
+     1,
+     1,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "computed": [
+     8,
+     27,
+     10,
+     9,
+     11,
+     19,
+     9,
+     8,
+     13,
+     10,
+     9,
+     10
+    ],
+    "batch_tokens": 32
+   },
+   "bars": [
+    {
+     "row": "R1",
+     "kind": "prefill"
+    },
+    {
+     "row": "R2",
+     "kind": "prefill"
+    },
+    {
+     "row": "R3",
+     "kind": "prefill"
+    },
+    {
+     "row": "R4",
+     "kind": "prefill"
+    }
+   ],
+   "narration": "本 tick 花掉 32 / 32 个 token 预算。新上车：R1（prompt 8）、R2（prompt 8）、R3（prompt 8）、R4（prompt 8）。"
+  },
+  {
+   "id": "t1",
+   "title": "tick 1 · 3 个 decode，1 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "预热",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "1",
+     "num": "1"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{1}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{1}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{1}",
+     "num": "3"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens",
+    "stalled",
+    "waiting_q"
+   ],
+   "state": {
+    "waiting_q": [
+     0,
+     0,
+     0,
+     0,
+     1,
+     1,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "batch_tokens": 3,
+    "stalled": 1
+   },
+   "bars": [
+    {
+     "row": "R1",
+     "kind": "stalled"
+    },
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R3",
+     "kind": "decode"
+    },
+    {
+     "row": "R4",
+     "kind": "decode"
+    },
+    {
+     "row": "R5",
+     "kind": "waiting"
+    },
+    {
+     "row": "R6",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 3 / 32 个 token 预算。槽位里 R1 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 2 个在 waiting 队列里排队。",
+   "regions": {
+    "STALL": "本步 R1 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t2",
+   "title": "tick 2 · 2 个 decode，2 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "预热",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "2",
+     "num": "2"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{2}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{2}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{2}",
+     "num": "2"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens",
+    "stalled",
+    "waiting_q"
+   ],
+   "state": {
+    "waiting_q": [
+     0,
+     0,
+     0,
+     0,
+     1,
+     1,
+     1,
+     1,
+     0,
+     0,
+     0,
+     0
+    ],
+    "batch_tokens": 2,
+    "stalled": 2
+   },
+   "bars": [
+    {
+     "row": "R1",
+     "kind": "stalled"
+    },
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R3",
+     "kind": "decode"
+    },
+    {
+     "row": "R4",
+     "kind": "stalled"
+    },
+    {
+     "row": "R5",
+     "kind": "waiting"
+    },
+    {
+     "row": "R6",
+     "kind": "waiting"
+    },
+    {
+     "row": "R7",
+     "kind": "waiting"
+    },
+    {
+     "row": "R8",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 2 / 32 个 token 预算。槽位里 R1、R4 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 4 个在 waiting 队列里排队。",
+   "regions": {
+    "STALL": "本步 R1、R4 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t3",
+   "title": "tick 3 · 1 个 decode，3 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "预热",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "3",
+     "num": "3"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{3}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{3}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{3}",
+     "num": "1"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens",
+    "stalled"
+   ],
+   "state": {
+    "batch_tokens": 1,
+    "stalled": 3
+   },
+   "bars": [
+    {
+     "row": "R1",
+     "kind": "stalled"
+    },
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R3",
+     "kind": "stalled"
+    },
+    {
+     "row": "R4",
+     "kind": "stalled"
+    },
+    {
+     "row": "R5",
+     "kind": "waiting"
+    },
+    {
+     "row": "R6",
+     "kind": "waiting"
+    },
+    {
+     "row": "R7",
+     "kind": "waiting"
+    },
+    {
+     "row": "R8",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 1 / 32 个 token 预算。槽位里 R1、R3、R4 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 4 个在 waiting 队列里排队。",
+   "regions": {
+    "STALL": "本步 R1、R3、R4 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t4",
+   "title": "tick 4 · 1 个 decode，3 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "预热",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "4",
+     "num": "4"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{4}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{4}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{4}",
+     "num": "1"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "waiting_q"
+   ],
+   "state": {
+    "waiting_q": [
+     0,
+     0,
+     0,
+     0,
+     1,
+     1,
+     1,
+     1,
+     1,
+     0,
+     0,
+     0
+    ]
+   },
+   "bars": [
+    {
+     "row": "R1",
+     "kind": "stalled"
+    },
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R3",
+     "kind": "stalled"
+    },
+    {
+     "row": "R4",
+     "kind": "stalled"
+    },
+    {
+     "row": "R5",
+     "kind": "waiting"
+    },
+    {
+     "row": "R6",
+     "kind": "waiting"
+    },
+    {
+     "row": "R7",
+     "kind": "waiting"
+    },
+    {
+     "row": "R8",
+     "kind": "waiting"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 1 / 32 个 token 预算。槽位里 R1、R3、R4 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 5 个在 waiting 队列里排队。",
+   "regions": {
+    "STALL": "本步 R1、R3、R4 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t5",
+   "title": "tick 5 · 1 个 decode，3 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "预热",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "5",
+     "num": "5"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{5}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{5}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{5}",
+     "num": "1"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "waiting_q"
+   ],
+   "state": {
+    "waiting_q": [
+     0,
+     0,
+     0,
+     0,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     0,
+     0
+    ]
+   },
+   "bars": [
+    {
+     "row": "R1",
+     "kind": "stalled"
+    },
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R3",
+     "kind": "stalled"
+    },
+    {
+     "row": "R4",
+     "kind": "stalled"
+    },
+    {
+     "row": "R5",
+     "kind": "waiting"
+    },
+    {
+     "row": "R6",
+     "kind": "waiting"
+    },
+    {
+     "row": "R7",
+     "kind": "waiting"
+    },
+    {
+     "row": "R8",
+     "kind": "waiting"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 1 / 32 个 token 预算。槽位里 R1、R3、R4 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 6 个在 waiting 队列里排队。",
+   "regions": {
+    "STALL": "本步 R1、R3、R4 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t6",
+   "title": "tick 6 · 1 个 decode，3 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "预热",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "6",
+     "num": "6"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{6}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{6}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{6}",
+     "num": "1"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "waiting_q"
+   ],
+   "state": {
+    "waiting_q": [
+     0,
+     0,
+     0,
+     0,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     0
+    ]
+   },
+   "bars": [
+    {
+     "row": "R1",
+     "kind": "stalled"
+    },
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R3",
+     "kind": "stalled"
+    },
+    {
+     "row": "R4",
+     "kind": "stalled"
+    },
+    {
+     "row": "R5",
+     "kind": "waiting"
+    },
+    {
+     "row": "R6",
+     "kind": "waiting"
+    },
+    {
+     "row": "R7",
+     "kind": "waiting"
+    },
+    {
+     "row": "R8",
+     "kind": "waiting"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 1 / 32 个 token 预算。槽位里 R1、R3、R4 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 7 个在 waiting 队列里排队。",
+   "regions": {
+    "STALL": "本步 R1、R3、R4 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t7",
+   "title": "tick 7 · 1 个 decode，3 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "预热",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "7",
+     "num": "7"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{7}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{7}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{7}",
+     "num": "1"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "waiting_q"
+   ],
+   "state": {
+    "waiting_q": [
+     0,
+     0,
+     0,
+     0,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1
+    ]
+   },
+   "bars": [
+    {
+     "row": "R1",
+     "kind": "stalled"
+    },
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R3",
+     "kind": "stalled"
+    },
+    {
+     "row": "R4",
+     "kind": "stalled"
+    },
+    {
+     "row": "R5",
+     "kind": "waiting"
+    },
+    {
+     "row": "R6",
+     "kind": "waiting"
+    },
+    {
+     "row": "R7",
+     "kind": "waiting"
+    },
+    {
+     "row": "R8",
+     "kind": "waiting"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 1 / 32 个 token 预算。槽位里 R1、R3、R4 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 8 个在 waiting 队列里排队。",
+   "regions": {
+    "STALL": "本步 R1、R3、R4 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t8",
+   "title": "tick 8 · 1 个 decode，3 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "预热",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "8",
+     "num": "8"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{8}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{8}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{8}",
+     "num": "1"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [],
+   "state": {},
+   "bars": [
+    {
+     "row": "R1",
+     "kind": "stalled"
+    },
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R3",
+     "kind": "stalled"
+    },
+    {
+     "row": "R4",
+     "kind": "stalled"
+    },
+    {
+     "row": "R5",
+     "kind": "waiting"
+    },
+    {
+     "row": "R6",
+     "kind": "waiting"
+    },
+    {
+     "row": "R7",
+     "kind": "waiting"
+    },
+    {
+     "row": "R8",
+     "kind": "waiting"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 1 / 32 个 token 预算。槽位里 R1、R3、R4 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 8 个在 waiting 队列里排队。",
+   "regions": {
+    "STALL": "本步 R1、R3、R4 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t9",
+   "title": "tick 9 · 1 个 decode，3 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "预热",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "9",
+     "num": "9"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{9}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{9}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{9}",
+     "num": "1"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [],
+   "state": {},
+   "bars": [
+    {
+     "row": "R1",
+     "kind": "stalled"
+    },
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R3",
+     "kind": "stalled"
+    },
+    {
+     "row": "R4",
+     "kind": "stalled"
+    },
+    {
+     "row": "R5",
+     "kind": "waiting"
+    },
+    {
+     "row": "R6",
+     "kind": "waiting"
+    },
+    {
+     "row": "R7",
+     "kind": "waiting"
+    },
+    {
+     "row": "R8",
+     "kind": "waiting"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 1 / 32 个 token 预算。槽位里 R1、R3、R4 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 8 个在 waiting 队列里排队。",
+   "regions": {
+    "STALL": "本步 R1、R3、R4 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t10",
+   "title": "tick 10 · 1 个 decode，3 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "预热",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "10",
+     "num": "10"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{10}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{10}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{10}",
+     "num": "1"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [],
+   "state": {},
+   "bars": [
+    {
+     "row": "R1",
+     "kind": "stalled"
+    },
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R3",
+     "kind": "stalled"
+    },
+    {
+     "row": "R4",
+     "kind": "stalled"
+    },
+    {
+     "row": "R5",
+     "kind": "waiting"
+    },
+    {
+     "row": "R6",
+     "kind": "waiting"
+    },
+    {
+     "row": "R7",
+     "kind": "waiting"
+    },
+    {
+     "row": "R8",
+     "kind": "waiting"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 1 / 32 个 token 预算。槽位里 R1、R3、R4 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 8 个在 waiting 队列里排队。",
+   "regions": {
+    "STALL": "本步 R1、R3、R4 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t11",
+   "title": "tick 11 · 1 个 decode，3 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "预热",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "11",
+     "num": "11"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{11}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{11}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{11}",
+     "num": "1"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [],
+   "state": {},
+   "bars": [
+    {
+     "row": "R1",
+     "kind": "stalled"
+    },
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R3",
+     "kind": "stalled"
+    },
+    {
+     "row": "R4",
+     "kind": "stalled"
+    },
+    {
+     "row": "R5",
+     "kind": "waiting"
+    },
+    {
+     "row": "R6",
+     "kind": "waiting"
+    },
+    {
+     "row": "R7",
+     "kind": "waiting"
+    },
+    {
+     "row": "R8",
+     "kind": "waiting"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 1 / 32 个 token 预算。槽位里 R1、R3、R4 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 8 个在 waiting 队列里排队。",
+   "regions": {
+    "STALL": "本步 R1、R3、R4 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t12",
+   "title": "tick 12 · 1 个 decode，3 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "预热",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "12",
+     "num": "12"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{12}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{12}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{12}",
+     "num": "1"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [],
+   "state": {},
+   "bars": [
+    {
+     "row": "R1",
+     "kind": "stalled"
+    },
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R3",
+     "kind": "stalled"
+    },
+    {
+     "row": "R4",
+     "kind": "stalled"
+    },
+    {
+     "row": "R5",
+     "kind": "waiting"
+    },
+    {
+     "row": "R6",
+     "kind": "waiting"
+    },
+    {
+     "row": "R7",
+     "kind": "waiting"
+    },
+    {
+     "row": "R8",
+     "kind": "waiting"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 1 / 32 个 token 预算。槽位里 R1、R3、R4 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 8 个在 waiting 队列里排队。",
+   "regions": {
+    "STALL": "本步 R1、R3、R4 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t13",
+   "title": "tick 13 · 1 个 decode，3 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "预热",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "13",
+     "num": "13"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{13}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{13}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{13}",
+     "num": "1"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [],
+   "state": {},
+   "bars": [
+    {
+     "row": "R1",
+     "kind": "stalled"
+    },
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R3",
+     "kind": "stalled"
+    },
+    {
+     "row": "R4",
+     "kind": "stalled"
+    },
+    {
+     "row": "R5",
+     "kind": "waiting"
+    },
+    {
+     "row": "R6",
+     "kind": "waiting"
+    },
+    {
+     "row": "R7",
+     "kind": "waiting"
+    },
+    {
+     "row": "R8",
+     "kind": "waiting"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 1 / 32 个 token 预算。槽位里 R1、R3、R4 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 8 个在 waiting 队列里排队。",
+   "regions": {
+    "STALL": "本步 R1、R3、R4 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t14",
+   "title": "tick 14 · 1 个 decode，3 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "预热",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "14",
+     "num": "14"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{14}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{14}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{14}",
+     "num": "1"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [],
+   "state": {},
+   "bars": [
+    {
+     "row": "R1",
+     "kind": "stalled"
+    },
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R3",
+     "kind": "stalled"
+    },
+    {
+     "row": "R4",
+     "kind": "stalled"
+    },
+    {
+     "row": "R5",
+     "kind": "waiting"
+    },
+    {
+     "row": "R6",
+     "kind": "waiting"
+    },
+    {
+     "row": "R7",
+     "kind": "waiting"
+    },
+    {
+     "row": "R8",
+     "kind": "waiting"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 1 / 32 个 token 预算。槽位里 R1、R3、R4 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 8 个在 waiting 队列里排队。",
+   "regions": {
+    "STALL": "本步 R1、R3、R4 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t15",
+   "title": "tick 15 · 1 个 decode，3 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "预热",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "15",
+     "num": "15"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{15}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{15}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{15}",
+     "num": "1"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [],
+   "state": {},
+   "bars": [
+    {
+     "row": "R1",
+     "kind": "stalled"
+    },
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R3",
+     "kind": "stalled"
+    },
+    {
+     "row": "R4",
+     "kind": "stalled"
+    },
+    {
+     "row": "R5",
+     "kind": "waiting"
+    },
+    {
+     "row": "R6",
+     "kind": "waiting"
+    },
+    {
+     "row": "R7",
+     "kind": "waiting"
+    },
+    {
+     "row": "R8",
+     "kind": "waiting"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 1 / 32 个 token 预算。槽位里 R1、R3、R4 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 8 个在 waiting 队列里排队。",
+   "regions": {
+    "STALL": "本步 R1、R3、R4 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t16",
+   "title": "tick 16 · 1 个 decode，3 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "预热",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "16",
+     "num": "16"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{16}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{16}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{16}",
+     "num": "1"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [],
+   "state": {},
+   "bars": [
+    {
+     "row": "R1",
+     "kind": "stalled"
+    },
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R3",
+     "kind": "stalled"
+    },
+    {
+     "row": "R4",
+     "kind": "stalled"
+    },
+    {
+     "row": "R5",
+     "kind": "waiting"
+    },
+    {
+     "row": "R6",
+     "kind": "waiting"
+    },
+    {
+     "row": "R7",
+     "kind": "waiting"
+    },
+    {
+     "row": "R8",
+     "kind": "waiting"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 1 / 32 个 token 预算。槽位里 R1、R3、R4 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 8 个在 waiting 队列里排队。",
+   "regions": {
+    "STALL": "本步 R1、R3、R4 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t17",
+   "title": "tick 17 · 1 个 decode，3 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "预热",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "17",
+     "num": "17"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{17}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{17}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{17}",
+     "num": "1"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [],
+   "state": {},
+   "bars": [
+    {
+     "row": "R1",
+     "kind": "stalled"
+    },
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R3",
+     "kind": "stalled"
+    },
+    {
+     "row": "R4",
+     "kind": "stalled"
+    },
+    {
+     "row": "R5",
+     "kind": "waiting"
+    },
+    {
+     "row": "R6",
+     "kind": "waiting"
+    },
+    {
+     "row": "R7",
+     "kind": "waiting"
+    },
+    {
+     "row": "R8",
+     "kind": "waiting"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 1 / 32 个 token 预算。槽位里 R1、R3、R4 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 8 个在 waiting 队列里排队。",
+   "regions": {
+    "STALL": "本步 R1、R3、R4 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t18",
+   "title": "tick 18 · 1 个 decode，3 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "预热",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "18",
+     "num": "18"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{18}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{18}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{18}",
+     "num": "1"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [],
+   "state": {},
+   "bars": [
+    {
+     "row": "R1",
+     "kind": "stalled"
+    },
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R3",
+     "kind": "stalled"
+    },
+    {
+     "row": "R4",
+     "kind": "stalled"
+    },
+    {
+     "row": "R5",
+     "kind": "waiting"
+    },
+    {
+     "row": "R6",
+     "kind": "waiting"
+    },
+    {
+     "row": "R7",
+     "kind": "waiting"
+    },
+    {
+     "row": "R8",
+     "kind": "waiting"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 1 / 32 个 token 预算。槽位里 R1、R3、R4 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 8 个在 waiting 队列里排队。",
+   "regions": {
+    "STALL": "本步 R1、R3、R4 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t19",
+   "title": "tick 19 · 1 个 decode，3 个空转，4 个完成",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "预热",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "19",
+     "num": "19"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{19}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{19}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{19}",
+     "num": "1"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "done_q",
+    "running_q"
+   ],
+   "state": {
+    "running_q": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "done_q": [
+     1,
+     1,
+     1,
+     1,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ]
+   },
+   "bars": [
+    {
+     "row": "R1",
+     "kind": "stalled"
+    },
+    {
+     "row": "R2",
+     "kind": "decode"
+    },
+    {
+     "row": "R3",
+     "kind": "stalled"
+    },
+    {
+     "row": "R4",
+     "kind": "stalled"
+    },
+    {
+     "row": "R5",
+     "kind": "waiting"
+    },
+    {
+     "row": "R6",
+     "kind": "waiting"
+    },
+    {
+     "row": "R7",
+     "kind": "waiting"
+    },
+    {
+     "row": "R8",
+     "kind": "waiting"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 1 / 32 个 token 预算。槽位里 R1、R3、R4 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 8 个在 waiting 队列里排队。",
+   "regions": {
+    "EXIT": "本步有 R1、R2、R3、R4 生成了最后一个 token，KV block 立刻归还空闲池。Static 下槽位还不还 —— 整批要一起结束。",
+    "STALL": "本步 R1、R3、R4 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t20",
+   "title": "tick 20 · 4 个 prefill",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "20",
+     "num": "20"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{20}|",
+     "num": "0"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{20}} p_r",
+     "num": "30"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{20}",
+     "num": "30"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens",
+    "running_q",
+    "stalled",
+    "waiting_q"
+   ],
+   "state": {
+    "waiting_q": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     1,
+     1,
+     1,
+     1
+    ],
+    "running_q": [
+     0,
+     0,
+     0,
+     0,
+     1,
+     1,
+     1,
+     1,
+     0,
+     0,
+     0,
+     0
+    ],
+    "batch_tokens": 30,
+    "stalled": 0
+   },
+   "bars": [
+    {
+     "row": "R5",
+     "kind": "prefill"
+    },
+    {
+     "row": "R6",
+     "kind": "prefill"
+    },
+    {
+     "row": "R7",
+     "kind": "prefill"
+    },
+    {
+     "row": "R8",
+     "kind": "prefill"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 30 / 32 个 token 预算。新上车：R5（prompt 8）、R6（prompt 6）、R7（prompt 8）、R8（prompt 8）。还有 4 个在 waiting 队列里排队。"
+  },
+  {
+   "id": "t21",
+   "title": "tick 21 · 3 个 decode，1 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "21",
+     "num": "21"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{21}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{21}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{21}",
+     "num": "3"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens",
+    "stalled"
+   ],
+   "state": {
+    "batch_tokens": 3,
+    "stalled": 1
+   },
+   "bars": [
+    {
+     "row": "R5",
+     "kind": "decode"
+    },
+    {
+     "row": "R6",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "decode"
+    },
+    {
+     "row": "R8",
+     "kind": "stalled"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 3 / 32 个 token 预算。槽位里 R8 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 4 个在 waiting 队列里排队。",
+   "regions": {
+    "STALL": "本步 R8 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t22",
+   "title": "tick 22 · 2 个 decode，2 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "22",
+     "num": "22"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{22}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{22}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{22}",
+     "num": "2"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens",
+    "stalled"
+   ],
+   "state": {
+    "batch_tokens": 2,
+    "stalled": 2
+   },
+   "bars": [
+    {
+     "row": "R5",
+     "kind": "decode"
+    },
+    {
+     "row": "R6",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "stalled"
+    },
+    {
+     "row": "R8",
+     "kind": "stalled"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 2 / 32 个 token 预算。槽位里 R7、R8 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 4 个在 waiting 队列里排队。",
+   "regions": {
+    "STALL": "本步 R7、R8 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t23",
+   "title": "tick 23 · 2 个 decode，2 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "23",
+     "num": "23"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{23}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{23}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{23}",
+     "num": "2"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [],
+   "state": {},
+   "bars": [
+    {
+     "row": "R5",
+     "kind": "decode"
+    },
+    {
+     "row": "R6",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "stalled"
+    },
+    {
+     "row": "R8",
+     "kind": "stalled"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 2 / 32 个 token 预算。槽位里 R7、R8 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 4 个在 waiting 队列里排队。",
+   "regions": {
+    "STALL": "本步 R7、R8 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t24",
+   "title": "tick 24 · 1 个 decode，3 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "24",
+     "num": "24"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{24}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{24}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{24}",
+     "num": "1"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens",
+    "stalled"
+   ],
+   "state": {
+    "batch_tokens": 1,
+    "stalled": 3
+   },
+   "bars": [
+    {
+     "row": "R5",
+     "kind": "stalled"
+    },
+    {
+     "row": "R6",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "stalled"
+    },
+    {
+     "row": "R8",
+     "kind": "stalled"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 1 / 32 个 token 预算。槽位里 R5、R7、R8 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 4 个在 waiting 队列里排队。",
+   "regions": {
+    "STALL": "本步 R5、R7、R8 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t25",
+   "title": "tick 25 · 1 个 decode，3 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "25",
+     "num": "25"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{25}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{25}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{25}",
+     "num": "1"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [],
+   "state": {},
+   "bars": [
+    {
+     "row": "R5",
+     "kind": "stalled"
+    },
+    {
+     "row": "R6",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "stalled"
+    },
+    {
+     "row": "R8",
+     "kind": "stalled"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 1 / 32 个 token 预算。槽位里 R5、R7、R8 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 4 个在 waiting 队列里排队。",
+   "regions": {
+    "STALL": "本步 R5、R7、R8 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t26",
+   "title": "tick 26 · 1 个 decode，3 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "26",
+     "num": "26"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{26}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{26}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{26}",
+     "num": "1"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [],
+   "state": {},
+   "bars": [
+    {
+     "row": "R5",
+     "kind": "stalled"
+    },
+    {
+     "row": "R6",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "stalled"
+    },
+    {
+     "row": "R8",
+     "kind": "stalled"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 1 / 32 个 token 预算。槽位里 R5、R7、R8 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 4 个在 waiting 队列里排队。",
+   "regions": {
+    "STALL": "本步 R5、R7、R8 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t27",
+   "title": "tick 27 · 1 个 decode，3 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "27",
+     "num": "27"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{27}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{27}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{27}",
+     "num": "1"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [],
+   "state": {},
+   "bars": [
+    {
+     "row": "R5",
+     "kind": "stalled"
+    },
+    {
+     "row": "R6",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "stalled"
+    },
+    {
+     "row": "R8",
+     "kind": "stalled"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 1 / 32 个 token 预算。槽位里 R5、R7、R8 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 4 个在 waiting 队列里排队。",
+   "regions": {
+    "STALL": "本步 R5、R7、R8 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t28",
+   "title": "tick 28 · 1 个 decode，3 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "28",
+     "num": "28"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{28}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{28}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{28}",
+     "num": "1"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [],
+   "state": {},
+   "bars": [
+    {
+     "row": "R5",
+     "kind": "stalled"
+    },
+    {
+     "row": "R6",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "stalled"
+    },
+    {
+     "row": "R8",
+     "kind": "stalled"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 1 / 32 个 token 预算。槽位里 R5、R7、R8 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 4 个在 waiting 队列里排队。",
+   "regions": {
+    "STALL": "本步 R5、R7、R8 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t29",
+   "title": "tick 29 · 1 个 decode，3 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "29",
+     "num": "29"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{29}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{29}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{29}",
+     "num": "1"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [],
+   "state": {},
+   "bars": [
+    {
+     "row": "R5",
+     "kind": "stalled"
+    },
+    {
+     "row": "R6",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "stalled"
+    },
+    {
+     "row": "R8",
+     "kind": "stalled"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 1 / 32 个 token 预算。槽位里 R5、R7、R8 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 4 个在 waiting 队列里排队。",
+   "regions": {
+    "STALL": "本步 R5、R7、R8 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t30",
+   "title": "tick 30 · 1 个 decode，3 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "30",
+     "num": "30"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{30}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{30}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{30}",
+     "num": "1"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [],
+   "state": {},
+   "bars": [
+    {
+     "row": "R5",
+     "kind": "stalled"
+    },
+    {
+     "row": "R6",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "stalled"
+    },
+    {
+     "row": "R8",
+     "kind": "stalled"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 1 / 32 个 token 预算。槽位里 R5、R7、R8 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 4 个在 waiting 队列里排队。",
+   "regions": {
+    "STALL": "本步 R5、R7、R8 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t31",
+   "title": "tick 31 · 1 个 decode，3 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "31",
+     "num": "31"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{31}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{31}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{31}",
+     "num": "1"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [],
+   "state": {},
+   "bars": [
+    {
+     "row": "R5",
+     "kind": "stalled"
+    },
+    {
+     "row": "R6",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "stalled"
+    },
+    {
+     "row": "R8",
+     "kind": "stalled"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 1 / 32 个 token 预算。槽位里 R5、R7、R8 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 4 个在 waiting 队列里排队。",
+   "regions": {
+    "STALL": "本步 R5、R7、R8 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t32",
+   "title": "tick 32 · 1 个 decode，3 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "32",
+     "num": "32"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{32}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{32}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{32}",
+     "num": "1"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [],
+   "state": {},
+   "bars": [
+    {
+     "row": "R5",
+     "kind": "stalled"
+    },
+    {
+     "row": "R6",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "stalled"
+    },
+    {
+     "row": "R8",
+     "kind": "stalled"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 1 / 32 个 token 预算。槽位里 R5、R7、R8 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 4 个在 waiting 队列里排队。",
+   "regions": {
+    "STALL": "本步 R5、R7、R8 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t33",
+   "title": "tick 33 · 1 个 decode，3 个空转，4 个完成",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "稳态",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "33",
+     "num": "33"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{33}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{33}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{33}",
+     "num": "1"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "done_q",
+    "running_q"
+   ],
+   "state": {
+    "running_q": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "done_q": [
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     0,
+     0,
+     0,
+     0
+    ]
+   },
+   "bars": [
+    {
+     "row": "R5",
+     "kind": "stalled"
+    },
+    {
+     "row": "R6",
+     "kind": "decode"
+    },
+    {
+     "row": "R7",
+     "kind": "stalled"
+    },
+    {
+     "row": "R8",
+     "kind": "stalled"
+    },
+    {
+     "row": "R9",
+     "kind": "waiting"
+    },
+    {
+     "row": "R10",
+     "kind": "waiting"
+    },
+    {
+     "row": "R11",
+     "kind": "waiting"
+    },
+    {
+     "row": "R12",
+     "kind": "waiting"
+    }
+   ],
+   "narration": "本 tick 花掉 1 / 32 个 token 预算。槽位里 R5、R7、R8 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。还有 4 个在 waiting 队列里排队。",
+   "regions": {
+    "EXIT": "本步有 R5、R6、R7、R8 生成了最后一个 token，KV block 立刻归还空闲池。Static 下槽位还不还 —— 整批要一起结束。",
+    "STALL": "本步 R5、R7、R8 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t34",
+   "title": "tick 34 · 4 个 prefill",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "排空",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "34",
+     "num": "34"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{34}|",
+     "num": "0"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{34}} p_r",
+     "num": "30"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{34}",
+     "num": "30"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens",
+    "running_q",
+    "stalled",
+    "waiting_q"
+   ],
+   "state": {
+    "waiting_q": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "running_q": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     1,
+     1,
+     1,
+     1
+    ],
+    "batch_tokens": 30,
+    "stalled": 0
+   },
+   "bars": [
+    {
+     "row": "R9",
+     "kind": "prefill"
+    },
+    {
+     "row": "R10",
+     "kind": "prefill"
+    },
+    {
+     "row": "R11",
+     "kind": "prefill"
+    },
+    {
+     "row": "R12",
+     "kind": "prefill"
+    }
+   ],
+   "narration": "本 tick 花掉 30 / 32 个 token 预算。新上车：R9（prompt 8）、R10（prompt 8）、R11（prompt 8）、R12（prompt 6）。"
+  },
+  {
+   "id": "t35",
+   "title": "tick 35 · 4 个 decode",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "排空",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "35",
+     "num": "35"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{35}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{35}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{35}",
+     "num": "4"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens"
+   ],
+   "state": {
+    "batch_tokens": 4
+   },
+   "bars": [
+    {
+     "row": "R9",
+     "kind": "decode"
+    },
+    {
+     "row": "R10",
+     "kind": "decode"
+    },
+    {
+     "row": "R11",
+     "kind": "decode"
+    },
+    {
+     "row": "R12",
+     "kind": "decode"
+    }
+   ],
+   "narration": "本 tick 花掉 4 / 32 个 token 预算。"
+  },
+  {
+   "id": "t36",
+   "title": "tick 36 · 3 个 decode，1 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "排空",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "36",
+     "num": "36"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{36}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{36}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{36}",
+     "num": "3"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens",
+    "stalled"
+   ],
+   "state": {
+    "batch_tokens": 3,
+    "stalled": 1
+   },
+   "bars": [
+    {
+     "row": "R9",
+     "kind": "decode"
+    },
+    {
+     "row": "R10",
+     "kind": "decode"
+    },
+    {
+     "row": "R11",
+     "kind": "stalled"
+    },
+    {
+     "row": "R12",
+     "kind": "decode"
+    }
+   ],
+   "narration": "本 tick 花掉 3 / 32 个 token 预算。槽位里 R11 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。",
+   "regions": {
+    "STALL": "本步 R11 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t37",
+   "title": "tick 37 · 2 个 decode，2 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "排空",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "37",
+     "num": "37"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{37}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{37}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{37}",
+     "num": "2"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens",
+    "stalled"
+   ],
+   "state": {
+    "batch_tokens": 2,
+    "stalled": 2
+   },
+   "bars": [
+    {
+     "row": "R9",
+     "kind": "decode"
+    },
+    {
+     "row": "R10",
+     "kind": "stalled"
+    },
+    {
+     "row": "R11",
+     "kind": "stalled"
+    },
+    {
+     "row": "R12",
+     "kind": "decode"
+    }
+   ],
+   "narration": "本 tick 花掉 2 / 32 个 token 预算。槽位里 R10、R11 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。",
+   "regions": {
+    "STALL": "本步 R10、R11 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t38",
+   "title": "tick 38 · 2 个 decode，2 个空转",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "排空",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "38",
+     "num": "38"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{38}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{38}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{38}",
+     "num": "2"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [],
+   "state": {},
+   "bars": [
+    {
+     "row": "R9",
+     "kind": "decode"
+    },
+    {
+     "row": "R10",
+     "kind": "stalled"
+    },
+    {
+     "row": "R11",
+     "kind": "stalled"
+    },
+    {
+     "row": "R12",
+     "kind": "decode"
+    }
+   ],
+   "narration": "本 tick 花掉 2 / 32 个 token 预算。槽位里 R10、R11 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。",
+   "regions": {
+    "STALL": "本步 R10、R11 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  },
+  {
+   "id": "t39",
+   "title": "tick 39 · 1 个 decode，3 个空转，4 个完成",
+   "kind": "op",
+   "op": "schedule",
+   "phase": "排空",
+   "formula": {
+    "sym": "\\mathrm{tokens}_t = \\underbrace{\\slot{DEC}}_{\\text{在途 · 每个 1 个}} + \\underbrace{\\slot{PRE}}_{\\text{新请求 · 整段 prompt}} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}} \\;\\region{STALL}{\\text{空转}}",
+    "idx": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}} \\;\\region{STALL}{\\text{空转}}",
+    "num": "\\mathrm{tokens}_{\\slot{T}} = \\slot{DEC} + \\slot{PRE} = \\slot{TOT} \\;\\le\\; \\slot{BUDGET} \\;\\region{EXIT}{\\text{退出}} \\;\\region{STALL}{\\text{空转}}"
+   },
+   "bindings": {
+    "T": {
+     "sym": "t",
+     "idx": "39",
+     "num": "39"
+    },
+    "DEC": {
+     "sym": "|D_t|",
+     "idx": "|D_{39}|",
+     "num": "4"
+    },
+    "PRE": {
+     "sym": "\\textstyle\\sum_{r \\in A_t} p_r",
+     "idx": "\\textstyle\\sum_{r \\in A_{39}} p_r",
+     "num": "0"
+    },
+    "TOT": {
+     "sym": "\\mathrm{tokens}_t",
+     "idx": "\\mathrm{tokens}_{39}",
+     "num": "1"
+    },
+    "BUDGET": {
+     "sym": "\\mathrm{budget}",
+     "idx": "\\mathrm{budget}",
+     "num": "32"
+    }
+   },
+   "reads": [
+    "waiting_q",
+    "running_q",
+    "computed",
+    "kv_blocks"
+   ],
+   "writes": [
+    "batch_tokens",
+    "done_q",
+    "running_q",
+    "stalled"
+   ],
+   "state": {
+    "running_q": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "done_q": [
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1
+    ],
+    "batch_tokens": 1,
+    "stalled": 3
+   },
+   "bars": [
+    {
+     "row": "R9",
+     "kind": "decode"
+    },
+    {
+     "row": "R10",
+     "kind": "stalled"
+    },
+    {
+     "row": "R11",
+     "kind": "stalled"
+    },
+    {
+     "row": "R12",
+     "kind": "stalled"
+    }
+   ],
+   "narration": "本 tick 花掉 1 / 32 个 token 预算。槽位里 R10、R11、R12 已经生成完了，却因为整批没结束还占着位置 —— 它们这一步一个 token 都没算，占的是槽位而不是算力；槽位空不出来，后面的请求就上不了车。",
+   "regions": {
+    "EXIT": "本步有 R9、R10、R11、R12 生成了最后一个 token，KV block 立刻归还空闲池。Static 下槽位还不还 —— 整批要一起结束。",
+    "STALL": "本步 R10、R11、R12 已经生成完了，token 一个没算，但槽位还占着 —— 整批没结束就不释放。这是「长尾请求拖死整批」的成本，只不过它花的不是算力而是并发额度：空位腾不出来，排队的新请求上不了车。"
+   }
+  }
+ ]
+}

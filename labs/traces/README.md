@@ -46,11 +46,15 @@ literally true for a parameterised lab: `T` is applied as `x/T` here, not on the
 page, and a configuration with no trace behind it is unreachable by construction.
 
 The generators that have landed so far: `online_softmax.py` (L00),
-`gemm_tiling.py` (L01), `kv_cache.py` (L05).
+`gemm_tiling.py` (L01), `kv_cache.py` (L05), `continuous_batching.py` (L10).
 
-`kv_cache.py` is also the fixture the memory-ledger view component
-(`labs/assets/engine/views/ledger.js`, ticket #45) is validated against, which
-is why it carries a `ledger` block on top of the usual trace.
+Two of them double as the fixture their view component is validated against,
+which is why they carry a block on top of the usual trace: `kv_cache.py` has
+`ledger` for the memory-ledger view (`labs/assets/engine/views/ledger.js`,
+ticket #45), and `continuous_batching.py` has `gantt` for the gantt view
+(ticket #46). Writing that fixture is how a view ticket breaks the circular
+dependency — the lab that would consume it is blocked by the view, but trace
+generation does not depend on the view.
 
 ## Two optional step fields a trace may use
 
@@ -95,6 +99,35 @@ the rules stay inert. See `lint_ledger()` here and its JS port in
 `labs/assets/engine/views/ledger.js` — **the two rule sets must be changed
 together, and each needs its own sabotage case**, or the side that did not get
 one is untested.
+## The gantt contract
+
+The gantt view (`labs/assets/engine/views/gantt.js`) is the one view whose
+contract does **not** live in `trace-model.js`. Rows, tracks and time-steps are
+a view's idea, not the engine's, and no other view or lab reads them — so the
+rules sit beside the view, and the copy of them that the trace generator needs
+sits beside the generator. `continuous_batching.py` (L10) introduces the three
+fields:
+
+- **`gantt.rows`** — `[{id, label, sub?, track?}]`. One entry per resource: a
+  request in L10, a pipeline stage in L16, the compute and communication lanes
+  in L17. `track` groups rows into labelled sub-lanes, which is how L17 draws
+  its compute-above-communication split without a second chart.
+- **`gantt.tracks`** — `[{id, label}]`, optional. Only needed when rows name a
+  `track`.
+- **`gantt.kinds`** (+ optional `gantt.kindsLabel`) — the activity vocabulary.
+  Every bar's `kind` must be in this list or the lint rejects the trace: a kind
+  with no entry is a bar with no style, which renders as a grey block that looks
+  deliberate.
+- **`step.bars`** — `[{row, kind, label?}]`, what each resource was doing during
+  that step. Not derivable from `state`: a scheduler that computed three tokens
+  and one that computed none can leave identical queue lengths behind. The
+  optional `label` is what L16 (micro-batch id) and L17 (bucket number) will
+  print inside the block.
+
+Because these five rules are a second copy of the same contract, **both copies
+carry a sabotage control group and the acceptance harness runs the same one
+through both** (`scripts/verify-gantt.py`, the "契约 lint 的两份实现" section).
+A rule that exists on one side only is a rule tested on neither.
 
 ## Environment
 
