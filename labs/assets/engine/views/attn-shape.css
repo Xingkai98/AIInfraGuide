@@ -1,0 +1,206 @@
+/* L05 · view: the with/without KV cache attention comparison.
+ *
+ * Colours come from the engine's custom properties (lab.css), so this follows
+ * the light/dark theme without a second palette — the same convention the other
+ * view stylesheets follow. The two modes' accent colours are the two things
+ * this picture has to keep apart at a glance, so they are declared once here
+ * and referenced everywhere below rather than repeated as literals.
+ */
+
+.lab-as {
+  --as-nc: #dc2626;          /* the uncached path: the expensive one */
+  --as-wc: #0f7b52;          /* the cached path: the cheap one */
+  color: var(--lab-fg, #1f2937);
+  font-size: 12.5px;
+}
+
+.lab-as-none {
+  margin: 0;
+  padding: 10px 12px;
+  color: var(--lab-dim, #6b7280);
+  font-size: 12px;
+}
+
+.lab-as-hd { margin-bottom: 8px; }
+.lab-as-hd-t { display: block; font-weight: 650; font-size: 13px; }
+.lab-as-hd-s {
+  display: block;
+  margin-top: 2px;
+  color: var(--lab-dim, #6b7280);
+  font: 500 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* --------------------------------------------------------------- the two columns
+ *
+ * One shared key axis, two query axes. `align-items: start` is what makes the
+ * comparison readable: the two columns' grids start at the same y, so a decode
+ * strip sitting under a square prefill matrix shows the collapse rather than
+ * centring itself against it and hiding it.
+ *
+ * The track sizes are set inline by the component (they are data — the ratio
+ * of two element counts); everything here is the chassis around them.
+ */
+.lab-as-cols {
+  display: grid;
+  align-items: start;
+  gap: 12px;
+}
+/* `min-width: 0` so a track can shrink below its content's min-content width;
+ * without it a long shape string would widen its column past its track. */
+.lab-as-slot { min-width: 0; }
+
+.lab-as-col {
+  border: 1px solid var(--lab-line, #e3e6ec);
+  border-radius: 10px;
+  padding: 9px 10px 10px;
+  background: var(--lab-panel, #fff);
+  height: 100%;
+  box-sizing: border-box;
+}
+.lab-as-nc { border-color: color-mix(in srgb, var(--as-nc) 38%, var(--lab-line, #e3e6ec)); }
+.lab-as-wc { border-color: color-mix(in srgb, var(--as-wc) 38%, var(--lab-line, #e3e6ec)); }
+
+.lab-as-col-t {
+  font-weight: 650;
+  font-size: 12px;
+  margin-bottom: 7px;
+  line-height: 1.35;
+}
+.lab-as-nc .lab-as-col-t { color: var(--as-nc); }
+.lab-as-wc .lab-as-col-t { color: var(--as-wc); }
+
+/* ----------------------------------------------------------------- the operands
+ *
+ * Q and K drawn to scale against the shared key axis. Q's width is its query
+ * count; K's is always the full context. The difference between those two
+ * widths IS the teaching point, so the bars are given real widths from the
+ * trace's shapes rather than a fixed decoration.
+ */
+.lab-as-ops {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.lab-as-op {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* The bar's width is data: the component sets it inline as a percentage of
+   * the shared operand scale, EXACTLY. The floor lives here rather than in the
+   * component so that "the bar is 0.8% wide" and "the bar is drawn at least
+   * 22px wide so it is visible" are two separate statements — baking the floor
+   * into the width would make the reported proportion disagree with the drawn
+   * one. `box-sizing: border-box` plus `max-width: 100%` keeps a 100% bar
+   * inside its column with the border and padding accounted for — without it
+   * the widest bar overhangs its column by exactly the padding, which is what
+   * the first version of this panel did. */
+  min-width: 22px;
+  max-width: 100%;
+  height: 17px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--lab-accent, #007aff) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--lab-accent, #007aff) 34%, transparent);
+  box-sizing: border-box;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.lab-as-nc .lab-as-op {
+  background: color-mix(in srgb, var(--as-nc) 12%, transparent);
+  border-color: color-mix(in srgb, var(--as-nc) 34%, transparent);
+}
+.lab-as-op-l { font-weight: 700; font-size: 11px; }
+.lab-as-op-s {
+  font: 500 10.5px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--lab-dim, #6b7280);
+}
+
+/* ------------------------------------------------------------- the score matrix
+ *
+ * Drawn as an aspect-ratio box rather than a fixed-height grid: the shape of
+ * this rectangle is the data (a [4,1,t] strip and a [4,t,t] square must not
+ * render at the same aspect), and the component sets `aspect-ratio` inline.
+ */
+.lab-as-grid-wrap { margin-bottom: 8px; }
+.lab-as-grid {
+  display: grid;
+  gap: 1px;
+  /* NOT `width: 100%`. The width is derived from the aspect ratio and the
+   * height cap, which the component sets inline — see `column`. Stretching to
+   * the column and then capping the height is what made a square matrix draw
+   * as a 6.8:1 strip. */
+  border: 1px solid var(--lab-line, #e3e6ec);
+  border-radius: 4px;
+  padding: 2px;
+  background: var(--lab-line, #e3e6ec);
+  box-sizing: border-box;
+  /* A floor and a ceiling, because a 1-row strip would otherwise be one pixel
+   * tall and a 1024-cell square would be enormous. `--as-gh` is set by the
+   * component, so the cap and the width it derives come from one number. */
+  min-height: var(--as-gh-min, 18px);
+  max-height: var(--as-gh, 190px);
+}
+.lab-as-cell {
+  background: color-mix(in srgb, var(--lab-accent, #007aff) 30%, transparent);
+  border-radius: 1px;
+  aspect-ratio: 1;
+}
+.lab-as-nc .lab-as-cell { background: color-mix(in srgb, var(--as-nc) 26%, transparent); }
+.lab-as-wc .lab-as-cell { background: color-mix(in srgb, var(--as-wc) 34%, transparent); }
+/* The causal mask, made visible: the cells softmax zeroes out. */
+.lab-as-cell-masked {
+  background: color-mix(in srgb, var(--lab-dim, #6b7280) 13%, transparent);
+}
+
+.lab-as-grid-s {
+  margin-top: 4px;
+  font: 500 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--lab-dim, #6b7280);
+  word-break: break-all;
+}
+.lab-as-grid-s b { color: var(--lab-fg, #1f2937); }
+
+/* ------------------------------------------------------------------ the facts
+ *
+ * `minmax(0, 1fr)` on the value column rather than `1fr`: a grid track's
+ * default minimum is its content's min-content width, so a long value like
+ * `6.144e+6` in a 220px column pushes the track wider than the column and the
+ * row overflows the panel. Allowing the track to shrink to 0 lets the value
+ * wrap under its label instead — the numbers are monospace and break anywhere,
+ * so the wrap is legible.
+ */
+.lab-as-facts {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 8px;
+  margin: 0;
+  font-size: 11.5px;
+}
+.lab-as-facts dt { color: var(--lab-dim, #6b7280); }
+.lab-as-facts dd {
+  margin: 0;
+  font: 650 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+/* ----------------------------------------------------------------- the summary */
+.lab-as-sum {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--lab-accent, #007aff) 8%, transparent);
+  font-size: 12px;
+  line-height: 1.65;
+}
+.lab-as-sum b { color: var(--lab-accent, #007aff); }
+
+/* Narrow screens: the two columns stack rather than shrink to unreadable. The
+ * `!important` is load-bearing — the track sizes are set as an inline style by
+ * the component, and an inline `grid-template-columns` beats a stylesheet rule
+ * without it. */
+@media (max-width: 720px) {
+  .lab-as-cols { grid-template-columns: 1fr !important; }
+  .lab-as-grid { max-height: 150px; }
+}
