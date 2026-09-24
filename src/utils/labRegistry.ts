@@ -184,6 +184,30 @@ export const LAB_REGISTRY: Record<string, LabEntry> = {
     ],
     published: true,
   },
+  '模块一-前置知识/transformer/38-从transformer到llm自回归生成深入理解': {
+    labId: 'L05',
+    title: 'KV Cache 与自回归生成',
+    summary:
+      '逐 token 生成：每步 K/V 追加进缓存后，attention 只用最后一个 query —— 有/无 cache 两种形状画在同一把尺度上，' +
+      '旁边是随上下文长度、层数、精度变化的显存账本，以及 Prefill（算力受限）与 Decode（带宽受限）在 Roofline 上的落点。',
+    page: `${LAB_BASE}/05-kv-cache.html`,
+    links: [
+      { label: '从第一步开始' },
+      // Step 5 is the first DECODE attention: the prompt has been consumed and
+      // the model now attends with a single query token over the whole cached
+      // span. Steps 0-3 are prefill, where cached and uncached modes are
+      // IDENTICAL by construction -- the divergence this lab is about has not
+      // started yet, so a reader pointed there first would see two same-shaped
+      // columns and no story.
+      { label: '跳到第一次 Decode 注意力（query 只剩 1 个 token）', search: '?step=5' },
+      // N=128 raises the KV share of the ledger from 1% to 24%: at the default
+      // context the cache is a rounding error and the ledger's point is
+      // invisible.
+      { label: '跳到 KV 占比最大的配置（上下文 128，记账 24%）',
+        search: '?cfg=kv-cache-N128-L4-fp16&step=5' },
+    ],
+    published: true,
+  },
   '模块三-分布式训练/21-集合通信原语详解': {
     labId: 'L13',
     title: 'Ring AllReduce 逐帧回放',
