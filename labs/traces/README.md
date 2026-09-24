@@ -51,6 +51,43 @@ divides M=N=K=8 — plus `gemm-tiling.manifest.json`. The sliders are therefore
 three independent controls rather than three positions of one knob, and the
 filter that would skip a non-dividing tile is in the generator's `grid()`.
 
+`kv_cache.py` (L05) follows the same shape for `(N, L, precision)` — 18
+configurations, the full product of {8, 128, 256} × {2, 4} × {fp16, fp8, int8},
+plus `kv-cache.manifest.json`. Two things distinguish it from the two above and
+both are deliberate:
+
+- **The default keeps the bare file name `kv-cache.json`** rather than encoding
+  its parameters, because ticket #45's acceptance page and harness pin that
+  filename. Nothing parses an id: the page matches a slider position to a trace
+  by reading the trace's own `meta.config`, which is a stronger check than
+  string parsing and needs no naming convention at all — the manifest's ids are
+  for humans.
+- **The three sliders move geometry, not just counts.** `N` is the sequence
+  length the replay *ends* at (prompt N−4, then 4 generated tokens), so the
+  replay is 20 steps in every configuration while the context the prefill
+  swallows and the decode attends over spans 16× — enough for the ledger's KV
+  share to visibly climb (7% → 13% → 24%). `L` and the precision move the
+  ledger's byte counts in the other two directions — and fp8 and int8 price
+  identically at this level (one byte per element), which the generator asserts
+  as a property and prints rather than hiding behind a third position that
+  looks like it should differ.
+- **The context grid stops at 128, and `state` is published to 6 significant
+  figures, both for page size.** L05 is the first lab whose `state` holds a
+  large array of high-entropy floats: the residual stream is `[N, d_model]` and
+  its entries come out of a standard-normal weight draw, so at N=256 it is
+  ~330 KB of text *per prefill step* — and random mantissas do not compress, so
+  it costs full price over the wire too. A 32× context span put 10.3 MB of
+  traces into one inlined page, 4.4× the largest lab that had shipped and 8×
+  the largest page the site had. Capping the grid at 128 and rounding `state` to
+  `STATE_SIG_FIGS = 6` brings the set to 3.9 MB and the page to 2.4 MB raw —
+  level with L01's 2.33 MB. (Its gzip is larger, 0.85 MB against L01's 0.20 MB:
+  that is the honest cost of the subject matter, since L01's integers compress
+  and these do not.) Nothing asserted downstream reads those digits — the torch
+  cross-check, the ledger accounting and the attention-cost comparison all run
+  on the float64 arrays before the projection. Contexts past 128 are reachable
+  through the page's *predicted* panel, which is labelled as a prediction and
+  drives the same closed form out to 4096.
+
 The generators that have landed so far: `online_softmax.py` (L00),
 `gemm_tiling.py` (L01), `kv_cache.py` (L05), `continuous_batching.py` (L10),
 `ring_allreduce.py` (L13), `flash_attention.py` (L06).
@@ -70,6 +107,19 @@ step fields, and it follows the gantt's precedent instead: its rules live beside
 the view (`views/roofline.js`) and beside the generator, both carry a sabotage
 control group, and the acceptance harness runs the same table through both. It
 is reached from any lab with a `meta.roofline` block; L01 is the only one so far.
+
+L05 added two more view fixtures (`step.attn_cost` / `meta.attn_cost` for
+`views/attn-shape.js`, `meta.phase_roofline` for `views/phase-roofline.js`) and
+one trace-level block (`meta.kv_crossover`) — see their own sections below. The
+phase Roofline is worth one note here, because it is the case where a shared
+component was **not** reused as a lint target: `views/phase-roofline.js` renders
+through `roofline.makeView` unchanged (the drawing is shared in full), but L05
+declares a different key rather than `meta.roofline`. The reason is the rule
+stated just below — `roofline.js`'s lint is **not** field-gated: it hard-requires
+L01's three roles (`naive`/`tiled`/`doc`), `2MNK` FLOPs and a `meta.traffic`
+block, and would report every L05 trace as broken. Rewriting another ticket's
+contract file was out of scope, so the renderer is shared and the rules are
+L05's own.
 
 The other half of that coin is what a shared component must NOT do. Because
 `tiling-stage.js` is driven by four different labs, every rule its lint carries
@@ -209,6 +259,149 @@ the rules stay inert. See `lint_ledger()` here and its JS port in
 `labs/assets/engine/views/ledger.js` — **the two rule sets must be changed
 together, and each needs its own sabotage case**, or the side that did not get
 one is untested.
+
+## The `attn_cost` step field (added with L05's lab page, #19)
+
+L05's central contrast is between two ways to compute the same attention:
+without a cache, every step re-runs the whole prefix (`[t,d] × [t,d]` per head);
+with one, only the new queries run (`[n_q,d] × [t,d]`). `views/attn-shape.js`
+draws the two side by side, and this is the field it draws:
+
+```jsonc
+"steps": [
+  { "attn_cost": {
+      "t": 125, "n_q": 1, "H": 4, "d_head": 16, "layers": 2,
+      "no_cache":   { "queries": 125, "q_shape": [125, 64], "k_shape": [125, 64],
+                      "score_shape": [4, 125, 125], "score_elems": 62500,
+                      "kv_read_elems": 0, "kv_write_elems": 0,
+                      "attn_flops": …, "proj_flops": … },
+      "with_cache": { "queries": 1,   "q_shape": [1, 64],   "k_shape": [125, 64],
+                      "score_shape": [4, 1, 125], "score_elems": 500,
+                      "kv_read_elems": …, "kv_write_elems": …,
+                      "attn_flops": …, "proj_flops": … } } }
+],
+"meta": { "attn_cost": { "totals": { "no_cache": {…}, "with_cache": {…} },
+                         "prefill_identical": true } }
+```
+
+**Both modes are MEASURED, not asserted.** The generator already runs an
+uncached full-prefix forward at every step — that is the torch cross-check — and
+`attn_cost_step()` reads each mode's score matrix and Q/K row counts off the
+**real arrays of both computations**, then asserts them against the shape
+formula in the same block. Publishing the contrast as a formula alone would make
+it a claim about what the code does rather than a reading of what it did, and
+those differ in exactly the case that matters, because `n_q` is the prompt
+length at prefill and 1 at decode.
+
+Three things the lint requires, each with a control:
+
+- **`score_elems` is the product of its own `score_shape`**, and `attn_flops` is
+  `4·H·q·t·d_h`, and `proj_flops` is `6·q·d²·L` — so "the shape got wider" and
+  "the work got bigger" cannot become two independent claims on one page.
+- **At prefill the two modes must be IDENTICAL** (in the computation — shapes
+  and FLOPs — not in the cache traffic, which genuinely differs because one path
+  writes the prompt's rows into a cache and the other has no cache at all).
+  With an empty cache there is nothing to recompute, and that coincidence is the
+  control the decode divergence is read against. A lab whose two columns
+  differed *everywhere* would be showing a difference it never isolated.
+- **Some step must diverge**, or the control above is the only thing the
+  comparison ever shows.
+
+The uncached mode charges `kv_read_elems = kv_write_elems = 0`: it has no cache,
+so its cost lands in `proj_flops` instead, and saying "0" is what keeps that
+visible rather than spread across both columns.
+
+The whole field is optional, and its rules live beside the view
+(`views/attn-shape.js`) — same two-port arrangement as the ledger's, with the
+same sabotage table run through both by `scripts/verify-l05.py`. The generator's
+sabotage names carry the owning view as a prefix (`attn …`, `roofline …`,
+`crossover …`), which is how the harness attributes each case to the port that
+must catch it rather than only requiring *some* port to.
+
+## The `phase_roofline` block (added with L05's lab page, #19)
+
+The tutorial's own claim — Prefill is compute-bound, Decode is memory-bound —
+placed on a Roofline by computing it rather than quoting it
+(`1.1-LLM推理基础.md` §4):
+
+```jsonc
+"meta": {
+  "phase_roofline": {
+    "peak_flops": 9.9e14, "bandwidth": 3.35e12, "ridge": 295.5,
+    "y_divisor": 1e12, "y_unit": "TFLOP/s", "model": "NVIDIA H100 SXM…",
+    "traffic_note": "按权重读取一次 + KV 全量读 + 本步新行写回来计价…",
+    "points": [
+      { "id": "prefill"|"decode"|"doc", "label": …, "ai": …, "flops": …,
+        "bytes": …, "parts": { "proj_flops": …, "ffn_flops": …, "attn_flops": …,
+                               "head_flops": …, "weights_bytes": …,
+                               "kv_read_bytes": …, "kv_write_bytes": … },
+        "ceiling": …, "bound": "bandwidth"|"compute",
+        "config": { "n_q": …, "t": …, "prompt": …, "layers": …, "dtype": … } }
+    ] } }
+```
+
+One trace-level block, like the Roofline's, and it is reached from
+`meta.phase_roofline` rather than `meta.roofline` for the field-gating reason
+above. Three points, and the comparison between them is the lesson:
+
+- **`prefill`** — this configuration's prompt in one pass. Its arithmetic
+  intensity is `prompt_len`-fold the decode one, because the weight bytes are
+  paid ONCE for the whole prompt. This is the point the slider moves.
+- **`decode`** — one token against the same weights. It sits near 1 FLOP/Byte
+  and barely moves with the context: the control that makes the prefill movement
+  readable as a comparison.
+- **`doc`** — a 7B-class model at a 512-token prompt, i.e. the tutorial's own
+  claim computed rather than quoted. It is deliberately NOT tied to this trace's
+  config: it must be the same dot on every configuration, and the harness
+  asserts that stillness.
+
+The traffic model is a choice and the block publishes it in `traffic_note`
+rather than leaving it implied: weights read once per pass, the KV cache read in
+full, this step's new rows written back, and **the attention score matrix not
+counted as HBM traffic at all** — it is produced and consumed inside the
+attention kernel's SRAM, which is the assumption FlashAttention is built on
+(L06) and the reason this lab can put attention on a Roofline.
+
+What the lint requires is that the chart be internally coherent: `ai` is the
+point's own FLOPs over its own bytes; `ceiling` is `min(peak, bandwidth × ai)`
+and `bound` names the roof that produced it; the totals equal the sums of their
+own `parts` (so one summary number cannot hide a dropped term); `y_divisor` and
+`y_unit` agree with `y_label`; and the two live points describe *this*
+configuration while `doc` describes the reference model. The honest answer the
+block records is that in this toy model **both** live points land on the
+bandwidth roof — the compute roof is reached only by the reference model — and
+the page says so rather than letting a reader conclude the chart is wrong.
+
+## The `kv_crossover` block (added with L05's lab page, #19)
+
+```jsonc
+"meta": { "kv_crossover": { "params_bytes": 210176, "per_token_bytes": 512,
+                            "context": 410.5 } }
+```
+
+The context length at which the KV cache outweighs the weights, published so the
+page can state it without computing it. One rule, and it is the one with teeth:
+the crossover must equal `params_bytes / per_token_bytes`, **and both of those
+must equal the figures the ledger block already publishes** — `params_bytes` to
+the last step's `params` segment, `per_token_bytes` to `2·L·H_kv·d_h·b`. Without
+the second half the page could print a crossover computed from a different model
+than the bar it is drawn beside.
+
+The block exists because at this model's size the crossover is at context ≈ 410
+for 2 layers at fp16 — far beyond the 256 the sliders can replay — so the ledger
+bar never crosses over on screen. A page that left the number out would leave a
+reader with a picture that never shows the thing the tutorial is about. L05's
+page therefore also carries a *predicted*-configuration ledger, driven by the
+same closed form over a wider range; it is labelled as a prediction everywhere
+it appears, and the ledger's self-check panel is what makes it legitimate (it
+proves the page's cost model equals the one the trace was counted with).
+
+The JS port of these rules lives in `views/phase-roofline.js` even though the
+block is ledger subject matter: `labs/assets/engine/` is frozen for this ticket
+and `views/ledger.js` is one of the files it freezes. Recorded here so whoever
+unfreezes the engine can move the four `crossover …` rules next to the ledger's
+own port, where the repo's convention puts them.
+
 ## The gantt contract
 
 The gantt view (`labs/assets/engine/views/gantt.js`) is the one view whose

@@ -87,7 +87,19 @@ npm run build:labs && python3 scripts/verify-ledger.py         # 显存账本视
 npm run build:labs && python3 scripts/verify-gantt.py          # 甘特视图 + L10
 npm run build:labs && python3 scripts/verify-ring.py           # 环形拓扑视图 + L13
 npm run build:labs && python3 scripts/verify-flash-attention.py # L06 旗舰
+npm run build:labs && python3 scripts/verify-l05.py            # L05 KV Cache 旗舰
 ```
+
+`verify-l05.py` covers L05's five acceptance criteria (#19): the replay with the
+cache growing frame by frame, the with/without-cache shape comparison, the
+ledger component being consumed rather than re-implemented, the three parameter
+sliders recomputing the ledger, and the Prefill/Decode Roofline. It carries the
+same control groups the other harnesses do — the parameters segment may not move
+with the context, the Roofline's reference point must be the same dot in every
+configuration, and the two attention modes must be *identical* at prefill — plus
+a geometry control that hand-builds the violations (a dot pushed out of the
+frame, a label moved onto a neighbouring dot, a rectangle squeezed away from its
+declared aspect ratio) and requires the same predicates to flag each one.
 
 > ⚠️ **`npm run build:labs` 不是可选的，也不是一次性的。** 验收脚本驱动的是
 > `public/labs/` 里的**暂存产物**，不是 `labs/` 源文件。合并或拉取之后不重跑它，

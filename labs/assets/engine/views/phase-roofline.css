@@ -1,0 +1,86 @@
+/* L05 · view: the Prefill/Decode Roofline.
+ *
+ * The chart itself is styled by `roofline.css` — this view renders through
+ * `roofline.makeView` and adds only the furniture around it: a header, the
+ * per-phase breakdown table, and the sentence that says why the two phases land
+ * where they do. Keeping the chart's own styles in roofline.css is what lets
+ * the two labs' charts look like the same chart, which they are.
+ */
+
+.lab-pr {
+  color: var(--lab-fg, #1f2937);
+  font-size: 12.5px;
+}
+
+.lab-pr-hd { margin-bottom: 6px; }
+.lab-pr-hd-t { display: block; font-weight: 650; font-size: 13px; }
+.lab-pr-hd-s {
+  display: block;
+  margin-top: 2px;
+  color: var(--lab-dim, #6b7280);
+  font: 500 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* --------------------------------------------------------------- the breakdown
+ *
+ * The table is the chart's evidence: every term that produced a dot's arithmetic
+ * intensity, per phase. The two live rows share a weights column and differ in
+ * the KV and FLOP columns, which is the whole argument, so the columns are
+ * ordered to put them next to each other.
+ */
+.lab-pr-table {
+  width: 100%;
+  margin-top: 10px;
+  border-collapse: collapse;
+  font-size: 11.5px;
+}
+.lab-pr-table th,
+.lab-pr-table td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--lab-line, #e3e6ec);
+  text-align: right;
+  white-space: nowrap;
+}
+.lab-pr-table thead th {
+  color: var(--lab-dim, #6b7280);
+  font-weight: 600;
+  font-size: 11px;
+  border-bottom-width: 1px;
+}
+/* The phase name is the only left-aligned cell, and it is a row header so a
+ * screen reader announces it with each number. */
+.lab-pr-table .lab-pr-row {
+  text-align: left;
+  white-space: normal;
+}
+.lab-pr-table tbody td {
+  font: 500 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.lab-pr-table tbody td b { font-weight: 700; }
+.lab-pr-note {
+  display: block;
+  color: var(--lab-dim, #6b7280);
+  font: 400 10.5px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+        'Noto Sans CJK SC', sans-serif;
+}
+/* Which roof binds, as a colour: the same two colours the dots use for their
+ * `bound`, so the table and the chart agree at a glance. */
+.lab-pr-b-bandwidth { color: #b45309; font-weight: 700; }
+.lab-pr-b-compute { color: #0f7b52; font-weight: 700; }
+
+.lab-pr-why {
+  margin: 8px 0 0;
+  color: var(--lab-dim, #6b7280);
+  font-size: 11.5px;
+  line-height: 1.7;
+}
+.lab-pr-why b { color: var(--lab-fg, #1f2937); }
+
+/* The chart is `roofline.js`'s; this only keeps its note from colliding with
+ * the table's top margin. */
+.lab-pr .lab-roof-note { margin: 6px 0 0; }
+
+@media (max-width: 720px) {
+  .lab-pr-table { font-size: 11px; }
+  .lab-pr-table th, .lab-pr-table td { padding: 4px 5px; }
+}

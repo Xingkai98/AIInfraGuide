@@ -1,0 +1,62 @@
+{
+ "set": "kv-cache",
+ "lab": "L05",
+ "default": "kv-cache",
+ "params": {
+  "N": [
+   8,
+   64,
+   128
+  ],
+  "L": [
+   2,
+   4
+  ],
+  "prec": [
+   "fp16",
+   "fp8",
+   "int8"
+  ]
+ },
+ "traces": [
+  "kv-cache",
+  "kv-cache-N8-L2-fp8",
+  "kv-cache-N8-L2-int8",
+  "kv-cache-N8-L4-fp16",
+  "kv-cache-N8-L4-fp8",
+  "kv-cache-N8-L4-int8",
+  "kv-cache-N64-L2-fp16",
+  "kv-cache-N64-L2-fp8",
+  "kv-cache-N64-L2-int8",
+  "kv-cache-N64-L4-fp16",
+  "kv-cache-N64-L4-fp8",
+  "kv-cache-N64-L4-int8",
+  "kv-cache-N128-L2-fp16",
+  "kv-cache-N128-L2-fp8",
+  "kv-cache-N128-L2-int8",
+  "kv-cache-N128-L4-fp16",
+  "kv-cache-N128-L4-fp8",
+  "kv-cache-N128-L4-int8"
+ ],
+ "labels": {
+  "kv-cache": "上下文 8 · 2 层 · fp16",
+  "kv-cache-N8-L2-fp8": "上下文 8 · 2 层 · fp8",
+  "kv-cache-N8-L2-int8": "上下文 8 · 2 层 · int8",
+  "kv-cache-N8-L4-fp16": "上下文 8 · 4 层 · fp16",
+  "kv-cache-N8-L4-fp8": "上下文 8 · 4 层 · fp8",
+  "kv-cache-N8-L4-int8": "上下文 8 · 4 层 · int8",
+  "kv-cache-N64-L2-fp16": "上下文 64 · 2 层 · fp16",
+  "kv-cache-N64-L2-fp8": "上下文 64 · 2 层 · fp8",
+  "kv-cache-N64-L2-int8": "上下文 64 · 2 层 · int8",
+  "kv-cache-N64-L4-fp16": "上下文 64 · 4 层 · fp16",
+  "kv-cache-N64-L4-fp8": "上下文 64 · 4 层 · fp8",
+  "kv-cache-N64-L4-int8": "上下文 64 · 4 层 · int8",
+  "kv-cache-N128-L2-fp16": "上下文 128 · 2 层 · fp16",
+  "kv-cache-N128-L2-fp8": "上下文 128 · 2 层 · fp8",
+  "kv-cache-N128-L2-int8": "上下文 128 · 2 层 · int8",
+  "kv-cache-N128-L4-fp16": "上下文 128 · 4 层 · fp16",
+  "kv-cache-N128-L4-fp8": "上下文 128 · 4 层 · fp8",
+  "kv-cache-N128-L4-int8": "上下文 128 · 4 层 · int8"
+ },
+ "note": "配置 id 只给人看；页面按 meta.config 匹配滑杆位置，不解析 id。"
+}
