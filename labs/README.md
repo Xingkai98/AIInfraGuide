@@ -88,7 +88,23 @@ npm run build:labs && python3 scripts/verify-gantt.py          # 甘特视图 + 
 npm run build:labs && python3 scripts/verify-ring.py           # 环形拓扑视图 + L13
 npm run build:labs && python3 scripts/verify-flash-attention.py # L06 旗舰
 npm run build:labs && python3 scripts/verify-l05.py            # L05 KV Cache 旗舰
+npm run build:labs && python3 scripts/verify-l04.py            # L04 Decoder Block
 ```
+
+`verify-l04.py` covers L04's five acceptance criteria (#18): the residual add's
+shape confirmation together with the counterexamples that make it mean something
+(three candidate shapes that broadcast SILENTLY and three that raise, all six
+run rather than described), the LayerNorm axis made decidable by drawing the
+normalized array's row statistics, its column statistics and the same formula
+reduced over the other axis, SwiGLU's three paths with every hop's dimensions on
+screen, the Pre/Post-Norm contrast measured by torch autograd to depth 32, and
+the parameter account recomputed off the sliders. It carries the same control
+groups the other harnesses do — the parameter count may not move with the step,
+Post-Norm's residual RMS must hold flat while Pre-Norm's climbs, the two
+Pre/Post charts must share one vertical scale — plus a geometry control that
+hand-builds the violations (an element pushed past its panel's right edge, a
+cell grid squeezed away from its declared aspect ratio) and requires the same
+predicates to flag each one.
 
 `verify-l05.py` covers L05's five acceptance criteria (#19): the replay with the
 cache growing frame by frame, the with/without-cache shape comparison, the

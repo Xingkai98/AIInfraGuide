@@ -1,0 +1,154 @@
+/* L04 · view: Pre-Norm vs Post-Norm.
+ *
+ * Two decisions recorded here because they are the ones a reader would
+ * otherwise misread:
+ *
+ *   1. The two placements' charts share a y scale (set by the component). Two
+ *      independently scaled charts would show two similar-looking curves, and
+ *      the difference in height IS the content.
+ *   2. The norm node is the only coloured node in either flow. Everything else
+ *      is neutral, so the eye lands on the one thing that differs between the
+ *      two chains — which is the `#40` mermaid pair's entire content.
+ */
+
+.lab-nc {
+  --nc-pre: #0f7b52;
+  --nc-post: #dc2626;
+  --nc-ln: #7c3aed;
+  color: var(--lab-fg, #1f2937);
+  font-size: 12.5px;
+}
+
+.lab-nc-none {
+  margin: 0;
+  padding: 10px 12px;
+  color: var(--lab-dim, #6b7280);
+  font-size: 12px;
+}
+
+.lab-nc-hd { margin-bottom: 8px; }
+.lab-nc-hd-t { display: block; font-weight: 650; font-size: 13px; }
+.lab-nc-hd-s { display: block; margin-top: 2px; color: var(--lab-dim, #6b7280); font-size: 11.5px; line-height: 1.6; }
+
+/* ------------------------------------------------------------ the flows */
+.lab-nc-flows {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 8px;
+}
+.lab-nc-flow {
+  border: 1px solid var(--lab-line, #e3e6ec);
+  border-left-width: 3px;
+  border-radius: 9px;
+  padding: 8px 10px 10px;
+  background: var(--lab-panel, #fff);
+  min-width: 0;
+}
+.lab-nc-pre { border-left-color: var(--nc-pre); }
+.lab-nc-post { border-left-color: var(--nc-post); }
+.lab-nc-flow-t { display: block; font-weight: 650; font-size: 12px; }
+.lab-nc-pre .lab-nc-flow-t { color: var(--nc-pre); }
+.lab-nc-post .lab-nc-flow-t { color: var(--nc-post); }
+.lab-nc-fml {
+  display: block;
+  margin: 3px 0 7px;
+  color: var(--lab-dim, #6b7280);
+  font-size: 12px;
+  overflow-x: auto;
+}
+
+.lab-nc-chain { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.lab-nc-node {
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--lab-line, #e3e6ec);
+  background: var(--lab-panel, #fff);
+  font: 600 11.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--lab-dim, #6b7280);
+}
+.lab-nc-in { color: var(--lab-fg, #1f2937); }
+.lab-nc-sub { color: var(--lab-fg, #1f2937); }
+.lab-nc-add { color: var(--lab-fg, #1f2937); }
+/* The one coloured node in either chain. */
+.lab-nc-ln {
+  border-color: var(--nc-ln);
+  background: color-mix(in srgb, var(--nc-ln) 14%, transparent);
+  color: var(--nc-ln);
+  font-weight: 700;
+}
+.lab-nc-arrow { color: var(--lab-faint, #9ca3af); font-size: 12px; }
+
+/* ----------------------------------------------------------- the charts */
+.lab-nc-charts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+.lab-nc-chart {
+  border: 1px solid var(--lab-line, #e3e6ec);
+  border-radius: 9px;
+  padding: 9px 10px 10px;
+  background: var(--lab-panel, #fff);
+  min-width: 0;
+}
+.lab-nc-chart-t { display: block; font-weight: 650; font-size: 11.5px; margin-bottom: 7px; color: var(--lab-dim, #6b7280); }
+.lab-nc-series { display: flex; flex-direction: column; gap: 5px; }
+.lab-nc-row {
+  display: grid;
+  grid-template-columns: 62px 1fr auto;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.lab-nc-row-t { font-size: 11px; font-weight: 600; }
+.lab-nc-row[data-mode="pre"] .lab-nc-row-t { color: var(--nc-pre); }
+.lab-nc-row[data-mode="post"] .lab-nc-row-t { color: var(--nc-post); }
+.lab-nc-row-v { font: 600 11px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--lab-dim, #6b7280); white-space: nowrap; }
+.lab-nc-row-v b { color: var(--lab-fg, #1f2937); }
+
+/* The chart surface. A hairline baseline so a curve sitting at zero is visibly
+ * ON the axis rather than floating; `preserveAspectRatio="none"` (set in the
+ * component) lets the polyline stretch to any panel width without the tickless
+ * axes lying about their spacing. */
+.lab-nc-svg {
+  display: block;
+  width: 100%;
+  height: 84px;
+  border-bottom: 1px solid var(--lab-line, #e3e6ec);
+  overflow: visible;
+}
+.lab-nc-line { fill: none; stroke-width: 1.8; vector-effect: non-scaling-stroke; }
+.lab-nc-s-pre .lab-nc-line { stroke: var(--nc-pre); }
+.lab-nc-s-post .lab-nc-line { stroke: var(--nc-post); }
+.lab-nc-dot { stroke: none; }
+.lab-nc-s-pre .lab-nc-dot { fill: var(--nc-pre); }
+.lab-nc-s-post .lab-nc-dot { fill: var(--nc-post); }
+.lab-nc-g-pre .lab-nc-line { stroke: var(--nc-pre); }
+.lab-nc-g-post .lab-nc-line { stroke: var(--nc-post); }
+.lab-nc-g-pre .lab-nc-dot { fill: var(--nc-pre); }
+.lab-nc-g-post .lab-nc-dot { fill: var(--nc-post); }
+
+.lab-nc-note { margin: 8px 0 0; color: var(--lab-dim, #6b7280); font-size: 11px; line-height: 1.65; }
+.lab-nc-note code {
+  background: rgba(128, 128, 128, 0.15);
+  border-radius: 3px;
+  padding: 0 3px;
+  font: 0.95em/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.lab-nc-sum {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--nc-ln) 8%, transparent);
+  color: var(--lab-fg, #1f2937);
+  font-size: 11.5px;
+  line-height: 1.7;
+}
+.lab-nc-sum b { color: var(--nc-ln); }
+
+@media (max-width: 700px) {
+  .lab-nc-charts { grid-template-columns: 1fr; }
+  .lab-nc-row { grid-template-columns: 52px 1fr auto; }
+}

@@ -1,0 +1,160 @@
+/* L04 · view: the residual add and its shape requirement.
+ *
+ * Colours come from the engine's custom properties (lab.css), so this follows
+ * the light/dark theme without a second palette — the convention every view
+ * stylesheet follows. The three outcome colours are the three things this
+ * picture has to keep apart at a glance (it is a residual add / it broadcast
+ * silently / it raised), so they are declared once here and referenced
+ * everywhere below rather than repeated as literals.
+ */
+
+.lab-sg {
+  --sg-ok: #0f7b52;          /* the real residual add */
+  --sg-warn: #b45309;        /* silent broadcast: legal, and wrong */
+  --sg-bad: #dc2626;         /* raised */
+  color: var(--lab-fg, #1f2937);
+  font-size: 12.5px;
+}
+
+.lab-sg-none {
+  margin: 0;
+  padding: 10px 12px;
+  color: var(--lab-dim, #6b7280);
+  font-size: 12px;
+}
+
+.lab-sg-hd { margin-bottom: 8px; }
+.lab-sg-hd-2 { margin-top: 14px; }
+.lab-sg-hd-t { display: block; font-weight: 650; font-size: 13px; }
+.lab-sg-hd-s {
+  display: block;
+  margin-top: 2px;
+  color: var(--lab-dim, #6b7280);
+  font: 500 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* -------------------------------------------------------------- the add
+ *
+ * The two operands and the result, in a row. `align-items: end` so the shape
+ * captions line up along the bottom regardless of how tall each grid drew —
+ * the captions are the thing being compared.
+ */
+.lab-sg-add {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--lab-line, #e3e6ec);
+  border-radius: 10px;
+  background: var(--lab-panel, #fff);
+}
+.lab-sg-operand { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.lab-sg-op-t { font-size: 11px; color: var(--lab-dim, #6b7280); }
+.lab-sg-op-s {
+  font: 650 11.5px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--lab-accent-2, #b45309);
+}
+.lab-sg-op {
+  font: 700 16px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--lab-dim, #6b7280);
+  padding-bottom: 16px;
+}
+
+/* The cell grids. A [128, 64] operand is 8192 cells, so the drawn grid hits its
+ * cell cap at 16×16 and the SHAPE caption is what carries the true size — the
+ * grid carries the ordering, not the count. */
+.lab-sg-block {
+  display: grid;
+  gap: 1px;
+  width: 96px;
+  max-width: 100%;
+  background: var(--lab-line, #e3e6ec);
+  border: 1px solid var(--lab-line, #e3e6ec);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.lab-sg-cell { background: var(--lab-panel, #fff); aspect-ratio: 1; min-height: 3px; }
+.lab-sg-lhs .lab-sg-cell { background: color-mix(in srgb, var(--lab-accent, #007aff) 26%, transparent); }
+.lab-sg-rhs .lab-sg-cell { background: color-mix(in srgb, var(--lab-accent-2, #b45309) 26%, transparent); }
+.lab-sg-out .lab-sg-cell { background: color-mix(in srgb, var(--sg-ok) 26%, transparent); }
+
+.lab-sg-note {
+  margin: 8px 0 0;
+  color: var(--lab-dim, #6b7280);
+  font-size: 11.5px;
+  line-height: 1.7;
+}
+.lab-sg-note b { color: var(--lab-fg, #1f2937); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+/* -------------------------------------------------------- the counterexamples */
+.lab-sg-cases {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(215px, 1fr));
+  gap: 8px;
+}
+.lab-sg-case {
+  border: 1px solid var(--lab-line, #e3e6ec);
+  border-left-width: 3px;
+  border-radius: 8px;
+  padding: 7px 9px;
+  background: var(--lab-panel, #fff);
+  min-width: 0;
+}
+.lab-sg-same { border-left-color: var(--sg-ok); }
+.lab-sg-broadcast { border-left-color: var(--sg-warn); }
+.lab-sg-error { border-left-color: var(--sg-bad); }
+
+.lab-sg-case-h { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.lab-sg-case-s {
+  font: 650 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--lab-fg, #1f2937);
+}
+.lab-sg-case-b {
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.lab-sg-b-same { background: color-mix(in srgb, var(--sg-ok) 16%, transparent); color: var(--sg-ok); }
+.lab-sg-b-broadcast { background: color-mix(in srgb, var(--sg-warn) 18%, transparent); color: var(--sg-warn); }
+.lab-sg-b-error { background: color-mix(in srgb, var(--sg-bad) 14%, transparent); color: var(--sg-bad); }
+
+.lab-sg-case-l { margin-top: 3px; color: var(--lab-dim, #6b7280); font-size: 11px; }
+.lab-sg-case-r { margin-top: 4px; font-size: 11.5px; line-height: 1.5; }
+.lab-sg-msg {
+  display: block;
+  margin-top: 2px;
+  font: 0.95em/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--sg-bad);
+  word-break: break-word;
+}
+.lab-sg-ok { color: var(--sg-ok); }
+.lab-sg-warn { display: block; color: var(--sg-warn); font-weight: 600; }
+.lab-sg-case-x {
+  margin-top: 4px;
+  color: var(--lab-faint, #9ca3af);
+  font-size: 10.5px;
+}
+
+.lab-sg-sum {
+  margin: 12px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--sg-warn) 10%, transparent);
+  color: var(--lab-fg, #1f2937);
+  font-size: 11.5px;
+  line-height: 1.7;
+}
+.lab-sg-sum b { color: var(--sg-warn); }
+.lab-sg-sum code {
+  background: rgba(128, 128, 128, 0.15);
+  border-radius: 3px;
+  padding: 0 4px;
+  font: 0.95em/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@media (max-width: 700px) {
+  .lab-sg-cases { grid-template-columns: 1fr; }
+  .lab-sg-block { width: 64px; }
+}
