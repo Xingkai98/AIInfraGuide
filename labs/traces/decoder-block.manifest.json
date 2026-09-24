@@ -1,0 +1,40 @@
+{
+ "set": "decoder-block",
+ "lab": "L04",
+ "default": "decoder-block-d64-dff176",
+ "params": {
+  "d_model": [
+   32,
+   64,
+   128
+  ],
+  "d_ff": [
+   88,
+   176,
+   352
+  ]
+ },
+ "traces": [
+  "decoder-block-d32-dff88",
+  "decoder-block-d32-dff176",
+  "decoder-block-d32-dff352",
+  "decoder-block-d64-dff88",
+  "decoder-block-d64-dff176",
+  "decoder-block-d64-dff352",
+  "decoder-block-d128-dff88",
+  "decoder-block-d128-dff176",
+  "decoder-block-d128-dff352"
+ ],
+ "labels": {
+  "decoder-block-d32-dff88": "d_model=32 · d_ff=88",
+  "decoder-block-d32-dff176": "d_model=32 · d_ff=176",
+  "decoder-block-d32-dff352": "d_model=32 · d_ff=352",
+  "decoder-block-d64-dff88": "d_model=64 · d_ff=88",
+  "decoder-block-d64-dff176": "d_model=64 · d_ff=176",
+  "decoder-block-d64-dff352": "d_model=64 · d_ff=352",
+  "decoder-block-d128-dff88": "d_model=128 · d_ff=88",
+  "decoder-block-d128-dff176": "d_model=128 · d_ff=176",
+  "decoder-block-d128-dff352": "d_model=128 · d_ff=352"
+ },
+ "note": "配置 id 只给人看；页面按 meta.config 匹配滑杆位置，不解析 id。"
+}

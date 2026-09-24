@@ -130,6 +130,48 @@ L01's three-layer GEMM replay red for not having FlashAttention's fields. The
 gates are derived from a field one level DOWN from what they gate, so the
 sabotage that deletes a `meta` block can still be caught.
 
+L04 (#18) is the third lab to hit the same rule from the consumer side, and it
+is worth recording because it declined the shared thing twice. It renders its
+parameter account through `views/ledger.js` (the bar, the byte formatting, the
+table, the hover wiring — all reused, ticket #45's deliverable), but it does
+**not** declare `trace.ledger`: that block's lint requires `phase` / `n_q` /
+`layers` / `seq_len` / `kv_rows_total` on every step and requires
+`kv_rows_total == layers × seq_len`, because for L05 that invariant *is* the KV
+cache. L04 has no cache, so satisfying the rule would mean publishing a
+`kv_rows_total` that names nothing — a number on a page that does not stand for
+anything, which is the thing the whole contract exists to prevent. L04 declares
+`step.params` / `meta.params` instead, with its own rules and its own two ports
+(`views/*.js` and `decoder_block.py`), exactly as L05 did for `roofline.js`. The
+ledger's `check()` still runs on L04 and its three component-level verdicts are
+still reported; only the embedded lint verdict is ignored, and the page says so
+in the panel rather than quietly dropping it.
+
+**The `params …` sabotage cases are the one group in this repo that has a single
+port, and that is stated rather than papered over.** The two-port rule exists
+because a rule whose verdict a lab author cannot get in the browser is a rule
+they will edit blind — but that argument needs *a browser-side consumer to
+disagree with*, and `meta.params` has none: the component that draws it is the
+ledger's generic renderer, which is `lab`-agnostic by design and cannot carry
+this block's rules. So the rules live in `decoder_block.py` alone, its sabotage
+cases keep their `params …` names with no JS counterpart, and
+`scripts/verify-l04.py` counts the generator's own verdict for them
+(`sabotages[name].python`) instead of reporting them as "caught by nobody". The
+harness prints how many such cases there are, so the asymmetry is visible in the
+run rather than buried in this paragraph. If a later ticket gives the parameter
+account a view of its own, moving these rules beside it is the right change.
+
+What L04 *did* add as a shared arrangement is the **one-level-down gate as a
+positive rule**. `meta.decoder` exists only to be deleted: it names which steps
+carry `step.ln`, `step.residual` and `step.swiglu`, and the lint — on both
+sides — requires those lists to equal the steps that actually carry the fields.
+That is what makes it safe for four new view components to run rules
+unconditionally on `step.ln` and friends: a trace without them lints clean
+because the gate says "there are none", and a trace whose gate has been edited
+away is a gap rather than a silent pass. The gate is checked before the rules it
+gates, and the sabotage table has three cases for it (`decoder map removed
+while steps keep their fields`, `decoder map omits a step that carries step.ln`,
+`decoder map claims a step that has no such field`).
+
 ## Two optional step fields a trace may use
 
 `online_softmax.py` needs neither; `gemm_tiling.py` introduced both. Both live

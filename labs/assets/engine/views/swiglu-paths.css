@@ -1,0 +1,157 @@
+/* L04 · view: the three SwiGLU paths.
+ *
+ * The three paths get three colours and three columns, and the CURRENT one is
+ * lifted with a border and a tint rather than being the only one drawn. That is
+ * deliberate: the whole point of this panel is that the multiply needs THREE
+ * things on screen at once — the gate path that produced one operand, the up
+ * path that produced the other, and the down path that consumes the result —
+ * so a reader who jumped straight to the ⊙ step can still see both producers.
+ */
+
+.lab-sw {
+  --sw-gate: #5b8def;
+  --sw-up: #b45309;
+  --sw-down: #0f7b52;
+  --sw-mul: #7c3aed;
+  color: var(--lab-fg, #1f2937);
+  font-size: 12.5px;
+}
+
+.lab-sw-none {
+  margin: 0;
+  padding: 10px 12px;
+  color: var(--lab-dim, #6b7280);
+  font-size: 12px;
+}
+
+.lab-sw-hd { margin-bottom: 8px; }
+.lab-sw-hd-t { display: block; font-weight: 650; font-size: 13px; }
+.lab-sw-hd-s {
+  display: block;
+  margin-top: 2px;
+  color: var(--lab-dim, #6b7280);
+  font: 500 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* -------------------------------------------------------------- the paths */
+.lab-sw-paths {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(215px, 1fr));
+  gap: 8px;
+}
+.lab-sw-path {
+  border: 1px solid var(--lab-line, #e3e6ec);
+  border-top-width: 3px;
+  border-radius: 9px;
+  padding: 8px 9px 9px;
+  background: var(--lab-panel, #fff);
+  min-width: 0;
+}
+.lab-sw-path[data-path="gate"] { border-top-color: var(--sw-gate); }
+.lab-sw-path[data-path="up"] { border-top-color: var(--sw-up); }
+.lab-sw-path[data-path="down"] { border-top-color: var(--sw-down); }
+.lab-sw-path.lab-sw-on { background: color-mix(in srgb, currentColor 5%, var(--lab-panel, #fff)); }
+.lab-sw-path[data-path="gate"].lab-sw-on { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sw-gate) 40%, transparent); }
+.lab-sw-path[data-path="up"].lab-sw-on { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sw-up) 40%, transparent); }
+.lab-sw-path[data-path="down"].lab-sw-on { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sw-down) 40%, transparent); }
+
+.lab-sw-path-t { display: block; font-weight: 650; font-size: 11.5px; margin-bottom: 6px; }
+.lab-sw-path[data-path="gate"] .lab-sw-path-t { color: var(--sw-gate); }
+.lab-sw-path[data-path="up"] .lab-sw-path-t { color: var(--sw-up); }
+.lab-sw-path[data-path="down"] .lab-sw-path-t { color: var(--sw-down); }
+
+/* ------------------------------------------------------------------ a hop
+ *
+ * One multiplication, with both operands' shapes and the result's. The
+ * expression wraps rather than overflowing: at d_ff=352 the shape strings are
+ * long, and a wrapped `[8, 352] × [352, 64] = [8, 64]` is still readable while
+ * a clipped one is not.
+ */
+.lab-sw-hop {
+  padding: 6px 7px;
+  border-radius: 7px;
+  margin-bottom: 6px;
+  background: color-mix(in srgb, var(--lab-fg, #1f2937) 4%, transparent);
+}
+.lab-sw-hop.lab-sw-on { background: color-mix(in srgb, var(--lab-accent, #007aff) 12%, transparent); }
+.lab-sw-hop-t { display: block; font-size: 10.5px; color: var(--lab-dim, #6b7280); margin-bottom: 3px; }
+.lab-sw-expr {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  font: 650 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.lab-sw-t { padding: 1px 5px; border-radius: 4px; background: var(--lab-panel, #fff); white-space: nowrap; }
+.lab-sw-lhs { color: var(--lab-accent, #007aff); }
+.lab-sw-rhs { color: var(--lab-accent-2, #b45309); }
+.lab-sw-out { color: var(--lab-fg, #1f2937); }
+.lab-sw-op { color: var(--lab-dim, #6b7280); }
+.lab-sw-note { display: block; margin-top: 3px; color: var(--lab-faint, #9ca3af); font-size: 10.5px; line-height: 1.5; }
+.lab-sw-hop-gap { background: none; }
+.lab-sw-hop-gap .lab-sw-hop-t { margin-bottom: 0; font-style: italic; }
+
+/* --------------------------------------------------------------- the ⊙ */
+.lab-sw-mul {
+  margin-top: 10px;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--sw-mul) 32%, var(--lab-line, #e3e6ec));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--sw-mul) 6%, var(--lab-panel, #fff));
+}
+/* Dimmed, not hidden, when the cursor is not on the multiply's step: the
+ * picture has to be complete at every step, and hiding it is how a reader
+ * loses the thread between steps. */
+.lab-sw-mul-dim { opacity: 0.55; }
+.lab-sw-mul-h { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.lab-sw-mul-t { font-weight: 650; font-size: 12px; color: var(--sw-mul); }
+.lab-sw-mul-s { color: var(--lab-dim, #6b7280); font-size: 11px; }
+
+.lab-sw-mul-eq {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font: 650 12.5px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.lab-sw-mul-side { padding: 2px 7px; border-radius: 5px; background: var(--lab-panel, #fff); }
+.lab-sw-mul-a { color: var(--sw-gate); }
+.lab-sw-mul-b { color: var(--sw-up); }
+.lab-sw-mul-p { color: var(--sw-down); }
+.lab-sw-mul-op { color: var(--lab-dim, #6b7280); }
+.lab-sw-mul-note { margin: 7px 0 0; color: var(--lab-dim, #6b7280); font-size: 11px; line-height: 1.65; }
+
+/* ------------------------------------------------------------- the table */
+.lab-sw-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11.5px;
+  margin-top: 10px;
+}
+.lab-sw-table th, .lab-sw-table td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--lab-line, #e3e6ec);
+  text-align: left;
+}
+.lab-sw-table thead th {
+  color: var(--lab-dim, #6b7280);
+  font-weight: 600;
+  font-size: 11px;
+}
+.lab-sw-shape, .lab-sw-elems {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: nowrap;
+}
+/* The header cells of the two monospace columns must be monospace TOO. They are
+ * not by default, so the header is laid out in the UI font while the cells
+ * under it are monospace — and the columns do not line up. It is a small thing
+ * that looks like a big one, and it is fixed here rather than in the table's own
+ * `th` rule so the first column's header stays in the UI font with the first
+ * column's text. */
+.lab-sw-table thead th:nth-child(n + 2) { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.lab-sw-cur { background: color-mix(in srgb, var(--lab-accent, #007aff) 10%, transparent); }
+.lab-sw-cur td { font-weight: 600; }
+
+@media (max-width: 700px) {
+  .lab-sw-paths { grid-template-columns: 1fr; }
+}

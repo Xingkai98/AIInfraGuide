@@ -158,6 +158,32 @@ export const LAB_REGISTRY: Record<string, LabEntry> = {
     ],
     published: true,
   },
+  '模块一-前置知识/transformer/37-transformer-decoder-block完整解析': {
+    labId: 'L04',
+    title: 'Decoder Block：残差 / LayerNorm / SwiGLU',
+    summary:
+      '一个完整的 Pre-Norm block 逐帧走完：残差两侧的 shape 为什么要完全相同（以及不匹配时会怎样 —— ' +
+      '四个候选静默广播、三个直接抛异常，都是真跑的），LayerNorm 的 μ、σ 落在哪个轴上有行/列/反事实三组统计作证，' +
+      'SwiGLU 的 gate/up/down 三条路径与逐元素门控全程标维度，Pre-Norm 与 Post-Norm 的残差尺度与梯度回传在深度 1…32 上实测对照。',
+    page: `${LAB_BASE}/06-decoder-block.html`,
+    links: [
+      { label: '从第一步开始' },
+      // Step 5 is the first residual add, where the shape confirmation and its
+      // counterexamples are both on screen. Steps 0–4 are the input, the two
+      // LayerNorms' first instance, and the attention sublayer — a reader
+      // pointed there first would see the block's plumbing before the thing the
+      // ticket is about.
+      { label: '跳到第一处残差相加（含 shape 不匹配的对照组）', search: '?step=5' },
+      // Step 10 is the elementwise gate: the only frame where both operands of
+      // the ⊙ are on screen at once, with a real cell of the matrices shown.
+      { label: '跳到逐元素门控 SiLU(gate) ⊙ up', search: '?step=10' },
+      // d_ff at its far end, so the FFN segment of the ledger visibly dominates
+      // — the parameter account's slider effect in one link.
+      { label: '跳到 d_ff=352 的配置（FFN 占比最大）',
+        search: '?cfg=decoder-block-d64-dff352&step=13' },
+    ],
+    published: true,
+  },
   '模块三-分布式训练/21-集合通信原语详解': {
     labId: 'L13',
     title: 'Ring AllReduce 逐帧回放',
