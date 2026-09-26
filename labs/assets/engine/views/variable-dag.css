@@ -1,0 +1,389 @@
+/* L00 engine · view: variable DAG.
+ *
+ * Scoped to `.vd-` on purpose. `lab.css` belongs to the engine and is frozen;
+ * a view that edited it would collide with every other view, which is exactly
+ * what the "one .js + one .css per view, never touch lab.css" rule exists to
+ * prevent. So this file carries its own copy of the palette.
+ *
+ * Why the palette is duplicated rather than inherited: the view has to render
+ * correctly wherever a lab mounts it, and the engine's custom properties are
+ * defined on `.lab-root` -- the element the PLAYER builds. A view that assumed
+ * it was inside one would come out unthemed the first time a page mounted it
+ * anywhere else. The values here are lab.css's, so a view inside a lab and the
+ * lab around it still match.
+ *
+ * THE ONE-SCREEN RULE
+ * The root fills a screen and never scrolls itself. Inside it the graph and the
+ * sidebar are the two halves of the step's content, and the control bar is
+ * pinned to the bottom. On a phone the halves stack instead of sitting side by
+ * side -- that is the whole narrow-screen strategy here. There is no separate
+ * "narrow fallback" component and no "needs a wider screen" notice: the layout
+ * is genuinely different, not degraded.
+ */
+
+.vd-root {
+  --vd-bg: #ffffff;
+  --vd-panel: #ffffff;
+  --vd-panel-2: #f6f7f9;
+  --vd-line: #e3e6ec;
+  --vd-fg: #1f2937;
+  --vd-dim: #6b7280;
+  --vd-faint: #9ca3af;
+  --vd-accent: #007aff;
+  --vd-accent-soft: #e8f1fd;
+  --vd-lit: #b45309;
+  --vd-lit-soft: #fff4e5;
+  --vd-slot: #b45309;
+  --vd-region: #d6408c;
+  --vd-visited: #9aa3b0;
+  --vd-visited-soft: #eef1f5;
+
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: min(88vh, 920px);
+  overflow: hidden;
+  background: var(--vd-panel);
+  color: var(--vd-fg);
+  border: 1px solid var(--vd-line);
+  border-radius: 12px;
+  font-size: 14px;
+  line-height: 1.5;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  .vd-root {
+    --vd-bg: #0b1120;
+    --vd-panel: #121826;
+    --vd-panel-2: #1a2231;
+    --vd-line: #263042;
+    --vd-fg: #e5e7eb;
+    --vd-dim: #9ca3af;
+    --vd-faint: #6b7280;
+    --vd-accent: #4ea1ff;
+    --vd-accent-soft: #0a2a4a;
+    --vd-lit: #ffcc66;
+    --vd-lit-soft: #3a2a10;
+    --vd-slot: #ffcc66;
+    --vd-region: #ff8fb1;
+    --vd-visited: #6b7686;
+    --vd-visited-soft: #1c2534;
+  }
+}
+
+.vd-root *,
+.vd-root *::before,
+.vd-root *::after { box-sizing: border-box; }
+
+/* ------------------------------------------------------------------ header */
+.vd-hd {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--vd-line);
+  background: var(--vd-panel);
+}
+.vd-hd-t { min-width: 0; flex: 1; }
+.vd-title { margin: 0; font-size: 0.95rem; font-weight: 650; }
+.vd-legend { margin: 2px 0 0; color: var(--vd-dim); font-size: 0.76rem; }
+.vd-pos {
+  flex: 0 0 auto;
+  font: 650 0.78rem/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--vd-accent);
+  background: var(--vd-accent-soft);
+  padding: 0.34rem 0.6rem;
+  border-radius: 99px;
+  white-space: nowrap;
+}
+
+/* -------------------------------------------------------------------- main */
+/* The split leans toward the sidebar, which looks wrong until you measure it:
+   the graph is letterboxed into its panel (preserveAspectRatio keeps its shape),
+   so at a square-ish panel a 0.78:1 drawing leaves ~180px of the panel empty on
+   either side. That dead space is worth more to the formula, where the num tier
+   of the acc-update steps substitutes the whole weighted sum and runs to ~780px
+   -- wider than the sidebar was. Feeding the slack to the text is free. */
+.vd-main {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 0.92fr) minmax(340px, 1.08fr);
+  min-height: 0;
+}
+
+.vd-dagwrap {
+  position: relative;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  border-right: 1px solid var(--vd-line);
+  background: var(--vd-bg);
+}
+.vd-dag { display: block; width: 100%; height: 100%; }
+
+/* ------------------------------------------------------------------- sidebar */
+.vd-side {
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 13px 14px;
+  background: var(--vd-panel);
+  -webkit-overflow-scrolling: touch;
+}
+
+.vd-op { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.vd-op-k {
+  font: 650 0.72rem/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.07em;
+  color: var(--vd-lit);
+  background: var(--vd-lit-soft);
+  padding: 0.2rem 0.45rem;
+  border-radius: 5px;
+}
+.vd-op-id {
+  font: 600 0.72rem/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--vd-dim);
+}
+.vd-seg { margin-left: auto; display: inline-flex; gap: 2px; }
+.vd-tier {
+  font: inherit;
+  font-size: 0.7rem;
+  padding: 0.2rem 0.45rem;
+  border: 1px solid var(--vd-line);
+  background: var(--vd-panel-2);
+  color: var(--vd-dim);
+  cursor: pointer;
+  border-radius: 6px;
+}
+.vd-tier.vd-on {
+  background: var(--vd-accent);
+  border-color: var(--vd-accent);
+  color: #fff;
+}
+
+.vd-stitle { font-weight: 650; font-size: 0.92rem; margin: 7px 0 8px; }
+
+.vd-fml {
+  padding: 8px 10px;
+  background: var(--vd-bg);
+  border: 1px solid var(--vd-line);
+  border-radius: 10px;
+  font-size: 0.82rem;
+}
+/* A long formula scrolls sideways rather than wrapping. Wrapping breaks the
+   equation across lines and splits the structure the reader is trying to read;
+   a scroll keeps every term on one baseline, which is how the maths is
+   written.
+ *
+ * The scroll container is `.lab-formula-node` -- the span `formula.js` builds
+ * -- and NOT `.katex-display`: the engine renders with `displayMode: false`, so
+ * KaTeX emits an inline `.katex` and there is no `.katex-display` element to
+ * hang this on. Targeting it compiles, does nothing, and lets the formula wrap
+ * to three lines on a phone exactly as if the rule were absent. The node needs
+ * `display: block` for `overflow-x` to apply at all, and the nowrap has to sit
+ * on the inline `.katex` inside it. */
+.vd-fml .lab-formula-node {
+  display: block;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+.vd-fml .lab-formula-node > .katex { white-space: nowrap; }
+.vd-fml .katex-display { margin: 0; overflow-x: auto; }
+.vd-fml .katex-display > .katex { white-space: nowrap; }
+
+/* Set by the view only when the formula is actually wider than the box, so
+   this never appears on a formula that already fits. The mask is on the
+   container, not the scroller: on the scroller it would travel with the
+   content and fade the wrong edge once scrolled. */
+.vd-fml.vd-fml-more {
+  position: relative;
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 22px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 22px), transparent);
+}
+.vd-fml [id*="-slot-"] { color: var(--vd-slot); }
+.vd-fml .lab-region { background: color-mix(in srgb, var(--vd-region) 15%, transparent); border-radius: 4px; }
+.vd-fml [id*="-slot-"] { cursor: pointer; border-radius: 3px; padding: 0 1px; transition: background 0.12s; }
+.vd-fml [id*="-slot-"]:hover { background: var(--vd-accent-soft); }
+/* The pinned variable is painted the same colour here, on the chips and on the
+   graph node, so "these three things are the same variable" needs no legend. */
+.vd-fml [id*="-slot-"].vd-slot-on {
+  background: var(--vd-lit-soft);
+  box-shadow: 0 0 0 1px var(--vd-lit);
+}
+
+.vd-io { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 9px; font-size: 0.8rem; }
+.vd-io-g { min-width: 0; }
+.vd-io-g > b {
+  display: block;
+  font: 600 0.66rem/1.7 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--vd-dim);
+  letter-spacing: 0.05em;
+}
+.vd-chip {
+  display: inline-block;
+  padding: 0.1rem 0.4rem;
+  margin: 0 0.16rem 0.16rem 0;
+  border-radius: 6px;
+  background: var(--vd-bg);
+  border: 1px solid var(--vd-line);
+  color: var(--vd-fg);
+  font: 600 0.74rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  cursor: pointer;
+  user-select: none;
+}
+.vd-chip:hover { border-color: var(--vd-accent); }
+.vd-chip b { font-weight: 500; opacity: 0.55; }
+.vd-chip-on { background: var(--vd-lit-soft); border-color: var(--vd-lit); color: var(--vd-lit); }
+.vd-chip-none { border-style: dashed; color: var(--vd-faint); cursor: default; }
+
+/* -------------------------------------------------------------- value grid */
+.vd-vg {
+  margin-top: 9px;
+  border: 1px solid var(--vd-line);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.vd-vg-hd {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 4px 8px;
+  background: var(--vd-bg);
+  border-bottom: 1px solid var(--vd-line);
+  font: 600 0.73rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.vd-vg-s { color: var(--vd-dim); font-weight: 500; }
+.vd-vg-at { margin-left: auto; color: var(--vd-faint); font-weight: 500; font-size: 0.68rem; }
+.vd-vrow { display: flex; flex-wrap: wrap; gap: 2px; padding: 3px 7px; }
+.vd-cell {
+  font: 500 0.71rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 0.08rem 0.35rem;
+  border-radius: 4px;
+  background: var(--vd-bg);
+  border: 1px solid var(--vd-line);
+  white-space: nowrap;
+}
+.vd-cell-1 { background: var(--vd-lit-soft); border-color: var(--vd-lit); color: var(--vd-lit); font-weight: 650; }
+
+.vd-narr { color: var(--vd-dim); font-size: 0.82rem; margin: 9px 0 0; }
+
+/* ---------------------------------------------------------------- controls */
+.vd-ctl {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  padding-bottom: calc(8px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--vd-line);
+  background: var(--vd-panel);
+}
+.vd-ctl button {
+  font: inherit;
+  font-size: 0.82rem;
+  padding: 0.36rem 0.7rem;
+  border-radius: 9px;
+  cursor: pointer;
+  border: 1px solid var(--vd-line);
+  background: var(--vd-bg);
+  color: var(--vd-fg);
+  white-space: nowrap;
+}
+.vd-ctl button:hover:not(:disabled) { border-color: var(--vd-accent); color: var(--vd-accent); }
+.vd-ctl button:disabled { opacity: 0.35; cursor: default; }
+.vd-ctl button.vd-on { background: var(--vd-accent); border-color: var(--vd-accent); color: #fff; }
+.vd-ctl input[type="range"] { flex: 1 1 auto; min-width: 56px; accent-color: var(--vd-accent); }
+.vd-count {
+  font: 600 0.73rem/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--vd-dim);
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------- graph nodes */
+/* Three states, not two. `off` is "this step does not touch it and nothing has
+   yet"; `past` is "an earlier step did"; `on` is "this step does". Without the
+   middle state a reader who has walked half the trace sees the same faint
+   picture as at step zero.
+ *
+ * NO TRANSITIONS on any state-bearing property, deliberately. A 150ms fade
+ * looks pleasant and is a lie: for that window the graph still shows the
+ * previous step's highlight while the sidebar has already moved, and a reader
+ * stepping quickly (or holding the arrow key) sees a picture that disagrees
+ * with the cursor. Measured, not theorised -- with the fade in place, a
+ * programmatic run of ten steps left the node strokes a full step stale while
+ * `stroke-width`, which was not in the transition list, had already updated.
+ * The state of the graph is the state of the cursor, with no interpolation. */
+.vd-box { fill: var(--vd-panel); stroke: var(--vd-line); stroke-width: 1.5; }
+.vd-nl { font: 650 13px ui-monospace, SFMono-Regular, Menlo, monospace; fill: var(--vd-fg); }
+.vd-ns { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; fill: var(--vd-dim); }
+
+.vd-box-on { stroke: var(--vd-lit); stroke-width: 2.6; fill: var(--vd-lit-soft); }
+.vd-nl-on { font-weight: 700; }
+.vd-ns-on { opacity: 0.9; }
+
+.vd-box-past { stroke: var(--vd-accent); stroke-width: 2; fill: var(--vd-visited-soft); }
+.vd-nl-past { opacity: 0.9; }
+.vd-ns-past { opacity: 0.72; }
+
+.vd-box-off { opacity: 0.5; }
+.vd-nl-off { opacity: 0.5; }
+.vd-ns-off { opacity: 0.42; }
+
+.vd-n { cursor: pointer; }
+.vd-n:focus-visible { outline: none; }
+.vd-n:focus-visible .vd-box { stroke: var(--vd-accent); stroke-width: 3; stroke-dasharray: 5 3; }
+.vd-n-pin .vd-box { stroke-dasharray: none; }
+.vd-n-pin .vd-box,
+.vd-n.vd-n-pin .vd-box-on { stroke: var(--vd-region); stroke-width: 3; }
+.vd-n.vd-n-pin .vd-nl { fill: var(--vd-region); }
+
+/* -------------------------------------------------------------- graph edges */
+/* Same rule as the node boxes: no transition on the state-bearing properties,
+   so the trail can never lag the cursor. */
+.vd-e { fill: none; stroke: var(--vd-line); stroke-width: 2; color: var(--vd-line); }
+.vd-e-off { opacity: 0.32; }
+.vd-e-done { stroke: var(--vd-accent); color: var(--vd-accent); opacity: 0.6; }
+.vd-e-on { stroke: var(--vd-lit); color: var(--vd-lit); stroke-width: 3.5; opacity: 1; }
+.vd-e-loop { stroke-dasharray: 4 3; }
+.vd-e-loop.vd-e-on { stroke-dasharray: none; }
+
+.vd-el { font: 600 10px ui-monospace, SFMono-Regular, Menlo, monospace; fill: var(--vd-dim); pointer-events: none; }
+.vd-el-on { fill: var(--vd-lit); font-weight: 700; }
+.vd-el-past { fill: var(--vd-accent); }
+.vd-el-off { opacity: 0.4; }
+.vd-el-loop { font-size: 12px; }
+
+/* ------------------------------------------------------------------ narrow
+ *
+ * Not a fallback: the same two halves, stacked, with the sidebar taking the
+ * larger share because the formula and its values are the part a reader
+ * actually reads, and the graph is legible at a smaller size.
+ */
+@media (max-width: 720px) {
+  .vd-root { height: 100dvh; border-radius: 0; border-left: 0; border-right: 0; }
+  .vd-main {
+    grid-template-columns: minmax(0, 1fr);
+    /* The graph gets a floor, because below roughly 150px the node labels stop
+       being readable and a graph you cannot read is decoration. The sidebar
+       takes whatever is left and scrolls when a step's narration is long --
+       the control bar stays pinned, so stepping never requires that scroll. */
+    grid-template-rows: minmax(148px, 0.82fr) minmax(0, 1.18fr);
+  }
+  .vd-dagwrap { border-right: 0; border-bottom: 1px solid var(--vd-line); }
+  .vd-side { padding: 8px 10px 10px; }
+  .vd-legend { display: none; }
+  .vd-stitle { font-size: 0.86rem; margin: 5px 0 6px; }
+  .vd-narr { font-size: 0.78rem; margin-top: 7px; }
+  /* Stacked, three scalar grids cost ~160px of a ~380px sidebar and push the
+     narration off the bottom. Side by side they cost one row. */
+  .vd-vals { display: flex; flex-wrap: wrap; gap: 6px; }
+  .vd-vg { flex: 1 1 104px; min-width: 0; margin-top: 7px; }
+  .vd-vg-hd { font-size: 0.69rem; padding: 3px 6px; }
+  .vd-cell { font-size: 0.68rem; padding: 0.06rem 0.28rem; }
+  .vd-vrow { padding: 2px 5px; }
+  .vd-ctl { gap: 6px; padding-left: 10px; padding-right: 10px; }
+  .vd-ctl button { padding: 0.36rem 0.5rem; font-size: 0.78rem; }
+  .vd-count { font-size: 0.68rem; }
+}
