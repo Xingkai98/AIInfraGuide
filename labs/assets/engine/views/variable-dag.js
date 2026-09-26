@@ -520,7 +520,9 @@
   var DEFAULTS = {
     title: '',
     lead: '',
-    tier: 'num',
+    /* 默认符号档：读者先看到算法长什么样，再自己切到数值看具体算例。
+       数值档把 Σᵢ exp(...) 展开成四个具体项，算法骨架反而看不出来。 */
+    tier: 'sym',
     param: 'step',
     digits: 4,
     onStep: null
