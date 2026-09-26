@@ -11,26 +11,74 @@
     <link rel="canonical" href="./00-online-softmax.html" />
     <link rel="stylesheet" href="./assets/vendor/katex/katex.min.css" />
     <link rel="stylesheet" href="./assets/engine/lab.css" />
+    <link rel="stylesheet" href="./assets/engine/views/variable-dag.css" />
     <style>
       :root { color-scheme: light dark; }
+      /* The page is one screen and does not scroll. The step's content — graph
+         plus formula — fills everything between the parameter bar and the
+         bottom of the viewport, so a reader stepping through never has to
+         scroll to see the thing they just stepped to. The reference panels and
+         the provenance note are one click away rather than below the fold,
+         which is the difference between a page that fits and a page that
+         technically has the content on it. */
+      html, body { height: 100%; }
       body {
         margin: 0;
-        padding: 20px 22px 56px;
+        padding: 10px 14px 10px;
+        box-sizing: border-box;   /* or the padding adds to 100dvh and the page scrolls by exactly it */
         background: #f9fafb;
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
           'Helvetica Neue', 'Noto Sans CJK SC', sans-serif;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        height: 100dvh;
+        overflow: hidden;
       }
       @media (prefers-color-scheme: dark) {
         body { background: #0b1120; }
       }
-      .lab-back { display: inline-block; margin-bottom: 14px; color: #007aff; font-size: 13.5px; text-decoration: none; }
+      /* The view keeps a sensible standalone height of its own; here the page
+         owns the layout, so the stage hands it the exact remaining space. */
+      .lab-root { flex: 1 1 auto; min-height: 0; }
+      #lab-stage { flex: 1 1 auto; min-height: 0; }
+      /* `height: 100%` needs a parent with a definite height at every level.
+         The host div exists only because the view is mounted into a fresh
+         element on each config change; without a height here the percentage
+         resolves against `auto` and the view falls back to its own content
+         height, which is what puts the control bar below the fold. */
+      #lab-stage > .vd-host { height: 100%; }
+      #lab-stage .vd-root { height: 100%; }
+      .lab-back { color: #007aff; font-size: 13px; text-decoration: none; flex: 0 0 auto; }
       .lab-provenance {
-        margin-top: 22px;
-        padding-top: 14px;
+        margin-top: 10px;
+        padding-top: 10px;
         border-top: 1px solid rgba(128, 128, 128, 0.25);
         color: #6b7280;
         font-size: 12px;
         line-height: 1.6;
+      }
+      /* The reference panels and the provenance note, folded away so the page
+         is exactly one screen. Open, this section scrolls on its own rather
+         than growing the page. */
+      .lab-more { flex: 0 0 auto; }
+      .lab-more > summary {
+        cursor: pointer;
+        color: #007aff;
+        font-size: 12.5px;
+        padding: 2px 0;
+        list-style: none;
+      }
+      .lab-more > summary::-webkit-details-marker { display: none; }
+      .lab-more > summary::before { content: '▸ '; }
+      .lab-more[open] > summary::before { content: '▾ '; }
+      .lab-more[open] .lab-more-bd {
+        max-height: 62vh;
+        overflow: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        padding-top: 8px;
       }
       @media (prefers-color-scheme: dark) { .lab-provenance { color: #9ca3af; } }
       .lab-provenance code {
@@ -52,16 +100,16 @@
 
       /* ---------------------------------------------------------------- L00 views
        *
-       * These three panels are L00's own, so they are styled here rather than in
-       * the shared lab.css: the four generic panels in that file are used by
-       * every lab, and the view components other tickets own live beside it.
+       * These panels are L00's own, so they are styled here rather than in
+       * the shared lab.css: the generic panels in that file are used by every
+       * lab, and the view components other tickets own live beside it.
        * Keeping L00's chrome in L00's page is what keeps those from colliding.
        *
        * Colours are inherited from the engine's custom properties so these
        * follow the light/dark theme without a second palette.
        */
       .l00-params {
-        margin: 0 0 12px;
+        margin: 0;
         padding: 10px 14px;
         border: 1px solid var(--lab-line, #e3e6ec);
         border-radius: 12px;
@@ -203,6 +251,39 @@
       @media (prefers-color-scheme: dark) {
         .l00-params, .l00-track, .l00-bar, .l00-vs-cell { color: var(--lab-fg, #e5e7eb); }
       }
+
+      .l00-tut { display: inline-block; margin-top: 10px; color: #007aff; font-size: 13px; text-decoration: none; }
+
+      /* On a phone the parameter bar is a third of the screen: the three
+         sliders wrap onto three lines and the hint runs to four more. Left
+         alone it costs more height than the graph does, which is the wrong
+         trade on the one layout where height is scarce. Compacted to a single
+         row of three, with the hint dropped (it is a note about provenance,
+         and the provenance note is in the panel below anyway). */
+      @media (max-width: 720px) {
+        body { padding: 6px 8px 6px; gap: 6px; }
+        .lab-back { font-size: 12px; }
+        .l00-params { padding: 6px 8px; }
+        .l00-params-row {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 6px;
+          align-items: center;
+        }
+        .l00-param { gap: 3px; min-width: 0; flex-wrap: nowrap; }
+        .l00-param-label { font-size: 10px; white-space: nowrap; }
+        /* The slider has to be the flexible part, not a fixed 100%: a percentage
+           width inside an auto-sized flex cell overflows into the next control
+           and the value ends up printed beside the wrong label. */
+        .l00-param input[type="range"] {
+          flex: 1 1 24px;
+          width: auto;
+          min-width: 0;
+          margin: 0;
+        }
+        .l00-param-val { font-size: 10.5px; min-width: 12px; flex: 0 0 auto; }
+        .l00-param-hint { display: none; }
+      }
     </style>
   </head>
   <!--
@@ -218,43 +299,82 @@
 
     The page holds a trace set and a config. Every algorithmic decision — state
     reconstruction, layout, formula tiers, playback — lives in the engine; the
-    three teaching panels below read fields out of the trace and format them,
-    they do not compute anything about the algorithm. The deviation numbers the
-    amplifier shows, the NaN the comparison shows, and the plain 1.0 correction
-    factors all arrive in the JSON.
+    panels below read fields out of the trace and format them, they do not
+    compute anything about the algorithm. The deviation numbers the amplifier
+    shows, the NaN the comparison shows, and the plain 1.0 correction factors
+    all arrive in the JSON.
+
+    L00 draws its variable graph with `views/variable-dag.js` rather than the
+    engine's step DAG. That component is a different picture of the same trace:
+    nodes are VARIABLES and edges are COMPUTATIONS, and one step's graph plus
+    its formula fits one screen. The engine player's four-panel instrument
+    layout cannot make that promise, so this page mounts the view directly and
+    keeps the player's extra-panel hook contract by hand — same
+    [data-panel="<id>"] / [data-panel-body="<id>"] attributes, same class names,
+    so the panels below are the panels the engine would have rendered.
   -->
   <body data-pagefind-ignore>
     <a class="lab-back" href="./">← 全部实验室</a>
     <p class="lab-banner" id="lab-banner" hidden></p>
 
-    <div id="lab-params"></div>
-    <!-- The player is rebuilt here on every parameter change. A fresh element
-         per build means the previous player's DOM — including the narrow-screen
-         fallback it inserted beside its mount — goes away with it, instead of
-         accumulating one stale copy per slider move. -->
-    <div id="lab-stage"></div>
+    <div class="lab-root" id="lab-root">
+      <div id="lab-params"></div>
+      <div id="lab-stage"></div>
 
-    <p class="lab-provenance">
-      本页每个数字都来自一次真实的 numpy 运行，不是手编的演示数据。
-      trace 由 <code>labs/traces/online_softmax.py</code> 生成：它用 numpy 跑分块 online
-      softmax 递推，并对 <b>torch</b> 的参考实现逐块断言（每块结束后单独出断言，而不是只对最终结果 ——
-      只对最终值的话，两个互相抵消的错误一样能通过）。对照模式里的朴素版、安全版，以及修正因子放大器里
-      「不修正」的偏差，同样是这个脚本真跑出来的：脚本断言朴素版<b>必须</b>溢出、而同一份实现在不加偏移时
-      必须算对，否则拒绝写出文件。滑杆能选到的每一个 <code>(N, Bc, T)</code> 组合都有一份自己的
-      trace 被内联进本页，清单由生成脚本自己写出（<code>online-softmax.manifest.json</code>），
-      所以滑杆位置不可能指向一份不存在的 trace。
-      引擎本身在 <code>labs/assets/engine/</code>，不含任何 Online Softmax 专属逻辑。
-    </p>
+      <!-- Inside .lab-root, not after it: the panel styles in lab.css read the
+           palette custom properties, and those are defined on .lab-root. A
+           panel mounted outside it comes out unthemed -- which is exactly the
+           trap this view's own stylesheet documents in its header. -->
+      <details class="lab-more" id="lab-more">
+      <summary>参考面板 · 修正因子放大器 / 三轨迹对照 / 引擎自检</summary>
+      <div class="lab-more-bd">
+        <section class="lab-panel lab-panel-extra" data-panel="amplifier">
+          <div class="lab-panel-hd">
+            <span class="lab-panel-t">修正因子放大器</span>
+            <span class="lab-panel-sub">e^(m_old − m_new) 与漏掉它的代价</span>
+          </div>
+          <div class="lab-panel-bd" data-panel-body="amplifier"></div>
+        </section>
+
+        <section class="lab-panel lab-panel-extra" data-panel="compare">
+          <div class="lab-panel-hd">
+            <span class="lab-panel-t">对照模式</span>
+            <span class="lab-panel-sub">朴素 / 三遍安全 / online，同一条 HBM 读数轴</span>
+          </div>
+          <div class="lab-panel-bd" data-panel-body="compare"></div>
+        </section>
+
+        <section class="lab-panel lab-panel-extra" data-panel="selfcheck">
+          <div class="lab-panel-hd">
+            <span class="lab-panel-t">自检 · 引擎正确性</span>
+            <span class="lab-panel-sub">在浏览器里真跑，不是预期值</span>
+          </div>
+          <div class="lab-panel-bd" data-panel-body="selfcheck"></div>
+        </section>
+
+        <p class="lab-provenance">
+          本页每个数字都来自一次真实的 numpy 运行，不是手编的演示数据。
+          trace 由 <code>labs/traces/online_softmax.py</code> 生成：它用 numpy 跑分块 online
+          softmax 递推，并对 <b>torch</b> 的参考实现逐块断言（每块结束后单独出断言，而不是只对最终结果 ——
+          只对最终值的话，两个互相抵消的错误一样能通过）。对照模式里的朴素版、安全版，以及修正因子放大器里
+          「不修正」的偏差，同样是这个脚本真跑出来的：脚本断言朴素版<b>必须</b>溢出、而同一份实现在不加偏移时
+          必须算对，否则拒绝写出文件。滑杆能选到的每一个 <code>(N, Bc, T)</code> 组合都有一份自己的
+          trace 被内联进本页，清单由生成脚本自己写出（<code>online-softmax.manifest.json</code>），
+          所以滑杆位置不可能指向一份不存在的 trace。
+          变量图里的「哪个公式变量对应图里哪个节点」也不是页面猜的：生成脚本把
+          <code>step.binding_vars</code> 写进 trace，页面只读它。
+          引擎本身在 <code>labs/assets/engine/</code>，不含任何 Online Softmax 专属逻辑。
+        </p>
+          <a class="l00-tut" id="lab-tutorial" href="./">返回教程正文：5.2 CUDA Online Softmax 实现</a>
+        </div>
+      </details>
+    </div>
 
     <!-- KaTeX is vendored, never a CDN: a lab page must make zero external requests. -->
     <script src="./assets/vendor/katex/katex.min.js"></script>
     <script src="./assets/engine/trace-model.js"></script>
-    <script src="./assets/engine/layout.js"></script>
     <script src="./assets/engine/formula.js"></script>
-    <script src="./assets/engine/dag.js"></script>
-    <script src="./assets/engine/tensors.js"></script>
-    <script src="./assets/engine/narrow.js"></script>
-    <script src="./assets/engine/player.js"></script>
+    <script src="./assets/engine/views/variable-dag.js"></script>
     <script src="./assets/engine/verify.js"></script>
 
     <!--
@@ -554,7 +674,7 @@
 
         /* ============================================================ params */
         var current = null;
-        var player = null;
+        var view = null;
 
         function configId(values) {
           var t = String(values.T).replace('.', 'p');
@@ -570,7 +690,7 @@
 
         function buildParamBar() {
           var state = valueFromId(current);
-          var html = '<div class="l00-params-row">';
+          var html = '<div class="l00-params"><div class="l00-params-row">';
           [['N', '序列长度'], ['Bc', '块大小 B_c'], ['T', '温度 T']].forEach(function (p) {
             var key = p[0];
             var opts = manifest.params[key];
@@ -586,7 +706,7 @@
           html += '<span class="l00-param-hint">改动会重新载入对应配置的 trace，' +
             '页面上的数字随之全部变化（' + manifest.traces.length +
             ' 组合法配置，全部由同一个脚本生成）</span>';
-          html += '</div><div class="l00-params-note" id="l00-params-note" hidden></div>';
+          html += '</div><div class="l00-params-note" id="l00-params-note" hidden></div></div>';
 
           paramsHost.innerHTML = html;
           Array.prototype.forEach.call(
@@ -640,54 +760,51 @@
         function mount(id) {
           var trace = traces[id];
           current = id;
-          if (player) { try { player.destroy(); } catch (e) { /* already gone */ } }
+          if (view) { try { view.destroy(); } catch (e) { /* already gone */ } }
           stage.innerHTML = '';
-          var slot = document.createElement('main');
+          var slot = document.createElement('div');
+          slot.className = 'vd-host';
           stage.appendChild(slot);
 
           var cfg = trace.meta.config;
-          player = LabEngine.lab(trace, {
-            mount: slot,
-            title: 'Online Softmax 逐步回放',
-            lead: '把三遍扫描的 Safe Softmax 改造成分块递推：每来一块，先用新的最大值修正历史统计量，' +
-                  '再并入本块。L00 是整个实验室的第一课，也是 L06 FlashAttention 的前置。' +
-                  '当前配置 N=' + cfg.N + '、B_c=' + cfg.Bc + '、T=' + cfg.T +
-                  '（' + trace.steps.length + ' 步）。',
+          var ampRender = amplifierPanel(trace);
+          var cmpRender = comparePanel(trace);
+          var ampHost = document.querySelector('[data-panel-body=amplifier]');
+          var cmpHost = document.querySelector('[data-panel-body=compare]');
+
+          /* The panels ride the view's step callback. They are the same panels
+             the engine's extra-panel hook renders, in the same boxes, built
+             here because this page mounts the view directly rather than
+             through the player — and the view is what owns the cursor. */
+          function renderPanels(i, step, ctx) {
+            ampHost.innerHTML = ampRender(step, ctx);
+            cmpHost.innerHTML = cmpRender(step, ctx);
+          }
+
+          view = LabEngine.variableDag.mount(slot, trace, {
+            title: 'Online Softmax · 变量图',
             tier: 'num',
-            panels: [
-              { id: 'amplifier', label: '修正因子放大器',
-                render: amplifierPanel(trace) },
-              { id: 'compare', label: '对照模式',
-                render: comparePanel(trace) },
-            ],
-            tutorial: {
-              href: '/AIInfraGuide/cuda/模块二-cuda编程与算子优化/52-cuda-online-softmax实现',
-              label: '返回教程正文：5.2 CUDA Online Softmax 实现'
-            }
+            param: 'step',
+            onStep: renderPanels
           });
 
           /* Compact proof panel. It carries the control group, so a green
              verdict here means something -- see labs/assets/engine/verify.js. */
-          var proof = document.createElement('section');
-          proof.className = 'lab-panel lab-panel-extra';
-          proof.innerHTML = '<div class="lab-panel-hd"><span class="lab-panel-t">自检 · 引擎正确性</span>' +
-            '<span class="lab-panel-sub">在浏览器里真跑，不是预期值</span></div>' +
-            '<div class="lab-panel-bd" style="padding:10px 12px"></div>';
-          slot.appendChild(proof);
-          LabEngine.verify.panel(proof.querySelector('.lab-panel-bd'), trace, player.index);
+          LabEngine.verify.panel(
+            document.querySelector('[data-panel-body=selfcheck]'), trace, view.index);
 
           buildParamBar();
 
-          /* The player handle, for the acceptance harness in
+          /* The view handle, for the acceptance harness in
              scripts/verify-labs.py. Exposing it is harmless in production and
              it is the only way the harness can assert against the same object
              the page drives, rather than against a re-implementation of it. */
-          window.__p = player;
+          window.__vd = view;
           window.__labTrace = trace;
           window.__labConfig = id;
         }
 
-        /* Deep-link reporting, on the same terms the player uses for ?step: a
+        /* Deep-link reporting, on the same terms the view uses for ?step: a
            bad value is announced rather than silently ignored. */
         var query = new URLSearchParams(location.search);
         var messages = [];

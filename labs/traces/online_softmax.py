@@ -474,6 +474,38 @@ def b(slot, sym, idx, num):
     return slot, {"sym": sym, "idx": idx, "num": num}
 
 
+def vars_in_sym(sym, declared):
+    """Which declared tensors does this LaTeX fragment name?
+
+    The variable-DAG view highlights a graph node when its formula slot is
+    clicked (and the reverse), so it needs `slot -> tensor names`. That mapping
+    is resolved HERE, not in the browser, for three reasons:
+
+      * `x` is a substring of `x_blk`, so a naive identifier scan lights up the
+        wrong node;
+      * the tensor is named `l` but LaTeX writes it `\\ell`, which contains no
+        identifier `l` at all — a regex on the rendered string can never find
+        it;
+      * the page does not know this lab's tensor vocabulary, and telling it
+        would put Online Softmax's variable names into the shared engine.
+
+    So the generator (which knows all three) writes the answer into the trace,
+    where the page and the lint both read it back.
+    """
+    if not sym:
+        return []
+    s = re.sub(r"\\mathrm\{([A-Za-z]+)\}", r"\1", sym)   # \mathrm{acc} -> acc
+    s = s.replace(r"\ell", "l")                          # the tensor is named `l`
+    s = re.sub(r"\\[A-Za-z]+", " ", s)                   # drop \max \exp \left \sum ...
+    found = []
+    for name in declared:
+        # Word boundaries: `x` must not match inside `x_blk`, and `B_c` must not
+        # be read as the tensor `B`.
+        if re.search(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])", s):
+            found.append(name)
+    return sorted(found)
+
+
 def step(sid, title, kind, op, phase, formula, bindings, reads, writes, state,
          narration, regions=None, corr=None, k=0):
     d = {"id": sid, "title": title, "kind": kind, "op": op, "phase": phase,
@@ -748,6 +780,32 @@ def build_trace(raw, n, bc, temp, title, source):
     rescales = sum(1 for e in per_block_corr if e["kind"] == "rescale")
     uncorrected_out = run[-1]["acc_bad"] / run[-1]["l_bad"]
 
+    tensors = {
+        # `init` is the contract addition: no step writes x, but the first
+        # block load reads it, so without this render(trace, 0) has nothing
+        # to show for the input.
+        "x": {"shape": [len(z)], "dtype": "fp32", "at": "HBM", "role": "input",
+              "init": [float(v) for v in z],
+              "note": f"整条序列，全程驻留 HBM（已按 x/T 缩放，T = {temp:g}）"},
+        "x_blk": {"shape": [bc], "dtype": "fp32", "at": "SRAM", "role": "staging",
+                  "note": "当前块的临时副本，每块覆盖一次"},
+        "m": {"shape": [], "dtype": "fp32", "at": "register", "role": "state",
+              "note": "运行最大值，标量"},
+        "l": {"shape": [], "dtype": "fp32", "at": "register", "role": "state",
+              "note": "指数和，标量"},
+        "acc": {"shape": [], "dtype": "fp32", "at": "register", "role": "state",
+                "note": "加权累加器，标量"},
+        "O": {"shape": [], "dtype": "fp32", "at": "register", "role": "output",
+              "note": "归一化后的输出，标量"},
+    }
+
+    # The variable map the DAG view keys its highlighting off. Derived from the
+    # declared tensor names themselves, so adding a tensor above without
+    # teaching the formulas about it cannot silently produce an empty map.
+    for s in steps:
+        s["binding_vars"] = {k: vars_in_sym((v or {}).get("sym") or "", tensors)
+                             for k, v in (s.get("bindings") or {}).items()}
+
     return {
         "meta": {
             "lab": "L00",
@@ -775,24 +833,7 @@ def build_trace(raw, n, bc, temp, title, source):
                 "per_block": per_block_corr,
             },
         },
-        "tensors": {
-            # `init` is the contract addition: no step writes x, but the first
-            # block load reads it, so without this render(trace, 0) has nothing
-            # to show for the input.
-            "x": {"shape": [len(z)], "dtype": "fp32", "at": "HBM", "role": "input",
-                  "init": [float(v) for v in z],
-                  "note": f"整条序列，全程驻留 HBM（已按 x/T 缩放，T = {temp:g}）"},
-            "x_blk": {"shape": [bc], "dtype": "fp32", "at": "SRAM", "role": "staging",
-                      "note": "当前块的临时副本，每块覆盖一次"},
-            "m": {"shape": [], "dtype": "fp32", "at": "register", "role": "state",
-                  "note": "运行最大值，标量"},
-            "l": {"shape": [], "dtype": "fp32", "at": "register", "role": "state",
-                  "note": "指数和，标量"},
-            "acc": {"shape": [], "dtype": "fp32", "at": "register", "role": "state",
-                    "note": "加权累加器，标量"},
-            "O": {"shape": [], "dtype": "fp32", "at": "register", "role": "output",
-                  "note": "归一化后的输出，标量"},
-        },
+        "tensors": tensors,
         "graph": {"nodes": nodes, "edges": edges},
         "compare": compare,
         "steps": steps,
@@ -921,6 +962,32 @@ def lint(trace):
             if set(bdg) != {"sym", "idx", "num"}:
                 gaps.append(f'步骤 "{sid}" 的绑定 "{key}" 字段是 '
                             f'{{{", ".join(sorted(bdg))}}} 而不是 {{sym, idx, num}}')
+
+        # ---- the variable map. The DAG view highlights graph nodes and formula
+        # slots from it, so an absent or partial map is not a cosmetic problem:
+        # it is the difference between "clicking the ℓ in the formula lights up
+        # the ℓ node" and "nothing happens".
+        bvars = s.get("binding_vars")
+        if not isinstance(bvars, dict):
+            gaps.append(f'步骤 "{sid}" 没有 binding_vars —— '
+                        f"变量图无法把公式里的变量与图节点对应起来")
+        else:
+            bind_keys = set(s.get("bindings") or {})
+            for key in sorted(bind_keys - set(bvars)):
+                gaps.append(f'步骤 "{sid}" 的绑定 "{key}" 在 binding_vars 里没有条目 —— '
+                            f"点这个变量不会有任何高亮")
+            for key in sorted(set(bvars) - bind_keys):
+                gaps.append(f'步骤 "{sid}" 的 binding_vars 有 "{key}"，'
+                            f"但 bindings 里没有这个 slot")
+            for key, names in sorted(bvars.items()):
+                if not isinstance(names, list):
+                    gaps.append(f'步骤 "{sid}" 的 binding_vars["{key}"] = {names!r} '
+                                f"不是张量名列表")
+                    continue
+                for name in names:
+                    if name not in declared:
+                        gaps.append(f'步骤 "{sid}" 的 binding_vars["{key}"] 指向未声明的'
+                                    f'张量 "{name}" —— 图上没有这个节点可高亮')
 
         if LATEX_IN_TEXT_RE.search(s.get("narration") or ""):
             warns.append(f'步骤 "{sid}" 的 narration 里含 LaTeX 命令，会原样显示')
@@ -1110,6 +1177,13 @@ SABOTAGE_CASES = {
         {"num": t["steps"][2]["formula"]["num"] + r"\slot{GHOST}"}),
     "\\region with no description": lambda t: t["steps"][3]["formula"].update(
         {"sym": t["steps"][3]["formula"]["sym"] + r"\region{GHOST}{x}"}),
+    # --- the variable map the DAG view highlights off
+    "binding_vars missing an entry for a live slot": lambda t: t["steps"][3][
+        "binding_vars"].pop("MOLD"),
+    "binding_vars pointing at an undeclared tensor": lambda t: t["steps"][3][
+        "binding_vars"].update({"MOLD": ["ghost"]}),
+    "binding_vars listing a slot that has no binding": lambda t: t["steps"][3][
+        "binding_vars"].update({"GHOST": ["m"]}),
     "step with no graph node": lambda t: t["graph"]["nodes"].pop(0),
     "formula tier missing": lambda t: t["steps"][0]["formula"].pop("idx"),
     "raw -Infinity instead of the sentinel": lambda t: t["steps"][0]["state"].update({"m": "-Infinity"}),
