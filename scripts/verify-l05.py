@@ -193,6 +193,7 @@ load('labs/assets/engine/views/roofline.js');
 load('labs/assets/engine/views/ledger.js');
 load('labs/assets/engine/views/attn-shape.js');
 load('labs/assets/engine/views/phase-roofline.js');
+load('labs/assets/engine/views/variable-dag.js');
 const NS = g.LabEngine;
 // Non-finite floats travel as tags -- `json.dumps` writes bare Infinity, which
 // is legal JavaScript and illegal JSON, so a payload carrying one could not be
@@ -215,6 +216,11 @@ const PORTS = {
   'attn': NS.attnShape,
   'roofline': NS.phaseRoofline,
   'ledger': NS.ledger,
+  // The variable-DAG view's own port, added by the graph migration. It owns the
+  // `slotvars ` group -- the structural `binding_vars` rules -- and it is also
+  // where a `dataflow ` case can land, because a trace whose reads/writes lost a
+  // tensor is exactly a trace whose graph disappeared.
+  'slotvars': NS.variableDag,
   'base': { lint: NS.traceModel.lint, SABOTAGE_CASES: {} }
 };
 const out = { clean: {}, sabotage: {}, ports: {} };
@@ -271,7 +277,8 @@ process.stdout.write(JSON.stringify(out));
     # visible as a count mismatch rather than silently untested on this side.
     # The port names are the node script's registry keys — the sabotage
     # case names carry the same short prefix.
-    for prefix, port_name in {"attn": "attn", "roofline": "roofline"}.items():
+    for prefix, port_name in {"attn": "attn", "roofline": "roofline",
+                              "slotvars": "slotvars"}.items():
         cases = [k for k in res["sabotage"] if k.startswith(prefix + " ")]
         missed = [k for k in cases
                   if not (isinstance(res["sabotage"][k].get(port_name), int) and
@@ -281,21 +288,46 @@ process.stdout.write(JSON.stringify(out));
               f"（该 port 声明了 {declared} 条规则）",
               bool(cases) and not missed, "漏掉：" + "、".join(sorted(missed)))
 
-    # And the whole table must be caught by at least one of the ports: a case
-    # neither side catches is a rule that exists only in the case's name.
-    uncaught = [k for k, v in res["sabotage"].items() if not v.get("any")]
-    check(f"每一种破坏都至少被四个 port 之一抓到（共 {total} 种）", not uncaught,
-          "谁都没抓到的：" + "、".join(sorted(uncaught))[:300])
-
+    # The Python side's own verdict, which is what covers the rules no shared
+    # view can own. Run BEFORE the "at least one port" check, because two of
+    # this lab's groups are deliberately Python-only:
+    #
+    #   `slotmap `  "which tensor SHOULD this slot name" is a fact about L05's
+    #               formulas; a generic graph view has no business knowing it.
+    #   `dataflow ` the pinned reads/writes. The JS view DERIVES its edges from
+    #               them, so the mutation's symptom is a different drawing
+    #               rather than a lint gap -- there is nothing on the JS side to
+    #               disagree with, which is exactly why the rule lives where the
+    #               trace is written.
+    #
+    # L04's harness counts these the same way, and prints how many there are, so
+    # the asymmetry is visible in the run rather than buried.
     pyside = subprocess.run([sys.executable, str(GENERATOR)],
                             capture_output=True, text=True, cwd=str(REPO))
     text = pyside.stdout + pyside.stderr
-    ok = "LINT-DEAD" not in text and f"对照 {total} 种破坏全部被抓到" in text
-    check("Python 侧 lint 独自覆盖了 JS 侧职责之外的规则", ok,
-          "生成器自报全部抓到" if ok else "生成器输出里没有出现「全部抓到」")
-    note(f"四个 port 各跑同一张 {total} 种破坏的表：JS 侧 attnShape / phaseRoofline "
-         f"各自覆盖本组件的字段，ledger 覆盖账本，trace-model 覆盖基础契约；"
-         f"每一侧都要求「破坏真的改变了 trace」")
+    py_ok = "LINT-DEAD" not in text and f"对照 {total} 种破坏全部被抓到" in text
+    check("Python 侧 lint 独自覆盖了 JS 侧职责之外的规则", py_ok,
+          "生成器自报全部抓到" if py_ok else "生成器输出里没有出现「全部抓到」")
+
+    # And the whole table must be caught by at least one port: a case neither
+    # side catches is a rule that exists only in the case's name.
+    uncaught = [k for k, v in res["sabotage"].items() if not v.get("any")]
+    py_only = [k for k in uncaught if k.split(" ", 1)[0] in ("slotmap", "dataflow")]
+    if py_ok:
+        # The generator's own control group is the port for these. Only the
+        # cases whose PREFIX claims a port that no side has remain unexplained.
+        uncaught = [k for k in uncaught if k not in py_only]
+    check(f"每一种破坏都至少被某个 port 抓到（共 {total} 种）", not uncaught,
+          "谁都没抓到的：" + "、".join(sorted(uncaught))[:300])
+    check(f"只有 Python 侧 port 的 {len(py_only)} 种，都是按声明归给生成器的两组"
+          f"（slotmap / dataflow）",
+          all(k.split(" ", 1)[0] in ("slotmap", "dataflow") for k in py_only),
+          "、".join(sorted(py_only))[:300])
+    note(f"五个 port 各跑同一张 {total} 种破坏的表：JS 侧 attnShape / phaseRoofline "
+         f"各自覆盖本组件的字段，ledger 覆盖账本，slotvars（变量图）覆盖 slot → 张量"
+         f"映射的结构性规则，trace-model 覆盖基础契约；"
+         f"{len(py_only)} 种（slotmap / dataflow）只有生成器能判，"
+         f"它们的对照组在 labs/traces/kv_cache.py 里。")
 
 
 # ------------------------------------------------------------- DOM readers
@@ -419,6 +451,37 @@ READ_ROOF = """() => {
             rows: [...pr.querySelectorAll('.lab-pr-table tbody tr')].map(tr => ({
                 phase: tr.dataset.phase,
                 cells: [...tr.querySelectorAll('td')].map(td => td.textContent.trim())}))};
+}"""
+
+
+# The variable graph's own geometry, read the way the L00 pilot's harness reads
+# it: node boxes and canvas in VIEWBOX units (they are what the drawing is laid
+# out in), and edges SAMPLED along their real path (`getPointAtLength`) rather
+# than re-derived from the model — a path that is drawn somewhere other than
+# where the model thinks it is would otherwise pass every predicate.
+READ_SVG = """() => {
+    const svg = document.querySelector('.vd-dag');
+    const vb = svg.getAttribute('viewBox').split(/\\s+/).map(Number);
+    const boxes = [...svg.querySelectorAll('[data-vd-node]')].map(n => {
+        const r = n.querySelector('.vd-box');
+        return {id: n.dataset.vdNode,
+                x: +r.getAttribute('x'), y: +r.getAttribute('y'),
+                w: +r.getAttribute('width'), h: +r.getAttribute('height')};
+    });
+    const edges = [...svg.querySelectorAll('[data-vd-edge]')].map(p => {
+        const len = p.getTotalLength();
+        const pts = [];
+        for (let k = 0; k <= 40; k++) {
+            const q = p.getPointAtLength(len * k / 40);
+            pts.push([q.x, q.y]);
+        }
+        const m = /^(.+)>(.+)$/.exec(p.dataset.vdEdge);
+        return {from: m[1], to: m[2], rail: p.dataset.vdRail === '1',
+                back: p.dataset.vdBack === '1', pts: pts};
+    });
+    return {canvas: {w: vb[2], h: vb[3]}, boxes: boxes, edges: edges,
+            orientation: svg.dataset.vdOrientation,
+            fit: document.querySelector('.vd-dagwrap').dataset.vdFit};
 }"""
 
 
@@ -746,20 +809,26 @@ def main():
               f"采出 {sampled}，末态序列 {last_len} 个 token"
               f"（prompt {cfgT['prompt_len']} + 5 步）")
 
-        # The player's own replay controls must actually move the cursor, and
-        # the ledger with it — otherwise "回放" is a static page.
+        # The replay's own controls must actually move the cursor, and the
+        # ledger with it — otherwise "回放" is a static page.
+        #
+        # The control is the VIEW's now, not the player's: this page draws the
+        # replay with `views/variable-dag.js` (nodes are variables), so the
+        # button is `[data-vd="next"]`. It is CLICKED rather than stepped through
+        # the API, because a button wired to nothing is exactly the failure this
+        # asserts against.
         first = page.evaluate("""() => {
             window.__p.setCursor(0);
             const h = document.querySelector('[data-ledger-mount] .lab-ledger');
             return {step: h.getAttribute('data-step-id')};
         }""")
-        page.evaluate("() => document.querySelector('[data-ctl=\"next\"]').click()")
+        page.evaluate("() => document.querySelector('[data-vd=\"next\"]').click()")
         page.wait_for_timeout(350)
         second = page.evaluate("""() => {
             const h = document.querySelector('[data-ledger-mount] .lab-ledger');
             return {step: h.getAttribute('data-step-id')};
         }""")
-        check("播放器的「下一步」按钮会推进回放并重画账本",
+        check("变量图的「下一步」按钮会推进回放并重画账本",
               first["step"] != second["step"], f'{first["step"]} → {second["step"]}')
 
         # ============================================ AC2: the shape comparison
@@ -899,8 +968,9 @@ def main():
         # re-derived: a green panel that the page rendered is the thing a reader
         # sees, so it is the thing that gets asserted.
         checks = page.evaluate("() => window.__labViewChecks")
-        check("页面上三个自检面板都跑过并给出结论",
-              checks is not None and set(checks) == {"ledger", "attnShape", "phaseRoofline"},
+        check("页面上的自检都跑过并给出结论（账本 / 形状对比 / Roofline / 变量图 / 数据流）",
+              checks is not None and set(checks) == {"ledger", "attnShape", "phaseRoofline",
+                                                     "slotVars", "dataflow"},
               json.dumps(list(checks or {})))
         check("账本自检：20 步逐步对拍 0 不一致、4 条缩放性质成立、4 种错模型全被抓到",
               checks["ledger"]["stepFailures"] == 0 and
@@ -1287,13 +1357,556 @@ def main():
               f'压后 {control["squeezedAr"]:.2f} vs 声明 {control["declaredAr"]:.2f}；'
               f'未动 {control["cleanAr"]:.2f}；还原后 {control["restoredAr"]:.2f}')
 
+        # ============================================ the variable graph (DAG)
+        #
+        # This page now draws the replay with `views/variable-dag.js`: nodes are
+        # VARIABLES (the 8 tensors), edges are COMPUTATIONS. That is a different
+        # claim about the same trace, so it gets its own section — the graph has
+        # to be the ALGORITHM, and the way it fails is not an exception but a
+        # different picture.
+        print("\n== 变量图：节点是变量、边是计算，图就是算法 ==")
+        page.goto(f"{url}?cfg=kv-cache-N128-L2-fp16&step=0")
+        page.wait_for_timeout(800)
+
+        graph = page.evaluate("""() => {
+            const M = window.__vd.model;
+            const idx = window.__vd.index;
+            // `rail` / `back` are read off the DRAWN PATHS rather than off the
+            // model: the model's `rail` is filled in by the layout pass and the
+            // DOM is what a reader sees. A path whose class says "rail" while
+            // the model says otherwise is a mismatch this would otherwise miss.
+            const dom = {};
+            document.querySelectorAll('[data-vd-edge]').forEach(p => {
+                dom[p.dataset.vdEdge] = {rail: p.dataset.vdRail === '1',
+                                         back: p.dataset.vdBack === '1'};
+            });
+            return {
+                nodes: M.nodes,
+                tensors: Object.keys(M.tensors),
+                mode: M.edgeMode,
+                loops: M.loops.map(l => ({id: l.id, steps: l.steps})),
+                edges: M.edges.map(e => {
+                    const k = e.from + '>' + e.to;
+                    const d = dom[k] || {};
+                    return {from: e.from, to: e.to, steps: e.steps,
+                            carried: e.carried, back: !!d.back, rail: !!d.rail};
+                }),
+                // What the TRACE says, for the same pairs: the harness compares
+                // the drawing to the data rather than to a second drawing.
+                traceReads: idx.trace.steps.map(s => ({id: s.id, reads: s.reads,
+                                                       writes: s.writes})),
+            };
+        }""")
+        trace = load("kv-cache-N128-L2-fp16")
+        nodes_set = set(graph["nodes"])
+        check("节点集 == tensors 的键（节点是变量，不是步骤）",
+              nodes_set == set(trace["tensors"]),
+              json.dumps(sorted(nodes_set)))
+        check("每一条画出来的边都是某一步真的做过的依赖（读→写）",
+              all(any(e["from"] in s["reads"] and e["to"] in s["writes"]
+                      for s in trace["steps"]) for e in graph["edges"]),
+              json.dumps([e["from"] + "→" + e["to"] for e in graph["edges"]
+                          if not any(e["from"] in s["reads"] and e["to"] in s["writes"]
+                                     for s in trace["steps"])]))
+        note(f'{graph["mode"]} 模式，{len(graph["nodes"])} 个节点 / '
+             f'{len(graph["edges"])} 条边（trace 的 graph.edges 是步骤图，'
+             f'{len(trace["graph"]["edges"])} 条——两张图读同一份数据）')
+
+        # --- THE DATAFLOW PINS ------------------------------------------------
+        #
+        # The edges are derived from `reads`/`writes`, so a read that goes
+        # MISSING does not make the drawing fail — it silently draws a different
+        # algorithm. The pilot recorded exactly that shape of bug (an index error
+        # degraded "the furthest-progressed input" to `reads[0]` and the graph
+        # came out as a fan-out from a staging buffer, with no error anywhere).
+        # So each pin is asserted on the DRAWING, not on the trace: `k_new <- h`
+        # means there is a `h → k_new` edge, with the step that performs it.
+        def has_edge(frm, to, step_id=None):
+            for e in graph["edges"]:
+                if e["from"] == frm and e["to"] == to:
+                    if step_id is None:
+                        return True
+                    return any(trace["steps"][i]["id"] == step_id for i in e["steps"])
+            return False
+
+        print("\n== 数据流方向：防止静默退化成 reads[0] ==")
+        # `k_new ← h` and `v_new ← h`: the projection reads the residual stream.
+        # Not `tokens`, which is `reads[0]` on this step -- a rule that took the
+        # first read would draw the sequence feeding the projection, which is
+        # not what the algorithm does.
+        for target, sid in (("k_new", "prefill.kv"), ("v_new", "prefill.kv")):
+            check(f"{target} ← h（第 0 步把本步的 K/V 投影出来，输入是残差流）",
+                  has_edge("h", target, sid) and "h" in trace["steps"][0]["reads"],
+                  f'{sid}: reads={trace["steps"][0]["reads"]}')
+        # The degradation this guards against is `h` DISAPPEARING, and the test
+        # for it is that `h → k_new` is on the drawing — not that nothing else
+        # is. `tokens → k_new` is drawn too, and correctly so: operands mode
+        # draws every read→write pair the step performs, and this step does read
+        # `tokens` (it is the row count it appends). A rule that took `reads[0]`
+        # instead would draw that one edge alone, and this check would fail on
+        # the missing `h`.
+        check("写 k_new 的来源不止一个（operands 模式把这一步的每个操作数都画出来，"
+              "退化成 reads[0] 会只剩 tokens 一个）",
+              len([e for e in graph["edges"] if e["to"] == "k_new"]) >= 2,
+              json.dumps([e["from"] + "→k_new" for e in graph["edges"] if e["to"] == "k_new"]))
+        # `attn ← (k_new, v_new)`: both are attention's operands. `v_new` is the
+        # one that quietly goes missing -- it is never mentioned in the narration
+        # again -- and a trace whose attention read only `k_new` would draw an
+        # attention that cannot compute `O = WV`.
+        for operand in ("k_new", "v_new"):
+            check(f"attn ← {operand}（注意力同时乘 K 和 V）",
+                  has_edge(operand, "attn", "prefill.attn"),
+                  f'prefill.attn reads={trace["steps"][1]["reads"]}')
+        check("attn ← kv_cache（注意力读的是累积的缓存，不只是本步新算的几行）",
+              has_edge("kv_cache", "attn", "prefill.attn"),
+              f'prefill.attn reads={trace["steps"][1]["reads"]}')
+        # `logits ← h`: read off the residual stream, same as `k_new` is.
+        check("logits ← h（LM Head 读的是最后一个位置的残差流）",
+              has_edge("h", "logits", "prefill.head"),
+              f'prefill.head reads={trace["steps"][3]["reads"]}')
+        # The loop: the sampled token is appended to `tokens`, which the NEXT
+        # step's K/V projection reads. That is the autoregressive cycle, and it
+        # is the reason this lab has a cache at all.
+        check("tokens 由 head 追加、又被 kv 读 —— 自回归的环在图上",
+              has_edge("h", "tokens") and has_edge("tokens", "k_new", "prefill.kv"),
+              f'tokens 写于 {[s["id"] for s in trace["steps"] if "tokens" in s["writes"]]}，'
+              f'读于 {[s["id"] for s in trace["steps"] if "tokens" in s["reads"]]}')
+        note("这五条是「这张图是不是这个算法」的分水岭；每条都在生成器里有同样的钉子"
+             "（DATAFLOW_REQUIRED），并有 6 种破坏对照组")
+
+        # --- KV Cache IS a variable, and the accumulation is a self-loop -------
+        #
+        # L00's `m`/`l`/`acc` recurrences are drawn as self-loops and that is the
+        # precedent this follows: a step that reads what it writes is carrying a
+        # value across iterations, not moving data between two variables. Here
+        # the value carried is the cache, and it is the lab's subject.
+        print("\n== KV Cache 这个变量：跨步累积 ==")
+        kv_steps = [i for i, s in enumerate(trace["steps"]) if s["id"].endswith(".kv")]
+        check("kv_cache 是一个真的张量节点（不是只活在账本里的数字）",
+              "kv_cache" in trace["tensors"] and "kv_cache" in nodes_set,
+              json.dumps(trace["tensors"].get("kv_cache", {})))
+        check("追加步读 kv_cache 又写 kv_cache（读∩写 → 图上一条自环）",
+              all("kv_cache" in trace["steps"][i]["reads"] and
+                  "kv_cache" in trace["steps"][i]["writes"] for i in kv_steps),
+              f'{len(kv_steps)} 个追加步：{[trace["steps"][i]["id"] for i in kv_steps]}')
+        check("图上确实画出了 kv_cache 的自环，且它挂着全部 5 个追加步",
+              any(l["id"] == "kv_cache" and len(l["steps"]) == len(kv_steps)
+                  for l in graph["loops"]),
+              json.dumps(graph["loops"]))
+        check("自环的步集合 == 追加步的集合（不是把别的步也圈进来）",
+              all(sorted(l["steps"]) == kv_steps
+                  for l in graph["loops"] if l["id"] == "kv_cache"),
+              json.dumps([l for l in graph["loops"] if l["id"] == "kv_cache"]))
+        # The cache grows ACROSS phases, not only within one: every append step
+        # grows it, and the ledger is where the size is published (the value is
+        # not — see the generator's docstring for why).
+        sizes = [trace["steps"][i]["ledger"]["bytes"]["kv_cache"] for i in kv_steps]
+        check("账本里的 KV 分项随追加步单调不减，且 Prefill 一次就填入整段 prompt",
+              all(b >= a for a, b in zip(sizes, sizes[1:])) and sizes[0] > 0,
+              f'{sizes[0]:,} → {sizes[-1]:,} B')
+        check("自环上的步名是 append（自环画的是「读自己所写」，不是退化边）",
+              all(trace["steps"][i]["op"] == "append" for i in kv_steps),
+              json.dumps([trace["steps"][i]["op"] for i in kv_steps]))
+
+        # --- the cycle, and the geometry it forces ----------------------------
+        #
+        # `tokens → k_new → h → tokens` is a CYCLE, and this is the first trace
+        # in the repo with one. The layering has no fixed point under
+        # `layer[to] = max(layer[to], layer[from]+1)` when a cycle is present, so
+        # the view breaks it and DRAWS the closing edge on a rail. Both halves are
+        # asserted: the layering must be sane (the pilot's failure was raw layers
+        # of 133..135 that then produced fake bands), and the edge that closes the
+        # loop must still be on screen rather than dropped.
+        print("\n== 环：tokens → k_new → h → tokens ==")
+        lay = page.evaluate("""() => {
+            const M = window.__vd.model;
+            const L = window.__vd.layout();
+            return {raw: M.layers.raw, depth: M.layers.depth, back: Object.keys(M.layers.back),
+                    bands: L.bands, nBands: L.nBands, vertical: L.vertical,
+                    w: L.w, h: L.h};
+        }""")
+        check("分层是紧凑的：层号连续、没有 133/135 这种被环撑出来的假层号",
+              max(lay["raw"].values()) < len(lay["bands"]),
+              f'raw={json.dumps(lay["raw"])} bands={lay["nBands"]}')
+        check("处在同一个环上的同学（k_new / v_new）落在同一层（不是被环拆散）",
+              lay["depth"]["k_new"] == lay["depth"]["v_new"],
+              f'k_new={lay["depth"]["k_new"]}, v_new={lay["depth"]["v_new"]}')
+        check("回边的集合 == 逆着程序走的那些依赖（h 是上一步带进来的残差流，"
+              "却被本步的投影先读、本步的注意力后写）",
+              sorted(lay["back"]) == sorted(["h>k_new", "h>v_new", "h>kv_cache", "h>tokens"]),
+              json.dumps(lay["back"]))
+        # What the rule must produce, stated as a RULE rather than as a list, so
+        # it keeps biting if the layout changes: a back edge is one whose source
+        # is produced strictly later than its target (and which lies on a cycle,
+        # which is why L00's `x_blk -> m` is not one). Both halves are checked
+        # against the trace's own step order.
+        birth = {}
+        for i, s in enumerate(trace["steps"]):
+            for w in s["writes"]:
+                birth.setdefault(w, i)
+        for name in trace["tensors"]:
+            if "init" in trace["tensors"][name]:
+                birth[name] = -1
+        backs = [(e["from"], e["to"]) for e in graph["edges"] if e["back"]]
+        check("每条回边的源都比目标更晚被产生（回边 = 逆着程序走的依赖）",
+              backs and all(birth[a] > birth[b] for a, b in backs),
+              json.dumps({f"{a}→{b}": [birth[a], birth[b]] for a, b in backs}))
+        # And the one the rule must NOT mark, which is what the `init` clause in
+        # the birth clock buys: `tokens` is SEEDED with the prompt and only later
+        # appended to, so it exists from the start; `k_new` is produced at step
+        # 0. `tokens → k_new` is therefore the program's own direction. Counting
+        # a seeded tensor as "produced when it is first written" made `tokens`
+        # look later than `k_new` and lifted this edge instead — four rails came
+        # out crossing unrelated boxes, and the geometry predicate caught it.
+        check("tokens → k_new 不是回边（tokens 由 init 播种，第 0 步读它是在它被追加之前）",
+              ("tokens", "k_new") not in backs and has_edge("tokens", "k_new"),
+              f'tokens 的出生时刻 = {birth["tokens"]}，k_new = {birth["k_new"]}')
+        check("回边画在图上（不是被 layering 丢掉），并带 rail 绕行",
+              all(e["rail"] for e in graph["edges"] if e["back"]),
+              json.dumps([e["from"] + "→" + e["to"] for e in graph["edges"] if e["back"]]))
+        check("回边的箭头进入目标的上游侧（走 rail，不从下游侧倒着射进去）",
+              all(e["rail"] for e in graph["edges"] if e["back"]),
+              "回边若走 directPath 会从目标的下游侧进入")
+        note(f'{lay["nBands"]} 层 / 画布 {lay["w"]:.0f}×{lay["h"]:.0f}，'
+             f'{"竖排" if lay["vertical"] else "横排"}')
+
+        # --- the graph's geometry, measured every step ------------------------
+        #
+        # A graph can be wrong in a way only the graph shows. This project has
+        # already shipped a diagram whose every count was right and whose
+        # furniture overlapped, so the picture is measured: node boxes pairwise
+        # disjoint, every box inside the canvas, no edge routed through a box it
+        # does not belong to, and no operation label on a box or on another
+        # label. Run at EVERY step, because which edges are drawn does not change
+        # with the cursor but which are lit does.
+        print("\n== 变量图的几何（逐步全量谓词）==")
+        geo = {"overlap": [], "clipped": [], "through": [], "labelBox": [],
+               "labelLabel": [], "steps": 0}
+
+        def rect_hit(a, b):
+            return (a["x"] < b["x"] + b["w"] and b["x"] < a["x"] + a["w"] and
+                    a["y"] < b["y"] + b["h"] and b["y"] < a["y"] + a["h"])
+
+        for i in range(len(trace["steps"])):
+            page.goto(f"{url}?cfg=kv-cache-N128-L2-fp16&step={i}")
+            page.wait_for_timeout(180)
+            g = page.evaluate(READ_SVG)
+            geo["steps"] += 1
+            boxes = g["boxes"]
+            for a in range(len(boxes)):
+                for b in range(a + 1, len(boxes)):
+                    if rect_hit(boxes[a], boxes[b]):
+                        geo["overlap"].append([i, boxes[a]["id"], boxes[b]["id"]])
+            for bx in boxes:
+                if (bx["x"] < -0.5 or bx["y"] < -0.5 or
+                        bx["x"] + bx["w"] > g["canvas"]["w"] + 0.5 or
+                        bx["y"] + bx["h"] > g["canvas"]["h"] + 0.5):
+                    geo["clipped"].append([i, bx["id"]])
+            for e in g["edges"]:
+                for bx in boxes:
+                    if bx["id"] in (e["from"], e["to"]):
+                        continue
+                    for (px, py) in e["pts"]:
+                        if (bx["x"] < px < bx["x"] + bx["w"] and
+                                bx["y"] < py < bx["y"] + bx["h"]):
+                            geo["through"].append(
+                                [i, e["from"] + "→" + e["to"], bx["id"],
+                                 "rail" if e["rail"] else "direct"])
+                            break
+            lbl = page.evaluate("""() => {
+                const svg = document.querySelector('.vd-dag');
+                const boxes = [...svg.querySelectorAll('[data-vd-node]')].map(n => {
+                    const r = n.querySelector('.vd-box').getBoundingClientRect();
+                    return {id: n.dataset.vdNode, l: r.left, r: r.right,
+                            t: r.top, b: r.bottom};
+                });
+                const labels = [...svg.querySelectorAll('[data-vd-el]')].map(t => {
+                    const b = t.getBoundingClientRect();
+                    return {pair: t.dataset.vdEl, text: t.textContent,
+                            l: b.left, r: b.right, t: b.top, b: b.bottom,
+                            opacity: +getComputedStyle(t).opacity};
+                }).filter(x => x.opacity >= 0.5);
+                const hit = (p, q) => p.l < q.r - 1 && q.l < p.r - 1 &&
+                                      p.t < q.b - 1 && q.t < p.b - 1;
+                const box = [], pair = [];
+                labels.forEach(x => boxes.forEach(b => {
+                    if (hit(x, b)) box.push([x.pair, b.id]);
+                }));
+                for (let a = 0; a < labels.length; a++)
+                    for (let b = a + 1; b < labels.length; b++)
+                        if (hit(labels[a], labels[b]))
+                            pair.push([labels[a].text, labels[b].text]);
+                return {box: box, pair: pair};
+            }""")
+            geo["labelBox"] += [[i] + b for b in lbl["box"]]
+            geo["labelLabel"] += [[i] + p for p in lbl["pair"]]
+
+        check(f'{len(graph["nodes"])} 个节点两两不重叠（{geo["steps"]} 步逐步测）',
+              not geo["overlap"], json.dumps(geo["overlap"][:4], ensure_ascii=False))
+        check("每个节点都在画布内（没有被 viewBox 裁掉）",
+              not geo["clipped"], json.dumps(geo["clipped"][:4], ensure_ascii=False))
+        check("没有边穿过与它无关的节点箱 —— 跨层边与回边都靠 rail 绕行",
+              not geo["through"], json.dumps(geo["through"][:4], ensure_ascii=False))
+        check("边的操作名不压在节点箱上",
+              not geo["labelBox"], json.dumps(geo["labelBox"][:4], ensure_ascii=False))
+        check("两个边的操作名不互相压住（同名标签不重复印）",
+              not geo["labelLabel"],
+              json.dumps(geo["labelLabel"][:4], ensure_ascii=False))
+
+        # The label has to be READABLE at the size the panel gives it, not just
+        # present in the DOM. L04's twelve-band drawing letterboxed into a ~4px
+        # label with the defaults; L05's five bands do better, and the numbers
+        # are asserted rather than eyeballed.
+        legible = page.evaluate("""() => {
+            const svg = document.querySelector('.vd-dag');
+            const dw = document.querySelector('.vd-dagwrap');
+            const s = svg.getBoundingClientRect().width / svg.viewBox.baseVal.width;
+            return {fit: dw.dataset.vdFit, scale: s, label: 13 * s,
+                    wrap: [dw.clientWidth, dw.clientHeight]};
+        }""")
+        check("绘制在面板内完整显示（contain），节点名在 10px 以上",
+              legible["fit"] == "contain" and legible["label"] >= 10,
+              f'{legible["fit"]}，scale={legible["scale"]:.3f}，'
+              f'13px 标签 → {legible["label"]:.1f}px，面板 {legible["wrap"]}')
+
+        # --- one screen -------------------------------------------------------
+        #
+        # The ticket's shape is "每一个知识点基本一屏". This page buys it the way
+        # L04's does: the per-STEP content is the graph plus the formula, and
+        # everything that is about a whole configuration is folded into one
+        # <details>. So the promise to assert is that the page does not scroll
+        # and the control bar stays on screen at EVERY step — and, because the
+        # reference section is what makes that possible, that opening it does
+        # not push the page either (it scrolls internally).
+        print("\n== 一屏：每一步都不滚动，控制条始终在视野内 ==")
+        fits = page.evaluate("""() => {
+            const out = [];
+            for (let i = 0; i <= window.__vd.index.lastStep; i++) {
+                window.__vd.setCursor(i);
+                const ctl = document.querySelector('.vd-ctl').getBoundingClientRect();
+                out.push({
+                    i: i,
+                    doc: document.documentElement.scrollHeight - window.innerHeight,
+                    ctlVisible: ctl.bottom <= window.innerHeight + 1 && ctl.top >= 0,
+                });
+            }
+            return out;
+        }""")
+        check("PC：每一步都不需要滚动页面（一屏 = 一步）",
+              max(r["doc"] for r in fits) <= 0,
+              f'最大溢出 {max(r["doc"] for r in fits)}px')
+        check("PC：控制条在每一步都留在视野内",
+              all(r["ctlVisible"] for r in fits),
+              json.dumps([r["i"] for r in fits if not r["ctlVisible"]]))
+        opened = page.evaluate("""() => {
+            document.getElementById('lab-more').setAttribute('open', '');
+            const body = document.querySelector('.lab-more-bd');
+            return {doc: document.documentElement.scrollHeight - window.innerHeight,
+                    innerScrolls: body.scrollHeight > body.clientHeight};
+        }""")
+        check("参考面板展开后页面仍不滚动（它自己内部滚，不是把页面撑长）",
+              opened["doc"] <= 0, f'溢出 {opened["doc"]}px')
+        note("一屏是「每步」的预算：图 + 公式 + 值在一屏内，整份配置的面板折进 <details>，"
+             "展开时内部滚动 —— 与 L04 同一取舍")
+
+        # --- the geometry control group ---------------------------------------
+        #
+        # The predicates above must be able to FAIL. This does not nudge a data
+        # value and hope the drawing follows: it BUILDS a DOM that violates each
+        # invariant and requires the same predicates, evaluated the same way, to
+        # flag it.
+        print("\n== 几何对照：人为把节点推出去 / 让边穿箱，规则必须报警 ==")
+        control = page.evaluate("""() => {
+            const svg = document.querySelector('.vd-dag');
+            const vb = svg.getAttribute('viewBox').split(/\\s+/).map(Number);
+            const vbW = vb[2], vbH = vb[3];
+            const boxesOf = () => [...svg.querySelectorAll('[data-vd-node]')].map(n => {
+                const r = n.querySelector('.vd-box');
+                return {id: n.dataset.vdNode, x: +r.getAttribute('x'), y: +r.getAttribute('y'),
+                        w: +r.getAttribute('width'), h: +r.getAttribute('height')};
+            });
+            const hit = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w &&
+                                  a.y < b.y + b.h && b.y < a.y + a.h;
+            const clipped = bs => bs.some(b => b.x < -0.5 || b.y < -0.5 ||
+                b.x + b.w > vbW + 0.5 || b.y + b.h > vbH + 0.5);
+            const overlaps = bs => {
+                for (let i = 0; i < bs.length; i++)
+                    for (let j = i + 1; j < bs.length; j++)
+                        if (hit(bs[i], bs[j])) return true;
+                return false;
+            };
+            const cleanBoxes = boxesOf();
+            const clean = {clipped: clipped(cleanBoxes), overlap: overlaps(cleanBoxes)};
+
+            // 1. push one box past the right edge.
+            const first = svg.querySelector('[data-vd-node] .vd-box');
+            const ox = first.getAttribute('x');
+            first.setAttribute('x', String(vbW + 40));
+            const badClip = clipped(boxesOf());
+            first.setAttribute('x', ox);
+            const restoredClip = clipped(boxesOf());
+
+            // 2. slide a box onto its neighbour.
+            const boxes = [...svg.querySelectorAll('[data-vd-node]')];
+            const secondBox = boxes[1].querySelector('.vd-box');
+            const oy = secondBox.getAttribute('y');
+            secondBox.setAttribute('y', first.getAttribute('y'));
+            secondBox.setAttribute('x', first.getAttribute('x'));
+            const badOverlap = overlaps(boxesOf());
+            secondBox.setAttribute('y', oy);
+            const restoredOverlap = overlaps(boxesOf());
+            return {clean: clean, badClip: badClip, restoredClip: restoredClip,
+                    badOverlap: badOverlap, restoredOverlap: restoredOverlap};
+        }""")
+        check("对照组：被推出画布的节点会被「不被裁」规则抓到（且还原后不再报）",
+              control["badClip"] and not control["clean"]["clipped"] and
+              not control["restoredClip"], json.dumps(control))
+        check("对照组：被挪到邻居身上的节点会被「不重叠」规则抓到（且还原后不再报）",
+              control["badOverlap"] and not control["clean"]["overlap"] and
+              not control["restoredOverlap"], json.dumps(control))
+
+        # --- formula ↔ graph highlight through binding_vars -------------------
+        #
+        # The mapping is the generator's; what the page has to do is USE it. The
+        # two ways it can fail are (a) light nothing, (b) light the wrong node —
+        # and (b) is what a page-side scan produces on this trace.
+        #
+        # The tier matters and is not a detail: `KOLD`/`VOLD` are written in the
+        # SYM and IDX tiers (`K^{(l)}_{[t_prev,H,d_h]}`), not in `num`, which
+        # shows `KNEW`/`VNEW` and the shapes. The page defaults to `num`, so the
+        # check switches to `sym` first — otherwise it would be asking for a slot
+        # that is legitimately not on screen, and "lit nothing" would look like a
+        # bug in the page.
+        print("\n== 公式与图互亮：step.binding_vars ==")
+        page.goto(f"{url}?cfg=kv-cache-N128-L2-fp16&step=0")
+        page.wait_for_timeout(700)
+        hl = page.evaluate("""() => {
+            const out = {};
+            window.__vd.setTier('sym');
+            const btns = [...document.querySelectorAll('.vd-chip[data-vd-var]')];
+            const b = btns.find(x => x.dataset.vdVar === 'kv_cache');
+            if (b) b.click();
+            out.pinned = [...new Set([...document.querySelectorAll('.vd-chip-on')]
+                .map(x => x.dataset.vdVar))];
+            out.nodesOn = [...document.querySelectorAll('[data-vd-node]')]
+                .filter(g => g.dataset.vdState === 'on').map(g => g.dataset.vdNode);
+            // Every slot on screen, with the tensors its entry names.
+            out.slots = [...document.querySelectorAll('.vd-fml [id*="-slot-"]')]
+                .map(e => [/-slot-([A-Za-z0-9_]+)$/.exec(e.id)[1], e.dataset.vdVars || '',
+                           e.classList.contains('vd-slot-on')]);
+            // What the TRACE says, so the assertion compares the page to the
+            // data rather than to a second reading of the page.
+            out.modelVars = window.__vd.model.steps[0].bindingVars;
+            out.touched = window.__vd.model.steps[0].reads
+                .concat(window.__vd.model.steps[0].writes);
+            return out;
+        }""")
+        check("点读/写 chips 上的 kv_cache，图上的 kv_cache 节点亮起",
+              "kv_cache" in hl["pinned"] and "kv_cache" in hl["nodesOn"],
+              json.dumps(hl, ensure_ascii=False)[:200])
+        check("亮的节点集 == 这一步读写的张量集（高亮由本步数据流驱动，不是随便亮）",
+              set(hl["nodesOn"]) == set(hl["touched"]),
+              json.dumps(sorted(hl["nodesOn"])) + " vs " + json.dumps(sorted(set(hl["touched"]))))
+        # THE ONE THAT MATTERS. `KOLD` denotes the cache BEFORE this step and
+        # `KNEW` the rows this step adds. A stem-matched scan over the formula
+        # links both to `k_new`; the stated map does not, and neither does the
+        # page. So pinning `kv_cache` must light exactly the slots the table
+        # gives it, and none of the ones about the new rows.
+        lit = {s for s, _, on in hl["slots"] if on}
+        named = {s: v for s, v, _ in hl["slots"]}
+        check("点 kv_cache 亮起的是 KOLD / VOLD，且它们指向的就是 kv_cache",
+              lit == {"KOLD", "VOLD"} and
+              all(named[s] == "kv_cache" for s in lit),
+              json.dumps(sorted(lit)) + " / " +
+              json.dumps({s: named.get(s) for s in sorted(lit)}))
+        # Which tier a slot is written in is the trace's business, not the
+        # page's, and the four slots this lab's trap is about are not all in one
+        # tier: the K/V append's formula is written three ways and each way names
+        # a different pair —
+        #
+        #   sym  `K <- [K_old ; LN(h)W_k]`            KOLD, VOLD
+        #   idx  `K_{[t_prev]} <- [K_old ; K_new_{...}]`  KOLD **and** KNEW
+        #   num  `K_new = shape [...]`                KNEW, VNEW
+        #
+        # So the discriminating check is the IDX tier, which is the one place
+        # `KOLD` and `KNEW` are on screen TOGETHER — the pair a stem-matched scan
+        # collapses into one tensor. Asking for all four at once would be asking
+        # for a tier that does not exist.
+        per_tier = page.evaluate("""() => {
+            const out = {};
+            for (const tier of ['sym', 'idx', 'num']) {
+                window.__vd.setTier(tier);
+                const slots = {};
+                document.querySelectorAll('.vd-fml [id*="-slot-"]').forEach(e => {
+                    slots[/-slot-([A-Za-z0-9_]+)$/.exec(e.id)[1]] = {
+                        vars: e.dataset.vdVars || '',
+                        on: e.classList.contains('vd-slot-on')};
+                });
+                out[tier] = slots;
+            }
+            return out;
+        }""")
+        check("sym 档：KOLD / VOLD 同屏，两个都指向 kv_cache 且都被点亮",
+              per_tier["sym"].get("KOLD") == {"vars": "kv_cache", "on": True} and
+              per_tier["sym"].get("VOLD") == {"vars": "kv_cache", "on": True},
+              json.dumps(per_tier["sym"], ensure_ascii=False))
+        check("idx 档：KOLD 与 KNEW 同屏 —— KOLD 亮、指 kv_cache；"
+              "KNEW 不亮、指 k_new（表和正则的区别就在这一步）",
+              per_tier["idx"].get("KOLD") == {"vars": "kv_cache", "on": True} and
+              per_tier["idx"].get("KNEW") == {"vars": "k_new", "on": False},
+              json.dumps(per_tier["idx"], ensure_ascii=False))
+        check("num 档：KNEW / VNEW 指向本步新算的两个张量，且都没被 kv_cache 点亮",
+              per_tier["num"].get("KNEW") == {"vars": "k_new", "on": False} and
+              per_tier["num"].get("VNEW") == {"vars": "v_new", "on": False},
+              json.dumps(per_tier["num"], ensure_ascii=False))
+        # And the same statement in the data, so the assertion above is anchored
+        # to the trace rather than to the page's own opinion of itself.
+        check("trace 的 binding_vars 自己就区分了「旧缓存」与「新行」",
+              hl["modelVars"]["KOLD"] == ["kv_cache"] and
+              hl["modelVars"]["VOLD"] == ["kv_cache"] and
+              hl["modelVars"]["KNEW"] == ["k_new"] and
+              hl["modelVars"]["VNEW"] == ["v_new"],
+              json.dumps(hl["modelVars"], ensure_ascii=False))
+
+        # The mapping the generator had to state, and the two a page-side scan
+        # would get wrong. `KOLD` is the cache BEFORE this step; a stem-matched
+        # scan links it to `k_new`, the rows this step ADDS.
+        sv = page.evaluate("() => window.__labViewChecks.slotVars")
+        check("slot → 张量映射的契约 lint 干净", sv and sv["lintGaps"] == 0,
+              json.dumps(sv, ensure_ascii=False))
+        check("该 lint 的对照组全部被抓到，且都真的改变了 trace",
+              sv and sv["sabotageMissed"] == [] and sv["sabotageNoop"] == [] and
+              sv["sabotageSkipped"] == [], json.dumps(sv, ensure_ascii=False))
+        check("该 lint 的对照组确实跑过（不是一张空表）",
+              sv and sv["sabotageTotal"] >= 5, json.dumps(sv, ensure_ascii=False))
+
+        df = page.evaluate("() => window.__labViewChecks.dataflow")
+        check("页面自报的数据流钉子：6 步全部成立",
+              df and df["passed"] and df["rows"] == 6 and not df["failures"],
+              json.dumps(df, ensure_ascii=False))
+
         # ============================================================== shots
+        #
+        # The reference panels live inside a folded <details> (the page is one
+        # screen; see its header comment), and Playwright will not screenshot a
+        # hidden element. `?more=1` opens it, which is also how a reader can
+        # bookmark the section open — so the screenshots are of the artifact a
+        # reader sees after one click, not of a DOM state only the harness can
+        # reach.
         print("\n== 截图 ==")
+        # The overview is the DEFAULT reading state — the folded section CLOSED.
+        # With it open the graph is competing with 66vh of reference panels and
+        # the shot would show a squeezed drawing that no reader starts from.
         page.goto(f"{url}?cfg=kv-cache-N128-L2-fp16&step=5")
+        page.wait_for_timeout(900)
+        page.screenshot(path=SHOTS / "50-l05-overview.png")
+
+        # The folded section, opened — the state every panel screenshot below is
+        # taken in, and the one `?more=1` is for.
+        page.goto(f"{url}?cfg=kv-cache-N128-L2-fp16&step=5&more=1")
         page.wait_for_timeout(900)
         page.evaluate("() => window.scrollTo(0, 0)")
         page.wait_for_timeout(300)
-        page.screenshot(path=SHOTS / "50-l05-overview.png")
 
         page.locator('[data-panel="attn-shape"]').screenshot(
             path=SHOTS / "51-l05-shape-compare.png")
@@ -1312,7 +1925,7 @@ def main():
         # The smallest and largest context, for the shape comparison's two ends.
         for cfg_id, name in (("kv-cache", "56-l05-shape-small"),
                              ("kv-cache-N128-L4-int8", "57-l05-shape-large")):
-            page.goto(f"{url}?cfg={cfg_id}&step=5")
+            page.goto(f"{url}?cfg={cfg_id}&step=5&more=1")
             page.wait_for_timeout(900)
             page.locator('[data-panel="attn-shape"]').screenshot(path=SHOTS / f"{name}.png")
 
@@ -1320,7 +1933,7 @@ def main():
         # cache dominates — the extrapolation the sliders exist for, and one no
         # trace covers. Dragged with real `input` events, so the wiring is
         # exercised rather than just the initial render.
-        page.goto(f"{url}?cfg=kv-cache-N128-L4-fp16&step=0")
+        page.goto(f"{url}?cfg=kv-cache-N128-L4-fp16&step=0&more=1")
         page.wait_for_timeout(800)
         page.evaluate("""() => {
             const set = (idx, v) => {
@@ -1346,11 +1959,64 @@ def main():
               f'KV {pred["bytes"]["kv_cache"]:,} B vs 参数 {pred["bytes"]["params"]:,} B')
         check("预测面板明说这是预测值（不是 trace 跑过的配置）",
               "预测值" in pred["caption"], pred["caption"][:60])
-        page.locator(".l05-predict").screenshot(path=SHOTS / "58-l05-predict-ledger.png")
+        page.locator('[data-panel="predict"]').screenshot(
+            path=SHOTS / "58-l05-predict-ledger.png")
 
-        page.goto(f"{url}?cfg=kv-cache-N128-L4-fp16&step=5")
+        page.goto(f"{url}?cfg=kv-cache-N128-L4-fp16&step=5&more=1")
         page.wait_for_timeout(800)
         page.screenshot(path=SHOTS / "59-l05-full-light.png", full_page=True)
+
+        # ------------------------------------------------------------- phone
+        #
+        # "PC 与手机都能方便阅读" is the same promise here as in L00 and L04,
+        # and this page is where it is weakest: the graph is five bands deep and
+        # the node labels sit on a drawing scaled to fit, so a phone is exactly
+        # where a designer reaches for a "needs a wider screen" notice. The view
+        # does not have one -- the same two halves stack -- so what is asserted
+        # is that the phone gets the REAL view, that the page still does not
+        # scroll, and that the labels stay readable rather than present.
+        print("\n== 手机：真适配（不是降级）==")
+        phone = browser.new_page(viewport={"width": 390, "height": 844},
+                                 device_scale_factor=2, is_mobile=True, has_touch=True)
+        phone_logs = []
+        phone.on("pageerror", lambda e: phone_logs.append(str(e)))
+        phone.goto(f"{url}?cfg=kv-cache-N128-L2-fp16&step=1")
+        phone.wait_for_timeout(1400)
+        mob = phone.evaluate("""() => {
+            const root = document.querySelector('.vd-root');
+            const main = document.querySelector('.vd-main');
+            const ctl = document.querySelector('.vd-ctl').getBoundingClientRect();
+            const lbl = document.querySelector('[data-vd-node] .vd-nl')
+                .getBoundingClientRect();
+            return {
+                rows: getComputedStyle(main).gridTemplateRows.split(' ').length,
+                rootOverflow: root.scrollHeight - root.clientHeight,
+                docOverflow: document.documentElement.scrollHeight - window.innerHeight,
+                ctlVisible: ctl.bottom <= window.innerHeight + 1 && ctl.top >= 0,
+                graphH: Math.round(document.querySelector('.vd-dagwrap')
+                    .getBoundingClientRect().height),
+                labelPx: lbl.height,
+                fit: document.querySelector('.vd-dagwrap').dataset.vdFit,
+                hasView: !!document.querySelector('.vd-dag'),
+                hasFormula: !!document.querySelector('.vd-fml .lab-formula-node'),
+                hasFallback: !!document.querySelector('.lab-narrow'),
+            };
+        }""")
+        check("手机上渲染的是同一个视图（不是「需要更宽的屏幕」降级卡片）",
+              mob["hasView"] and mob["hasFormula"] and not mob["hasFallback"],
+              json.dumps(mob, ensure_ascii=False))
+        check("手机上两半改为上下堆叠（真排版，不是缩小的 PC 版）",
+              mob["rows"] == 2, f'grid 行数 = {mob["rows"]}')
+        check("手机上图仍有可读高度（不是被压成一条）",
+              mob["graphH"] >= 140, f'图高 {mob["graphH"]}px')
+        check("手机上节点标签仍可读（>= 8px）",
+              mob["labelPx"] >= 8.0, f'标签高 {mob["labelPx"]:.1f}px，fit={mob["fit"]}')
+        check("手机上节点名完整在画布内（没有把最外层的名字裁掉）",
+              mob["fit"] in ("contain", "pan"), f'fit={mob["fit"]}')
+        phone.screenshot(path=SHOTS / "60-l05-phone.png")
+        phone.screenshot(path=SHOTS / "61-l05-phone-graph.png",
+                         clip={"x": 0, "y": 0, "width": 390, "height": 380})
+        phone.close()
 
         print(f"\n截图 -> {SHOTS}")
 

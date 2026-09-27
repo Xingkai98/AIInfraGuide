@@ -146,6 +146,71 @@ ledger's `check()` still runs on L04 and its three component-level verdicts are
 still reported; only the embedded lint verdict is ignored, and the page says so
 in the panel rather than quietly dropping it.
 
+## The `binding_vars` map, and why L05 needed a DIFFERENT argument from L04's
+
+L00 resolves `slot -> tensor` by scanning the LaTeX (`vars_in_sym`), and that is
+right for L00 because its formulas write each tensor under its own name. L04
+could not scan (`P` is the probability matrix while `S` is the gate activation
+in one step and the score matrix in another) and stated the map in a table
+(`SLOT_VARS`), with `slot_vars_selftest` running L00's resolver over L04's
+formulas to show, by measurement, that it resolves none of them.
+
+**L05 is the case that looks like it should be scannable.** Its formulas visibly
+contain `\mathrm{LN}(h)`, `\mathrm{logits}` and `h_1 = h + O`, and the ticket
+that migrated it expected a scan to be worth trying. It is not, and the
+self-test's four legs say which way it fails rather than that it does:
+
+| leg | what it measures | result on L05 |
+|---|---|---|
+| 1 | the stated map's required rows name what they claim | 9/9 |
+| 2 | L00's own resolver, on an L00 formula (the control) | resolves `l`, `m` and keeps `x` out of `x_blk` |
+| 3 | L00's resolver, on this trace's slots | **20/135 bindings (15%)**, and every one is the same incidental `h` in `\mathrm{LN}(h)` / `_f(h)` |
+| 4 | the stem-matched repair for leg 3 | **30 slots linked to the WRONG tensor** |
+
+Leg 4 is the dangerous one and the reason the argument is not just "sparse".
+The obvious repair for leg 3 is to match a tensor by its STEM, so the formulas'
+upper-case `K` finds the tensor `k_new`. Run it, and `KOLD`/`VOLD` — the cache
+as it stood BEFORE this step — resolve to `k_new`/`v_new`, the rows this step
+ADDS. A silent scan leaves a reader with no highlight; a wrong link shows them a
+connection that is not there, and the two slots it gets wrong are the two this
+lab exists to tell apart.
+
+So L05 states the map too, with `SLOT_VARS` keyed by the step's SUFFIX (the
+replay is one shape repeated five times — `prefill.kv` and `d4.kv` carry the same
+row) and the same structural rule as L04: every name must be a tensor the step
+itself reads or writes. `SLOT_VARS_REQUIRED` pins the nine mappings the picture
+depends on, and `lint_dataflow` pins the reads/writes themselves.
+
+**The `dataflow …` group is new here, and it is a different KIND of rule from
+everything above.** The variable-DAG view derives its edges from
+`reads`/`writes`, so a read that goes missing does not produce a lint gap or an
+exception — it draws a DIFFERENT ALGORITHM. The pilot recorded exactly that
+shape of failure (an index bug degraded "the furthest-progressed input" to
+`reads[0]` and the graph came out as a fan-out from a staging buffer, with no
+error anywhere). So the six mutations that matter are pinned in the generator
+(`DATAFLOW_REQUIRED`) and re-stated in the page:
+
+```python
+("prefill.kv", ["tokens", "h", "kv_cache"], ["k_new", "v_new", "kv_cache"]),
+("prefill.attn", ["tokens", "k_new", "v_new", "kv_cache"], ["h", "attn"]),
+("prefill.head", ["h"], ["logits", "token_new", "tokens"]),
+# …and the same three at d1, because prefill and decode being the same code path
+# with a different n_q is the thing this lab is about.
+```
+
+`h` is deliberately NOT `reads[0]` on the append step: the step reads `tokens`
+first (it is the row count), so a table that only checked "did it read
+something" would pass a trace whose projection lost its input. That is the
+degradation the acceptance harness re-tests against the built page.
+
+**The `slotmap …` and `dataflow …` groups are Python-only, and that is stated
+rather than papered over.** They have no JS port for the reason above: "which
+tensor SHOULD this slot name" is a fact about L05's formulas, and a view that
+derives its edges from `reads`/`writes` has nothing to disagree with when those
+arrays change. `scripts/verify-l05.py` counts the generator's own verdict for
+them instead of reporting them as "caught by nobody", and prints how many there
+are, so the asymmetry is visible in the run.
+
 **The `params …` sabotage cases are the one group in this repo that has a single
 port, and that is stated rather than papered over.** The two-port rule exists
 because a rule whose verdict a lab author cannot get in the browser is a rule

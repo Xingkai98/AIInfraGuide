@@ -164,8 +164,9 @@
     /* Layers first: the edge derivation needs to know which variable sits
        upstream of which, so the ordering and the drawing are decided by the
        same computation rather than by two that can disagree. */
-    var layers = computeLayers(nodes, steps);
+    var layers = computeLayers(nodes, steps, trace.tensors);
     var depth = layers.depth;
+    var backSet = layers.back || {};
 
     var edgeMap = {}, edges = [];
     var selfLoops = {}, loops = [];
@@ -173,7 +174,8 @@
     function addEdge(from, to, step, isCarried) {
       var key = from + '>' + to;
       if (!edgeMap[key]) {
-        edgeMap[key] = { from: from, to: to, steps: [], ops: [], carried: false };
+        edgeMap[key] = { from: from, to: to, steps: [], ops: [], carried: false,
+                         back: !!backSet[key] };
         edges.push(edgeMap[key]);
       }
       edgeMap[key].steps.push(step.i);
@@ -242,16 +244,29 @@
           if (selfReading.indexOf(r) !== -1) return;   /* drawn as a self-loop */
           s.writes.forEach(function (w) {
             if (r === w) return;
-            /* Every layer-consuming pair is upstream by construction, so this
-               guard should never fire; it is here so that a trace whose
-               layering disagrees with its reads/writes reports a back-edge
-               instead of drawing an arrow that points backwards. */
-            if ((depth[r] || 0) >= (depth[w] || 0)) return;
+            /* An edge the layering could not honour because it closes a cycle
+               is drawn anyway: the step really did perform this dependency, and
+               on L05 it is the autoregressive loop the lab exists to show. It
+               is routed on a rail (see `railPath`), not with the in-gap bezier,
+               which would leave the arrowhead against the flow. */
+            if ((depth[r] || 0) >= (depth[w] || 0) && !backSet[r + '>' + w]) return;
             addEdge(r, w, s, r + '>' + w === carriedKey);
           });
         });
         return;
       }
+
+      /* `carried` mode draws one edge per step by construction, so a back edge
+         would never be chosen here -- the carried source is picked from the
+         reads strictly ABOVE the target, which excludes exactly the pairs the
+         DFS marked. They are added explicitly for the same reason the operands
+         mode adds them: a dependency the step performed is not dropped because
+         the layout could not point it downstream. */
+      s.reads.forEach(function (r) {
+        s.writes.forEach(function (w) {
+          if (r !== w && backSet[r + '>' + w]) addEdge(r, w, s, false);
+        });
+      });
 
       if (!source) return;
       addEdge(source, target, s, true);
@@ -281,7 +296,148 @@
 
   /* ============================================================ layout */
 
-  function computeLayers(nodes, steps) {
+  /* Which read -> write dependencies close a cycle.
+   *
+   * The relaxation below is `layer[to] = max(layer[to], layer[from] + 1)`, which
+   * has no fixed point when the pairs contain a cycle: the loop runs its fixed
+   * number of passes and every node on the cycle ends up at the pass count. L05
+   * is the first trace where that happens -- `tokens -> k_new -> h -> tokens` is
+   * the autoregressive loop, and it is the lab's subject rather than an accident
+   * -- and the measured result was raw layers of 133..135 on a five-node cycle.
+   * Compaction then spreads those into fake bands in an order that depends on
+   * nothing, and the depth guards in `build` silently drop every edge that now
+   * points backwards: the drawing came out as two wires and an isolated node.
+   *
+   * So a cycle is broken for LAYOUT purposes and the closing edges are reported
+   * instead of being allowed to poison the ordering. A depth-first search marks
+   * the edges that reach a node still on the current stack; those are exactly
+   * the edges whose removal leaves an acyclic graph, which is what the
+   * relaxation needs.
+   *
+   * They are not deleted. `build` draws them (see `isBack`), because "the head's
+   * output re-enters the sequence, which the next step's K/V projection reads"
+   * is the reason this lab has a cache at all -- the same reasoning that keeps
+   * L00's self-loops rather than discarding them as degenerate.
+   *
+   * WHICH edge of a cycle gets broken is decided by the order the search visits
+   * the nodes, and that matters: an arbitrary order (declaration order, say)
+   * marks whichever edge happens to close first and can leave two siblings on
+   * opposite sides of the cycle -- measured on L05, `k_new` and `v_new` are
+   * written by the same step and read by the same step, yet came out three
+   * bands apart, which reads as a dependency that is not there. So the roots
+   * are visited in the order the ALGORITHM runs them: by the first step that
+   * writes the node, then the first step that reads it, and only then by
+   * declaration order. The traversal then follows the dataflow, and the edge it
+   * marks as closing a cycle is the one that genuinely runs against the grain.
+   *
+   * It is not carried across traces: L00 and L04 have no cycle at all, so their
+   * `back` is empty however the search walks them. */
+  function findBackEdges(nodes, pairs, steps, tensorSpecs) {
+    var names = nodes.slice();
+    pairs.forEach(function (p) {
+      if (names.indexOf(p[0]) === -1) names.push(p[0]);
+      if (names.indexOf(p[1]) === -1) names.push(p[1]);
+    });
+
+    /* When each tensor is first PRODUCED, in step order. The clock is what
+       decides which way round a cycle is drawn: an edge carrying a value out of
+       a tensor that is produced later, into one produced earlier, runs against
+       the program, and that is the edge to lift out.
+
+       A tensor the trace seeds is produced before the replay starts and gets
+       -1. That is not a detail: L05's `tokens` is seeded with the prompt and
+       then appended to by the head step, so on a "first write wins" reading it
+       looks like it is PRODUCED at step 3 while `k_new` is produced at step 0 --
+       and the rule below then lifts `tokens -> k_new`, which is the direction
+       the whole algorithm runs in. Measured: that reading also left the graph
+       cyclic, so the search below had to break more edges, and the drawing came
+       out with four rails crossing unrelated boxes.
+
+       A tensor that is never written anywhere does not exist; pushing it to the
+       end keeps it from claiming to precede anything. */
+    var firstWrite = {};
+    (steps || []).forEach(function (s) {
+      s.writes.forEach(function (w) {
+        if (firstWrite[w] === undefined) firstWrite[w] = s.i;
+      });
+    });
+    tensorSpecs = tensorSpecs || {};
+    function birth(name) {
+      if (tensorSpecs[name] && 'init' in tensorSpecs[name]) return -1;
+      return firstWrite[name] === undefined ? 1e9 : firstWrite[name];
+    }
+
+    /* Which pairs lie on a cycle at all. A rule stated purely as "the source is
+       produced later" would break L00: its initialiser (step 0) writes m, l and
+       acc, so x_blk (produced by step 1) would look like it runs against the
+       grain and the max/l/acc chain would be cut. Those pairs are not on a
+       cycle -- nothing reaches x_blk from m -- so the rule must be restricted
+       to pairs that genuinely close a loop, which is what reachability tests.
+       The node count is a lab's tensor count (single digits to a few dozen), so
+       the closure is computed the obvious way rather than cleverly. */
+    var idx = {};
+    names.forEach(function (n, i) { idx[n] = i; });
+    var n = names.length;
+    var reach = [];
+    for (var i = 0; i < n; i++) reach.push(new Array(n).fill(false));
+    pairs.forEach(function (p) { reach[idx[p[0]]][idx[p[1]]] = true; });
+    for (var k = 0; k < n; k++) {
+      for (var a = 0; a < n; a++) {
+        if (!reach[a][k]) continue;
+        for (var c = 0; c < n; c++) if (reach[k][c]) reach[a][c] = true;
+      }
+    }
+
+    var back = {};
+    pairs.forEach(function (p) {
+      var r = p[0], w = p[1];
+      if (r === w) return;
+      if (!reach[idx[w]][idx[r]]) return;             /* not on a cycle */
+      var fr = birth(r), fw = birth(w);
+      if (fr > fw) back[r + '>' + w] = true;
+    });
+
+    /* Safety net. The rule above is sufficient for the traces in this repo, but
+       a tie (`firstWrite` equal on both ends of a cycle, which two tensors
+       written by one step can produce) leaves the loop intact -- and a surviving
+       cycle does not fail loudly, it saturates the relaxation. So whatever is
+       left is broken by a depth-first search, in the algorithm's own order, and
+       reported: a trace that needs this is a case the rule above did not cover,
+       not a drawing to ship silently. */
+    var left = pairs.filter(function (p) {
+      return p[0] !== p[1] && !back[p[0] + '>' + p[1]];
+    });
+    var adj = {};
+    left.forEach(function (p) { (adj[p[0]] = adj[p[0]] || []).push(p[1]); });
+    var order = names.slice().sort(function (x, y) {
+      var kx = birth(x), ky = birth(y);
+      if (kx !== ky) return kx - ky;
+      return names.indexOf(x) - names.indexOf(y);
+    });
+    var color = {};
+    order.forEach(function (start) {
+      if (color[start]) return;
+      color[start] = 1;
+      var stack = [{ n: start, i: 0 }];
+      while (stack.length) {
+        var top = stack[stack.length - 1];
+        var kids = adj[top.n] || [];
+        if (top.i < kids.length) {
+          var kid = kids[top.i++];
+          if (color[kid] === 1) { back[top.n + '>' + kid] = true; continue; }
+          if (color[kid] === 2) continue;
+          color[kid] = 1;
+          stack.push({ n: kid, i: 0 });
+          continue;
+        }
+        color[top.n] = 2;
+        stack.pop();
+      }
+    });
+    return back;
+  }
+
+  function computeLayers(nodes, steps, tensorSpecs) {
     var layer = {};
     nodes.forEach(function (n) { layer[n] = 0; });
 
@@ -298,8 +454,15 @@
       });
     });
 
+    /* A cycle has no fixed point under the relaxation, so the edges that close
+       one are held back from it -- and reported, so the drawing can show them
+       rather than drop them. On an acyclic trace (L00, L04) `back` is empty and
+       everything below runs exactly as it did. */
+    var back = findBackEdges(nodes, pairs, steps, tensorSpecs);
+    var forward = pairs.filter(function (p) { return !back[p[0] + '>' + p[1]]; });
+
     for (var pass = 0; pass < nodes.length + 2; pass++) {
-      pairs.forEach(function (p) {
+      forward.forEach(function (p) {
         if (layer[p[0]] === undefined || layer[p[1]] === undefined) return;
         layer[p[1]] = Math.max(layer[p[1]], layer[p[0]] + 1);
       });
@@ -331,7 +494,8 @@
       depth[n] = b;
       (bands[b] = bands[b] || []).push(n);
     });
-    return { bands: bands, nBands: used.length, raw: layer, rank: rank, depth: depth };
+    return { bands: bands, nBands: used.length, raw: layer, rank: rank, depth: depth,
+             back: back };
   }
 
   function computePositions(model, targetAspect, vertical, geo) {
@@ -429,11 +593,16 @@
       if (!a || !b) return;
       var d = b.band - a.band;
       e.bandDelta = d;
-      if (Math.abs(d) <= 1) { e.rail = null; return; }
+      /* An edge that closes a cycle always takes the rail, however few bands it
+         spans. `directPath` would route it into the target's OUTPUT side --
+         the target is upstream of the source here, so the arrow would point
+         backwards out of the box it is aimed at. A rail enters through the
+         target's top edge, which is the side its inputs come from. */
+      if (Math.abs(d) <= 1 && !e.back) { e.rail = null; return; }
       /* Level 0 is the innermost rail: an edge that skips one band travels
          closest to the boxes it passed, and one that skips five sits further
          out. That ordering is what keeps the rails from coinciding. */
-      e.rail = {level: Math.abs(d) - 2};
+      e.rail = {level: Math.max(0, Math.abs(d) - 2)};
       skipping.push(e);
       if (levels.indexOf(e.rail.level) === -1) levels.push(e.rail.level);
     });
@@ -531,8 +700,50 @@
    *
    * The rail's offset grows with the number of bands skipped, so longer detours
    * run further out and no two rails coincide.
+   *
+   * THE SAME ROUTE SERVES AN EDGE THAT CLOSES A CYCLE, which is why there is no
+   * separate `backPath`. The arrowhead is the reason to state it: on a back edge
+   * the target is UPSTREAM of the source, so the direct bezier -- which aims at
+   * whatever port faces the source -- would leave the box it is aimed at. This
+   * route enters through the target's TOP edge (vertical) or LEFT edge
+   * (horizontal), the ports its inputs come from, and travels only inside a gap
+   * or along the rail. Measured: a route that hugged the target's own band
+   * instead (out of the source's side, across at the target's mid-height) cut
+   * straight through the target's BAND-MATES, which is the same "no edge through
+   * an unrelated box" failure that produced this rail router in the first place.
    */
   var RAIL_R = 9;     /* corner chamfer, in viewBox units */
+
+  /* A polyline with chamfered corners.
+   *
+   * Each interior vertex is cut back along the INCOMING ray and forward along
+   * the OUTGOING one, and a quadratic through the vertex joins the two. The
+   * first version rounded toward the NEXT point instead of away from the
+   * previous one, which put the line's endpoint near the far end of the
+   * segment and made the path double back through it -- the drawn `d` swept
+   * across the whole canvas and the harness's "no edge through an unrelated
+   * box" predicate is what caught it. The cut-back length is capped by half of
+   * EACH adjacent segment so two short segments cannot eat into each other.
+   *
+   * The one chamfer rule every rail-routed edge uses, so a long edge and a
+   * back edge cannot drift apart in how their corners are cut. */
+  function poly(pts) {
+    var out = 'M' + pts[0].x + ' ' + pts[0].y;
+    for (var i = 1; i < pts.length; i++) {
+      var p = pts[i];
+      if (i === pts.length - 1) { out += ' L' + p.x + ' ' + p.y; break; }
+      var nx = pts[i + 1].x - p.x, ny = pts[i + 1].y - p.y;
+      var nlen = Math.sqrt(nx * nx + ny * ny);
+      var px = p.x - pts[i - 1].x, py = p.y - pts[i - 1].y;
+      var plen = Math.sqrt(px * px + py * py);
+      if (nlen < 1e-6 || plen < 1e-6) continue;
+      var r = Math.min(RAIL_R, nlen / 2, plen / 2);
+      out += ' L' + (p.x - px / plen * r) + ' ' + (p.y - py / plen * r) +
+             ' Q' + p.x + ' ' + p.y + ' ' +
+             (p.x + nx / nlen * r) + ' ' + (p.y + ny / nlen * r);
+    }
+    return out;
+  }
 
   function railPath(L, e) {
     var a = L.pos[e.from], b = L.pos[e.to];
@@ -541,34 +752,6 @@
     var NW = G.NW, NH = G.NH, GX = G.GAPX, GY = G.GAPY;
     var rank = L.railCount - 1 - e.rail.rank;
     var d, lx, ly;
-
-    /* A polyline with chamfered corners.
-     *
-     * Each interior vertex is cut back along the INCOMING ray and forward along
-     * the OUTGOING one, and a quadratic through the vertex joins the two. The
-     * first version rounded toward the NEXT point instead of away from the
-     * previous one, which put the line's endpoint near the far end of the
-     * segment and made the path double back through it -- the drawn `d` swept
-     * across the whole canvas and the harness's "no edge through an unrelated
-     * box" predicate is what caught it. The cut-back length is capped by half of
-     * EACH adjacent segment so two short segments cannot eat into each other. */
-    function poly(pts) {
-      var out = 'M' + pts[0].x + ' ' + pts[0].y;
-      for (var i = 1; i < pts.length; i++) {
-        var p = pts[i];
-        if (i === pts.length - 1) { out += ' L' + p.x + ' ' + p.y; break; }
-        var nx = pts[i + 1].x - p.x, ny = pts[i + 1].y - p.y;
-        var nlen = Math.sqrt(nx * nx + ny * ny);
-        var px = p.x - pts[i - 1].x, py = p.y - pts[i - 1].y;
-        var plen = Math.sqrt(px * px + py * py);
-        if (nlen < 1e-6 || plen < 1e-6) continue;
-        var r = Math.min(RAIL_R, nlen / 2, plen / 2);
-        out += ' L' + (p.x - px / plen * r) + ' ' + (p.y - py / plen * r) +
-               ' Q' + p.x + ' ' + p.y + ' ' +
-               (p.x + nx / nlen * r) + ' ' + (p.y + ny / nlen * r);
-      }
-      return out;
-    }
 
     if (L.vertical) {
       var rail = L.w - G.RAIL_PAD - rank * G.RAIL_GAP;
@@ -682,46 +865,68 @@
    * if the replay's shape changes: `stepWith` finds the first step carrying the
    * slot rather than indexing a literal, and the slot is named by the step's
    * own formula rather than by a string written twice. */
-  function stepWith(trace, slot, linked) {
+  /* Find a step and one of its slots BY ROLE, not by name.
+   *
+   * The rules below are about the SHAPE of the map, so they apply to any lab
+   * that draws this view; what differs between labs is only what the slots and
+   * tensors are called. Reaching for `steps[1].binding_vars.MU` makes a case
+   * that silently stops biting the moment the trace it was written against
+   * changes -- L04's slots are `MU`/`LHS`, L05's are `KOLD`/`HIN` -- and a
+   * sabotage that is skipped proves nothing about the lint it was meant to
+   * exercise. These two helpers resolve the role instead: the first step that
+   * has a linked (or empty) slot, and the first such slot of that step. */
+  function stepWith(trace, linked) {
     var out = -1;
     (trace.steps || []).forEach(function (s, i) {
       if (out !== -1 || !s.binding_vars) return;
-      var names = s.binding_vars[slot];
-      if (!names) return;
-      if (linked ? names.length > 0 : names.length === 0) out = i;
+      var hit = Object.keys(s.binding_vars).some(function (k) {
+        return linked ? s.binding_vars[k].length > 0 : s.binding_vars[k].length === 0;
+      });
+      if (hit) out = i;
     });
-    if (out === -1) throw new Error('no step with a ' + (linked ? 'linked' : 'empty') +
-      ' "' + slot + '" binding');
+    if (out === -1) throw new Error('no step with a ' + (linked ? 'linked' : 'empty') + ' binding');
+    return out;
+  }
+
+  function slotWith(table, linked) {
+    var out = null;
+    Object.keys(table || {}).forEach(function (k) {
+      if (out) return;
+      if (linked ? table[k].length > 0 : table[k].length === 0) out = k;
+    });
+    if (out === null) throw new Error('no ' + (linked ? 'linked' : 'empty') + ' slot');
     return out;
   }
 
   var SABOTAGE_CASES = {
-    'binding_vars 整块删除': function (t) { delete t.steps[1].binding_vars; },
+    'binding_vars 整块删除': function (t) { delete t.steps[stepWith(t, true)].binding_vars; },
     'binding_vars 少一个活 slot 的条目': function (t) {
-      /* The slot is read out of the step's OWN formula, so the case cannot
-         drift from the trace it is written against. */
-      var i = stepWith(t, 'MU', true);
-      var m = /\\slot\{([A-Za-z0-9_]+)\}/.exec(t.steps[i].formula.num ||
-                                               t.steps[i].formula.idx ||
-                                               t.steps[i].formula.sym);
-      if (!m) throw new Error('no \\slot in the target step');
-      delete t.steps[i].binding_vars[m[1]];
+      /* The slot is read out of the step's own table, so the case cannot drift
+         from the trace it is written against. */
+      var i = stepWith(t, true);
+      delete t.steps[i].binding_vars[slotWith(t.steps[i].binding_vars, true)];
     },
     'binding_vars 多一个不存在的 slot': function (t) {
-      t.steps[1].binding_vars.GHOST = ['x'];
+      var i = stepWith(t, true);
+      t.steps[i].binding_vars.GHOST = [t.steps[i].reads[0]];
     },
-    'binding_vars 的条目不是列表': function (t) { t.steps[1].binding_vars.MU = 'x'; },
+    'binding_vars 的条目不是列表': function (t) {
+      var i = stepWith(t, true);
+      t.steps[i].binding_vars[slotWith(t.steps[i].binding_vars, true)] = 'x';
+    },
     'binding_vars 指向未声明的张量': function (t) {
-      t.steps[stepWith(t, 'MU', true)].binding_vars.MU = ['ghost'];
+      var i = stepWith(t, true);
+      t.steps[i].binding_vars[slotWith(t.steps[i].binding_vars, true)] = ['ghost'];
     },
     'binding_vars 指向本步不读也不写的张量': function (t) {
-      var i = stepWith(t, 'MU', true);
-      var own = t.steps[i].binding_vars.MU[0];
+      var i = stepWith(t, true);
+      var slot = slotWith(t.steps[i].binding_vars, true);
+      var touched = t.steps[i].reads.concat(t.steps[i].writes);
       var other = Object.keys(t.tensors).filter(function (n) {
-        return n !== own && t.steps[i].reads.indexOf(n) === -1 &&
-               t.steps[i].writes.indexOf(n) === -1;
+        return touched.indexOf(n) === -1;
       })[0];
-      t.steps[i].binding_vars.MU = [other];
+      if (!other) throw new Error('every declared tensor is touched by this step');
+      t.steps[i].binding_vars[slot] = [other];
     }
   };
 
@@ -919,8 +1124,10 @@
       if (!g) return;
       e.geom = g;
       out += '<path class="vd-e vd-e-off' + (e.rail ? ' vd-e-rail' : '') +
+        (e.back ? ' vd-e-back' : '') +
         '" data-vd-edge="' + esc(e.from + '>' + e.to) +
         '" data-vd-rail="' + (e.rail ? '1' : '0') +
+        '" data-vd-back="' + (e.back ? '1' : '0') +
         '" d="' + g.d + '" marker-end="url(#vd-ar)"/>';
       /* Only the carried edge wears the step's name -- see `addEdge`. The rule
          is deliberately the same one the carried mode uses for its edges, so a
@@ -1172,7 +1379,13 @@
           if (e.steps.indexOf(i) !== -1) st = 'on';
           else if (e.steps.some(function (s) { return s < i; })) st = 'done';
         }
-        setClass(p, 'vd-e vd-e-' + st);
+        /* The structural classes are restored, not dropped: the class attribute
+           is written whole, so a repaint that only knew the state would erase
+           "this edge skips a band" and "this edge closes a cycle" -- which are
+           facts about the graph, not about the cursor. */
+        setClass(p, 'vd-e vd-e-' + st +
+          (p.dataset.vdRail === '1' ? ' vd-e-rail' : '') +
+          (p.dataset.vdBack === '1' ? ' vd-e-back' : ''));
         p.setAttribute('marker-end', st === 'on' ? 'url(#vd-ar-on)' : 'url(#vd-ar)');
         var lbl = svg.querySelector('[data-vd-el="' + pair[0] + '>' + pair[1] + '"]');
         if (lbl) setClass(lbl, 'vd-el vd-el-' + (st === 'off' ? 'off' : (st === 'on' ? 'on' : 'past')));
@@ -1516,6 +1729,8 @@
     edgePath: edgePath,
     directPath: directPath,
     railPath: railPath,
+    findBackEdges: findBackEdges,
+    poly: poly,
     loopPath: loopPath,
     nodeRect: nodeRect,
     shapeGlyph: shapeGlyph,

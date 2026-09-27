@@ -330,6 +330,18 @@
    "role": "staging",
    "note": "本步算出的 V"
   },
+  "kv_cache": {
+   "shape": [
+    2,
+    128,
+    4,
+    16
+   ],
+   "dtype": "fp32",
+   "at": "HBM",
+   "role": "state",
+   "note": "累积的 KV 缓存：每层一个 [t, H, d_h] 矩阵，逐 token 追加。形状是终态容量；内容不发布（见模块 docstring），它的字节数在账本里"
+  },
   "attn": {
    "shape": [
     4,
@@ -683,11 +695,14 @@
     }
    },
    "reads": [
-    "tokens"
+    "tokens",
+    "h",
+    "kv_cache"
    ],
    "writes": [
     "k_new",
-    "v_new"
+    "v_new",
+    "kv_cache"
    ],
    "state": {
     "k_new": [
@@ -856,6 +871,26 @@
      "seq_len": 124,
      "kv_rows_total": 248
     }
+   },
+   "binding_vars": {
+    "L": [],
+    "TOLD": [],
+    "TNEW": [],
+    "NQ": [],
+    "KOLD": [
+     "kv_cache"
+    ],
+    "VOLD": [
+     "kv_cache"
+    ],
+    "KNEW": [
+     "k_new"
+    ],
+    "VNEW": [
+     "v_new"
+    ],
+    "KSHAPE": [],
+    "VSHAPE": []
    }
   },
   {
@@ -865,7 +900,7 @@
    "op": "attention",
    "phase": "Prefill",
    "formula": {
-    "sym": "S = \\frac{Q K^{\\top}}{\\sqrt{d_h}},\\qquad W = \\mathrm{softmax}\\left(\\region{MASK}{S + M}\\right),\\qquad O = W V W_o",
+    "sym": "S = \\frac{Q \\slot{K}^{\\top}}{\\sqrt{d_h}},\\qquad W = \\mathrm{softmax}\\left(\\region{MASK}{S + M}\\right),\\qquad O = W \\slot{V} W_o",
     "idx": "Q_{[\\slot{NQ},H,d_h]} \\times K^{\\top}_{[\\slot{T},H,d_h]} \\to S + M_{[\\slot{H},\\slot{NQ},\\slot{T}]} \\to W_{[\\slot{H},\\slot{NQ},\\slot{T}]}",
     "num": "S_{\\max} = \\slot{SMAX} \\to W_{[\\slot{H},\\slot{NQ},\\slot{T}]} \\to O_{[\\slot{NQ},\\slot{d}]}"
    },
@@ -890,6 +925,16 @@
      "idx": "64",
      "num": "64"
     },
+    "K": {
+     "sym": "K^{(l)}_{[t,H,d_h]}",
+     "idx": "K^{(l)}_{[124,H,d_h]}",
+     "num": "[124,4,16]"
+    },
+    "V": {
+     "sym": "V^{(l)}_{[t,H,d_h]}",
+     "idx": "V^{(l)}_{[124,H,d_h]}",
+     "num": "[124,4,16]"
+    },
     "SMAX": {
      "sym": "\\max S",
      "idx": "\\max S",
@@ -898,7 +943,9 @@
    },
    "reads": [
     "tokens",
-    "k_new"
+    "k_new",
+    "v_new",
+    "kv_cache"
    ],
    "writes": [
     "h",
@@ -9664,6 +9711,19 @@
      "attn_flops": 3936256,
      "proj_flops": 6094848
     }
+   },
+   "binding_vars": {
+    "NQ": [],
+    "T": [],
+    "H": [],
+    "d": [],
+    "K": [
+     "kv_cache"
+    ],
+    "V": [
+     "kv_cache"
+    ],
+    "SMAX": []
    }
   },
   {
@@ -9673,7 +9733,7 @@
    "op": "ffn",
    "phase": "Prefill",
    "formula": {
-    "sym": "h_1 = h + O,\\qquad h_2 = h_1 + \\mathrm{SwiGLU}(\\mathrm{LN}(h_1))",
+    "sym": "h_1 = \\slot{HIN} + O,\\qquad h_2 = h_1 + \\mathrm{SwiGLU}(\\mathrm{LN}(h_1))",
     "idx": "\\mathrm{gate}_{[\\slot{NQ},\\slot{DFF}]},\\ \\mathrm{up}_{[\\slot{NQ},\\slot{DFF}]} \\to \\mathrm{down}_{[\\slot{NQ},\\slot{d}]}",
     "num": "h_2\\ \\text{shape}\\ \\slot{SHAPE}"
    },
@@ -9692,6 +9752,11 @@
      "sym": "d_{model}",
      "idx": "64",
      "num": "64"
+    },
+    "HIN": {
+     "sym": "h",
+     "idx": "h_{[n_q,d]}",
+     "num": "[124,64]"
     },
     "SHAPE": {
      "sym": "\\cdot",
@@ -17907,6 +17972,15 @@
      "seq_len": 124,
      "kv_rows_total": 248
     }
+   },
+   "binding_vars": {
+    "NQ": [],
+    "DFF": [],
+    "d": [],
+    "HIN": [
+     "h"
+    ],
+    "SHAPE": []
    }
   },
   {
@@ -17916,8 +17990,8 @@
    "op": "head",
    "phase": "Prefill",
    "formula": {
-    "sym": "\\mathrm{logits} = \\mathrm{LN}_f(h)\\,W_{lm}^{\\top},\\qquad x_{t+1} = \\arg\\max \\mathrm{logits}",
-    "idx": "\\mathrm{logits}_{[\\slot{V}]} = h_{[1,\\slot{d}]}\\,W_{lm}^{\\top},\\quad x_{t+1} = \\slot{TOK}",
+    "sym": "\\mathrm{logits} = \\mathrm{LN}_f(\\slot{H})\\,W_{lm}^{\\top},\\qquad x_{t+1} = \\arg\\max \\mathrm{logits}",
+    "idx": "\\mathrm{logits}_{[\\slot{V}]} = \\slot{H}_{[1,\\slot{d}]}\\,W_{lm}^{\\top},\\quad x_{t+1} = \\slot{TOK}",
     "num": "\\arg\\max \\mathrm{logits} = \\slot{TOK}\\ (\\text{共 } \\slot{T} \\text{ 个 token})"
    },
    "bindings": {
@@ -17930,6 +18004,11 @@
      "sym": "d_{model}",
      "idx": "64",
      "num": "64"
+    },
+    "H": {
+     "sym": "h",
+     "idx": "h_{[1,d]}",
+     "num": "[1,64]"
     },
     "TOK": {
      "sym": "x_{t+1}",
@@ -18128,6 +18207,17 @@
      "seq_len": 124,
      "kv_rows_total": 248
     }
+   },
+   "binding_vars": {
+    "V": [],
+    "d": [],
+    "H": [
+     "h"
+    ],
+    "TOK": [
+     "token_new"
+    ],
+    "T": []
    }
   },
   {
@@ -18194,11 +18284,14 @@
     }
    },
    "reads": [
-    "tokens"
+    "tokens",
+    "h",
+    "kv_cache"
    ],
    "writes": [
     "k_new",
-    "v_new"
+    "v_new",
+    "kv_cache"
    ],
    "state": {
     "k_new": [
@@ -18367,6 +18460,26 @@
      "seq_len": 125,
      "kv_rows_total": 250
     }
+   },
+   "binding_vars": {
+    "L": [],
+    "TOLD": [],
+    "TNEW": [],
+    "NQ": [],
+    "KOLD": [
+     "kv_cache"
+    ],
+    "VOLD": [
+     "kv_cache"
+    ],
+    "KNEW": [
+     "k_new"
+    ],
+    "VNEW": [
+     "v_new"
+    ],
+    "KSHAPE": [],
+    "VSHAPE": []
    }
   },
   {
@@ -18376,7 +18489,7 @@
    "op": "attention",
    "phase": "Decode 1",
    "formula": {
-    "sym": "S = \\frac{Q K^{\\top}}{\\sqrt{d_h}},\\qquad W = \\mathrm{softmax}\\left(\\region{MASK}{S + M}\\right),\\qquad O = W V W_o",
+    "sym": "S = \\frac{Q \\slot{K}^{\\top}}{\\sqrt{d_h}},\\qquad W = \\mathrm{softmax}\\left(\\region{MASK}{S + M}\\right),\\qquad O = W \\slot{V} W_o",
     "idx": "Q_{[\\slot{NQ},H,d_h]} \\times K^{\\top}_{[\\slot{T},H,d_h]} \\to S + M_{[\\slot{H},\\slot{NQ},\\slot{T}]} \\to W_{[\\slot{H},\\slot{NQ},\\slot{T}]}",
     "num": "S_{\\max} = \\slot{SMAX} \\to W_{[\\slot{H},\\slot{NQ},\\slot{T}]} \\to O_{[\\slot{NQ},\\slot{d}]}"
    },
@@ -18401,6 +18514,16 @@
      "idx": "64",
      "num": "64"
     },
+    "K": {
+     "sym": "K^{(l)}_{[t,H,d_h]}",
+     "idx": "K^{(l)}_{[125,H,d_h]}",
+     "num": "[125,4,16]"
+    },
+    "V": {
+     "sym": "V^{(l)}_{[t,H,d_h]}",
+     "idx": "V^{(l)}_{[125,H,d_h]}",
+     "num": "[125,4,16]"
+    },
     "SMAX": {
      "sym": "\\max S",
      "idx": "\\max S",
@@ -18409,7 +18532,9 @@
    },
    "reads": [
     "tokens",
-    "k_new"
+    "k_new",
+    "v_new",
+    "kv_cache"
    ],
    "writes": [
     "h",
@@ -19061,6 +19186,19 @@
      "attn_flops": 32000,
      "proj_flops": 49152
     }
+   },
+   "binding_vars": {
+    "NQ": [],
+    "T": [],
+    "H": [],
+    "d": [],
+    "K": [
+     "kv_cache"
+    ],
+    "V": [
+     "kv_cache"
+    ],
+    "SMAX": []
    }
   },
   {
@@ -19070,7 +19208,7 @@
    "op": "ffn",
    "phase": "Decode 1",
    "formula": {
-    "sym": "h_1 = h + O,\\qquad h_2 = h_1 + \\mathrm{SwiGLU}(\\mathrm{LN}(h_1))",
+    "sym": "h_1 = \\slot{HIN} + O,\\qquad h_2 = h_1 + \\mathrm{SwiGLU}(\\mathrm{LN}(h_1))",
     "idx": "\\mathrm{gate}_{[\\slot{NQ},\\slot{DFF}]},\\ \\mathrm{up}_{[\\slot{NQ},\\slot{DFF}]} \\to \\mathrm{down}_{[\\slot{NQ},\\slot{d}]}",
     "num": "h_2\\ \\text{shape}\\ \\slot{SHAPE}"
    },
@@ -19089,6 +19227,11 @@
      "sym": "d_{model}",
      "idx": "64",
      "num": "64"
+    },
+    "HIN": {
+     "sym": "h",
+     "idx": "h_{[n_q,d]}",
+     "num": "[1,64]"
     },
     "SHAPE": {
      "sym": "\\cdot",
@@ -19186,6 +19329,15 @@
      "seq_len": 125,
      "kv_rows_total": 250
     }
+   },
+   "binding_vars": {
+    "NQ": [],
+    "DFF": [],
+    "d": [],
+    "HIN": [
+     "h"
+    ],
+    "SHAPE": []
    }
   },
   {
@@ -19195,8 +19347,8 @@
    "op": "head",
    "phase": "Decode 1",
    "formula": {
-    "sym": "\\mathrm{logits} = \\mathrm{LN}_f(h)\\,W_{lm}^{\\top},\\qquad x_{t+1} = \\arg\\max \\mathrm{logits}",
-    "idx": "\\mathrm{logits}_{[\\slot{V}]} = h_{[1,\\slot{d}]}\\,W_{lm}^{\\top},\\quad x_{t+1} = \\slot{TOK}",
+    "sym": "\\mathrm{logits} = \\mathrm{LN}_f(\\slot{H})\\,W_{lm}^{\\top},\\qquad x_{t+1} = \\arg\\max \\mathrm{logits}",
+    "idx": "\\mathrm{logits}_{[\\slot{V}]} = \\slot{H}_{[1,\\slot{d}]}\\,W_{lm}^{\\top},\\quad x_{t+1} = \\slot{TOK}",
     "num": "\\arg\\max \\mathrm{logits} = \\slot{TOK}\\ (\\text{共 } \\slot{T} \\text{ 个 token})"
    },
    "bindings": {
@@ -19209,6 +19361,11 @@
      "sym": "d_{model}",
      "idx": "64",
      "num": "64"
+    },
+    "H": {
+     "sym": "h",
+     "idx": "h_{[1,d]}",
+     "num": "[1,64]"
     },
     "TOK": {
      "sym": "x_{t+1}",
@@ -19408,6 +19565,17 @@
      "seq_len": 125,
      "kv_rows_total": 250
     }
+   },
+   "binding_vars": {
+    "V": [],
+    "d": [],
+    "H": [
+     "h"
+    ],
+    "TOK": [
+     "token_new"
+    ],
+    "T": []
    }
   },
   {
@@ -19474,11 +19642,14 @@
     }
    },
    "reads": [
-    "tokens"
+    "tokens",
+    "h",
+    "kv_cache"
    ],
    "writes": [
     "k_new",
-    "v_new"
+    "v_new",
+    "kv_cache"
    ],
    "state": {
     "k_new": [
@@ -19647,6 +19818,26 @@
      "seq_len": 126,
      "kv_rows_total": 252
     }
+   },
+   "binding_vars": {
+    "L": [],
+    "TOLD": [],
+    "TNEW": [],
+    "NQ": [],
+    "KOLD": [
+     "kv_cache"
+    ],
+    "VOLD": [
+     "kv_cache"
+    ],
+    "KNEW": [
+     "k_new"
+    ],
+    "VNEW": [
+     "v_new"
+    ],
+    "KSHAPE": [],
+    "VSHAPE": []
    }
   },
   {
@@ -19656,7 +19847,7 @@
    "op": "attention",
    "phase": "Decode 2",
    "formula": {
-    "sym": "S = \\frac{Q K^{\\top}}{\\sqrt{d_h}},\\qquad W = \\mathrm{softmax}\\left(\\region{MASK}{S + M}\\right),\\qquad O = W V W_o",
+    "sym": "S = \\frac{Q \\slot{K}^{\\top}}{\\sqrt{d_h}},\\qquad W = \\mathrm{softmax}\\left(\\region{MASK}{S + M}\\right),\\qquad O = W \\slot{V} W_o",
     "idx": "Q_{[\\slot{NQ},H,d_h]} \\times K^{\\top}_{[\\slot{T},H,d_h]} \\to S + M_{[\\slot{H},\\slot{NQ},\\slot{T}]} \\to W_{[\\slot{H},\\slot{NQ},\\slot{T}]}",
     "num": "S_{\\max} = \\slot{SMAX} \\to W_{[\\slot{H},\\slot{NQ},\\slot{T}]} \\to O_{[\\slot{NQ},\\slot{d}]}"
    },
@@ -19681,6 +19872,16 @@
      "idx": "64",
      "num": "64"
     },
+    "K": {
+     "sym": "K^{(l)}_{[t,H,d_h]}",
+     "idx": "K^{(l)}_{[126,H,d_h]}",
+     "num": "[126,4,16]"
+    },
+    "V": {
+     "sym": "V^{(l)}_{[t,H,d_h]}",
+     "idx": "V^{(l)}_{[126,H,d_h]}",
+     "num": "[126,4,16]"
+    },
     "SMAX": {
      "sym": "\\max S",
      "idx": "\\max S",
@@ -19689,7 +19890,9 @@
    },
    "reads": [
     "tokens",
-    "k_new"
+    "k_new",
+    "v_new",
+    "kv_cache"
    ],
    "writes": [
     "h",
@@ -20345,6 +20548,19 @@
      "attn_flops": 32256,
      "proj_flops": 49152
     }
+   },
+   "binding_vars": {
+    "NQ": [],
+    "T": [],
+    "H": [],
+    "d": [],
+    "K": [
+     "kv_cache"
+    ],
+    "V": [
+     "kv_cache"
+    ],
+    "SMAX": []
    }
   },
   {
@@ -20354,7 +20570,7 @@
    "op": "ffn",
    "phase": "Decode 2",
    "formula": {
-    "sym": "h_1 = h + O,\\qquad h_2 = h_1 + \\mathrm{SwiGLU}(\\mathrm{LN}(h_1))",
+    "sym": "h_1 = \\slot{HIN} + O,\\qquad h_2 = h_1 + \\mathrm{SwiGLU}(\\mathrm{LN}(h_1))",
     "idx": "\\mathrm{gate}_{[\\slot{NQ},\\slot{DFF}]},\\ \\mathrm{up}_{[\\slot{NQ},\\slot{DFF}]} \\to \\mathrm{down}_{[\\slot{NQ},\\slot{d}]}",
     "num": "h_2\\ \\text{shape}\\ \\slot{SHAPE}"
    },
@@ -20373,6 +20589,11 @@
      "sym": "d_{model}",
      "idx": "64",
      "num": "64"
+    },
+    "HIN": {
+     "sym": "h",
+     "idx": "h_{[n_q,d]}",
+     "num": "[1,64]"
     },
     "SHAPE": {
      "sym": "\\cdot",
@@ -20470,6 +20691,15 @@
      "seq_len": 126,
      "kv_rows_total": 252
     }
+   },
+   "binding_vars": {
+    "NQ": [],
+    "DFF": [],
+    "d": [],
+    "HIN": [
+     "h"
+    ],
+    "SHAPE": []
    }
   },
   {
@@ -20479,8 +20709,8 @@
    "op": "head",
    "phase": "Decode 2",
    "formula": {
-    "sym": "\\mathrm{logits} = \\mathrm{LN}_f(h)\\,W_{lm}^{\\top},\\qquad x_{t+1} = \\arg\\max \\mathrm{logits}",
-    "idx": "\\mathrm{logits}_{[\\slot{V}]} = h_{[1,\\slot{d}]}\\,W_{lm}^{\\top},\\quad x_{t+1} = \\slot{TOK}",
+    "sym": "\\mathrm{logits} = \\mathrm{LN}_f(\\slot{H})\\,W_{lm}^{\\top},\\qquad x_{t+1} = \\arg\\max \\mathrm{logits}",
+    "idx": "\\mathrm{logits}_{[\\slot{V}]} = \\slot{H}_{[1,\\slot{d}]}\\,W_{lm}^{\\top},\\quad x_{t+1} = \\slot{TOK}",
     "num": "\\arg\\max \\mathrm{logits} = \\slot{TOK}\\ (\\text{共 } \\slot{T} \\text{ 个 token})"
    },
    "bindings": {
@@ -20493,6 +20723,11 @@
      "sym": "d_{model}",
      "idx": "64",
      "num": "64"
+    },
+    "H": {
+     "sym": "h",
+     "idx": "h_{[1,d]}",
+     "num": "[1,64]"
     },
     "TOK": {
      "sym": "x_{t+1}",
@@ -20693,6 +20928,17 @@
      "seq_len": 126,
      "kv_rows_total": 252
     }
+   },
+   "binding_vars": {
+    "V": [],
+    "d": [],
+    "H": [
+     "h"
+    ],
+    "TOK": [
+     "token_new"
+    ],
+    "T": []
    }
   },
   {
@@ -20759,11 +21005,14 @@
     }
    },
    "reads": [
-    "tokens"
+    "tokens",
+    "h",
+    "kv_cache"
    ],
    "writes": [
     "k_new",
-    "v_new"
+    "v_new",
+    "kv_cache"
    ],
    "state": {
     "k_new": [
@@ -20932,6 +21181,26 @@
      "seq_len": 127,
      "kv_rows_total": 254
     }
+   },
+   "binding_vars": {
+    "L": [],
+    "TOLD": [],
+    "TNEW": [],
+    "NQ": [],
+    "KOLD": [
+     "kv_cache"
+    ],
+    "VOLD": [
+     "kv_cache"
+    ],
+    "KNEW": [
+     "k_new"
+    ],
+    "VNEW": [
+     "v_new"
+    ],
+    "KSHAPE": [],
+    "VSHAPE": []
    }
   },
   {
@@ -20941,7 +21210,7 @@
    "op": "attention",
    "phase": "Decode 3",
    "formula": {
-    "sym": "S = \\frac{Q K^{\\top}}{\\sqrt{d_h}},\\qquad W = \\mathrm{softmax}\\left(\\region{MASK}{S + M}\\right),\\qquad O = W V W_o",
+    "sym": "S = \\frac{Q \\slot{K}^{\\top}}{\\sqrt{d_h}},\\qquad W = \\mathrm{softmax}\\left(\\region{MASK}{S + M}\\right),\\qquad O = W \\slot{V} W_o",
     "idx": "Q_{[\\slot{NQ},H,d_h]} \\times K^{\\top}_{[\\slot{T},H,d_h]} \\to S + M_{[\\slot{H},\\slot{NQ},\\slot{T}]} \\to W_{[\\slot{H},\\slot{NQ},\\slot{T}]}",
     "num": "S_{\\max} = \\slot{SMAX} \\to W_{[\\slot{H},\\slot{NQ},\\slot{T}]} \\to O_{[\\slot{NQ},\\slot{d}]}"
    },
@@ -20966,6 +21235,16 @@
      "idx": "64",
      "num": "64"
     },
+    "K": {
+     "sym": "K^{(l)}_{[t,H,d_h]}",
+     "idx": "K^{(l)}_{[127,H,d_h]}",
+     "num": "[127,4,16]"
+    },
+    "V": {
+     "sym": "V^{(l)}_{[t,H,d_h]}",
+     "idx": "V^{(l)}_{[127,H,d_h]}",
+     "num": "[127,4,16]"
+    },
     "SMAX": {
      "sym": "\\max S",
      "idx": "\\max S",
@@ -20974,7 +21253,9 @@
    },
    "reads": [
     "tokens",
-    "k_new"
+    "k_new",
+    "v_new",
+    "kv_cache"
    ],
    "writes": [
     "h",
@@ -21634,6 +21915,19 @@
      "attn_flops": 32512,
      "proj_flops": 49152
     }
+   },
+   "binding_vars": {
+    "NQ": [],
+    "T": [],
+    "H": [],
+    "d": [],
+    "K": [
+     "kv_cache"
+    ],
+    "V": [
+     "kv_cache"
+    ],
+    "SMAX": []
    }
   },
   {
@@ -21643,7 +21937,7 @@
    "op": "ffn",
    "phase": "Decode 3",
    "formula": {
-    "sym": "h_1 = h + O,\\qquad h_2 = h_1 + \\mathrm{SwiGLU}(\\mathrm{LN}(h_1))",
+    "sym": "h_1 = \\slot{HIN} + O,\\qquad h_2 = h_1 + \\mathrm{SwiGLU}(\\mathrm{LN}(h_1))",
     "idx": "\\mathrm{gate}_{[\\slot{NQ},\\slot{DFF}]},\\ \\mathrm{up}_{[\\slot{NQ},\\slot{DFF}]} \\to \\mathrm{down}_{[\\slot{NQ},\\slot{d}]}",
     "num": "h_2\\ \\text{shape}\\ \\slot{SHAPE}"
    },
@@ -21662,6 +21956,11 @@
      "sym": "d_{model}",
      "idx": "64",
      "num": "64"
+    },
+    "HIN": {
+     "sym": "h",
+     "idx": "h_{[n_q,d]}",
+     "num": "[1,64]"
     },
     "SHAPE": {
      "sym": "\\cdot",
@@ -21759,6 +22058,15 @@
      "seq_len": 127,
      "kv_rows_total": 254
     }
+   },
+   "binding_vars": {
+    "NQ": [],
+    "DFF": [],
+    "d": [],
+    "HIN": [
+     "h"
+    ],
+    "SHAPE": []
    }
   },
   {
@@ -21768,8 +22076,8 @@
    "op": "head",
    "phase": "Decode 3",
    "formula": {
-    "sym": "\\mathrm{logits} = \\mathrm{LN}_f(h)\\,W_{lm}^{\\top},\\qquad x_{t+1} = \\arg\\max \\mathrm{logits}",
-    "idx": "\\mathrm{logits}_{[\\slot{V}]} = h_{[1,\\slot{d}]}\\,W_{lm}^{\\top},\\quad x_{t+1} = \\slot{TOK}",
+    "sym": "\\mathrm{logits} = \\mathrm{LN}_f(\\slot{H})\\,W_{lm}^{\\top},\\qquad x_{t+1} = \\arg\\max \\mathrm{logits}",
+    "idx": "\\mathrm{logits}_{[\\slot{V}]} = \\slot{H}_{[1,\\slot{d}]}\\,W_{lm}^{\\top},\\quad x_{t+1} = \\slot{TOK}",
     "num": "\\arg\\max \\mathrm{logits} = \\slot{TOK}\\ (\\text{共 } \\slot{T} \\text{ 个 token})"
    },
    "bindings": {
@@ -21782,6 +22090,11 @@
      "sym": "d_{model}",
      "idx": "64",
      "num": "64"
+    },
+    "H": {
+     "sym": "h",
+     "idx": "h_{[1,d]}",
+     "num": "[1,64]"
     },
     "TOK": {
      "sym": "x_{t+1}",
@@ -21983,6 +22296,17 @@
      "seq_len": 127,
      "kv_rows_total": 254
     }
+   },
+   "binding_vars": {
+    "V": [],
+    "d": [],
+    "H": [
+     "h"
+    ],
+    "TOK": [
+     "token_new"
+    ],
+    "T": []
    }
   },
   {
@@ -22049,11 +22373,14 @@
     }
    },
    "reads": [
-    "tokens"
+    "tokens",
+    "h",
+    "kv_cache"
    ],
    "writes": [
     "k_new",
-    "v_new"
+    "v_new",
+    "kv_cache"
    ],
    "state": {
     "k_new": [
@@ -22222,6 +22549,26 @@
      "seq_len": 128,
      "kv_rows_total": 256
     }
+   },
+   "binding_vars": {
+    "L": [],
+    "TOLD": [],
+    "TNEW": [],
+    "NQ": [],
+    "KOLD": [
+     "kv_cache"
+    ],
+    "VOLD": [
+     "kv_cache"
+    ],
+    "KNEW": [
+     "k_new"
+    ],
+    "VNEW": [
+     "v_new"
+    ],
+    "KSHAPE": [],
+    "VSHAPE": []
    }
   },
   {
@@ -22231,7 +22578,7 @@
    "op": "attention",
    "phase": "Decode 4",
    "formula": {
-    "sym": "S = \\frac{Q K^{\\top}}{\\sqrt{d_h}},\\qquad W = \\mathrm{softmax}\\left(\\region{MASK}{S + M}\\right),\\qquad O = W V W_o",
+    "sym": "S = \\frac{Q \\slot{K}^{\\top}}{\\sqrt{d_h}},\\qquad W = \\mathrm{softmax}\\left(\\region{MASK}{S + M}\\right),\\qquad O = W \\slot{V} W_o",
     "idx": "Q_{[\\slot{NQ},H,d_h]} \\times K^{\\top}_{[\\slot{T},H,d_h]} \\to S + M_{[\\slot{H},\\slot{NQ},\\slot{T}]} \\to W_{[\\slot{H},\\slot{NQ},\\slot{T}]}",
     "num": "S_{\\max} = \\slot{SMAX} \\to W_{[\\slot{H},\\slot{NQ},\\slot{T}]} \\to O_{[\\slot{NQ},\\slot{d}]}"
    },
@@ -22256,6 +22603,16 @@
      "idx": "64",
      "num": "64"
     },
+    "K": {
+     "sym": "K^{(l)}_{[t,H,d_h]}",
+     "idx": "K^{(l)}_{[128,H,d_h]}",
+     "num": "[128,4,16]"
+    },
+    "V": {
+     "sym": "V^{(l)}_{[t,H,d_h]}",
+     "idx": "V^{(l)}_{[128,H,d_h]}",
+     "num": "[128,4,16]"
+    },
     "SMAX": {
      "sym": "\\max S",
      "idx": "\\max S",
@@ -22264,7 +22621,9 @@
    },
    "reads": [
     "tokens",
-    "k_new"
+    "k_new",
+    "v_new",
+    "kv_cache"
    ],
    "writes": [
     "h",
@@ -22928,6 +23287,19 @@
      "attn_flops": 32768,
      "proj_flops": 49152
     }
+   },
+   "binding_vars": {
+    "NQ": [],
+    "T": [],
+    "H": [],
+    "d": [],
+    "K": [
+     "kv_cache"
+    ],
+    "V": [
+     "kv_cache"
+    ],
+    "SMAX": []
    }
   },
   {
@@ -22937,7 +23309,7 @@
    "op": "ffn",
    "phase": "Decode 4",
    "formula": {
-    "sym": "h_1 = h + O,\\qquad h_2 = h_1 + \\mathrm{SwiGLU}(\\mathrm{LN}(h_1))",
+    "sym": "h_1 = \\slot{HIN} + O,\\qquad h_2 = h_1 + \\mathrm{SwiGLU}(\\mathrm{LN}(h_1))",
     "idx": "\\mathrm{gate}_{[\\slot{NQ},\\slot{DFF}]},\\ \\mathrm{up}_{[\\slot{NQ},\\slot{DFF}]} \\to \\mathrm{down}_{[\\slot{NQ},\\slot{d}]}",
     "num": "h_2\\ \\text{shape}\\ \\slot{SHAPE}"
    },
@@ -22956,6 +23328,11 @@
      "sym": "d_{model}",
      "idx": "64",
      "num": "64"
+    },
+    "HIN": {
+     "sym": "h",
+     "idx": "h_{[n_q,d]}",
+     "num": "[1,64]"
     },
     "SHAPE": {
      "sym": "\\cdot",
@@ -23053,6 +23430,15 @@
      "seq_len": 128,
      "kv_rows_total": 256
     }
+   },
+   "binding_vars": {
+    "NQ": [],
+    "DFF": [],
+    "d": [],
+    "HIN": [
+     "h"
+    ],
+    "SHAPE": []
    }
   },
   {
@@ -23062,8 +23448,8 @@
    "op": "head",
    "phase": "Decode 4",
    "formula": {
-    "sym": "\\mathrm{logits} = \\mathrm{LN}_f(h)\\,W_{lm}^{\\top},\\qquad x_{t+1} = \\arg\\max \\mathrm{logits}",
-    "idx": "\\mathrm{logits}_{[\\slot{V}]} = h_{[1,\\slot{d}]}\\,W_{lm}^{\\top},\\quad x_{t+1} = \\slot{TOK}",
+    "sym": "\\mathrm{logits} = \\mathrm{LN}_f(\\slot{H})\\,W_{lm}^{\\top},\\qquad x_{t+1} = \\arg\\max \\mathrm{logits}",
+    "idx": "\\mathrm{logits}_{[\\slot{V}]} = \\slot{H}_{[1,\\slot{d}]}\\,W_{lm}^{\\top},\\quad x_{t+1} = \\slot{TOK}",
     "num": "\\arg\\max \\mathrm{logits} = \\slot{TOK}\\ (\\text{共 } \\slot{T} \\text{ 个 token})"
    },
    "bindings": {
@@ -23076,6 +23462,11 @@
      "sym": "d_{model}",
      "idx": "64",
      "num": "64"
+    },
+    "H": {
+     "sym": "h",
+     "idx": "h_{[1,d]}",
+     "num": "[1,64]"
     },
     "TOK": {
      "sym": "x_{t+1}",
@@ -23278,6 +23669,17 @@
      "seq_len": 128,
      "kv_rows_total": 256
     }
+   },
+   "binding_vars": {
+    "V": [],
+    "d": [],
+    "H": [
+     "h"
+    ],
+    "TOK": [
+     "token_new"
+    ],
+    "T": []
    }
   }
  ]

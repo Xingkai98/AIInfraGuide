@@ -130,6 +130,13 @@
    reader can tell at a glance which lines are hops inside a layer and which
    are long-haul dependencies; the arrowhead still lands on the target. */
 .vd-e-rail { stroke-linejoin: round; }
+/* An edge that closes a cycle -- `tokens -> k_new -> h -> tokens` on L05, which
+   is the autoregressive loop the lab is about. Dashed like a self-loop, because
+   it means the same kind of thing: a value travelling forward in the algorithm
+   while the drawing puts its target upstream. The dash is what keeps it from
+   reading as a dependency pointing the wrong way. */
+.vd-e-back { stroke-dasharray: 6 4; }
+.vd-e-back.vd-e-on { stroke-dasharray: none; }
 
 /* ------------------------------------------------------------------- sidebar */
 .vd-side {

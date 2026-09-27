@@ -49,6 +49,32 @@ L00 的修正因子放大器与对照模式都挂在这一层。
 | 文件 | 职责 |
 |---|---|
 | `ledger.js` / `ledger.css` | 显存账本：一维堆叠条 + 二维矩阵（多策略 × 多分项） |
+| `variable-dag.js` / `variable-dag.css` | 变量图：**节点是变量、边是一次计算**（L00 试点，L04 / L05 消费） |
+| `attn-shape.js`、`phase-roofline.js`、`roofline.js` 等 | 各 lab 的专用视图，见下表与 `labs/pages/*.html` |
+
+### 变量图：三个 lab 之后它长什么样
+
+`views/variable-dag.js` 是唯一被三个 lab 共用的**图形**组件，每迁移一个 lab 它都得到一条
+通用能力（不是 lab 专属的分支）：
+
+| 能力 | 来源 | 解决什么 |
+|---|---|---|
+| 默认 `carried` 边规则 | L00 试点 | 每步画一条边，取「被更新的那个值的来源」。`reads[0]` 在 L00 每步都是 `x_blk`，按它画会画出一个从 staging buffer 出发的星形，永远看不出 `m` 门控了 `l` 与 `acc` |
+| `edgeMode: 'operands'` | L04 | 单值携带更新 vs 多操作数计算是**算法性质**。L04 的 `y1 ← x + attn_out` 是残差连接——这个 lab 的主题——而 carried 规则会把 `x → y1` 丢掉 |
+| 跨层边走 rail | L04 | 跳过一层的贝塞尔会**穿过**中间那些方框。几何断言抓到的 |
+| 秩字形 | L04 | 秩画成嵌套方框，`[4,8,8]` 一眼看出是「4 个头，每个 8×8」 |
+| **环安全的分层 + 回边** | **L05** | `tokens → k_new → h → tokens` 是自回归的环，也是这个 lab 的主题。松弛式分层在有环时**没有不动点**：实测层号跑到 133–135，压缩成假层之后深度守卫把「反向」的边**静默丢掉**，图只剩两条线和一个孤立节点 |
+
+**回边是怎么选的**（这条规则值得记住，因为它不是「随便断一条」）：环断在**最早产生**的
+张量那一端——`prefill.kv`（第 0 步）读 `h`，而 `h` 是 `prefill.attn`（第 1 步）写的，
+所以 `h → k_new` 是逆着程序走的边。判据是「源张量比目标张量更晚存在」**且**「这对顶点
+真的在环上」，第二条不能省：L00 的 `m`/`l`/`acc` 由第 0 步初始化，只看「谁更早」会把
+`x_blk → m` 也当成回边，把递推链切断。回边**照画**（走 rail，进目标的上游侧），
+因为「head 采出的 token 回灌进序列、被下一步的 K/V 投影读到」正是这个 lab 需要 cache
+的原因——与 L00 保留 `m`/`l`/`acc` 自环是同一个理由。
+
+**每个 lab 的结点名各不相同，所以组件不认识任何一个**：`slot → 张量` 的映射来自
+`step.binding_vars`（生成器写），图的边来自 `reads`/`writes`（trace 写）。
 
 **视图组件里不放显存公式。** 代价模型是 lab 内容：L05 算 KV Cache，L14 算 ZeRO 切分，
 组件不应该认识其中任何一个的键名。所以公式由页面作为 `{segments, predict(cfg), properties}`
@@ -141,6 +167,33 @@ configuration, and the two attention modes must be *identical* at prefill — pl
 a geometry control that hand-builds the violations (a dot pushed out of the
 frame, a label moved onto a neighbouring dot, a rectangle squeezed away from its
 declared aspect ratio) and requires the same predicates to flag each one.
+
+It also covers the view L05 is drawn with, `views/variable-dag.js` (the L00
+pilot's component, reused rather than forked — L05 is its **third** lab). The
+sections that matter on this trace:
+
+- **the graph IS the algorithm**, pinned by direction rather than by count:
+  `k_new ← h`, `v_new ← h`, `attn ← (k_new, v_new, kv_cache)`, `logits ← h`,
+  and the degenerate `k_new ← tokens` (`reads[0]` on that step) that must be
+  **absent**. The generator carries the same table (`DATAFLOW_REQUIRED`) with
+  six sabotage cases, because the view derives its edges from `reads`/`writes`
+  and a read that goes missing does not fail — it redraws a different algorithm.
+- **the KV cache is a variable**, and the accumulation is drawn the way L00's
+  `m`/`l`/`acc` recurrences are: `kv_cache` is a node, every append step reads
+  and writes it, and the view draws that as a self-loop whose step set is
+  asserted to equal the append steps exactly.
+- **the cycle** `tokens → k_new → h → tokens` — the first in this repo. Both
+  halves are asserted: the layering must stay compact (the failure mode is raw
+  layers of 133+ becoming fake bands), and the closing edge must be *drawn on a
+  rail* rather than dropped, entering the target's upstream side.
+- **the geometry**, at every step: 8 nodes pairwise disjoint, inside the canvas,
+  no edge through an unrelated box (the rail router's whole reason), no
+  operation label on a box or on another label — with the violations hand-built
+  and required to be caught by the same predicates.
+- **the highlight** through `step.binding_vars`, including the mapping a
+  page-side scan cannot get right on this trace: `KOLD` denotes the cache
+  *before* the step, and a stem-matched scan links it to `k_new`, the rows the
+  step *adds*.
 
 > ⚠️ **`npm run build:labs` 不是可选的，也不是一次性的。** 验收脚本驱动的是
 > `public/labs/` 里的**暂存产物**，不是 `labs/` 源文件。合并或拉取之后不重跑它，
