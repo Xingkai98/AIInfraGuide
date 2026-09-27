@@ -106,6 +106,31 @@ hand-builds the violations (an element pushed past its panel's right edge, a
 cell grid squeezed away from its declared aspect ratio) and requires the same
 predicates to flag each one.
 
+It also covers the view L04 is drawn with, `views/variable-dag.js` (the L00
+pilot's component, reused rather than forked). L04 is the second lab on that
+view and the first with real multi-dimensional tensors, so the additional
+sections are: the graph IS the algorithm (`scores ← (q, k)`, `y1 ← (x,
+attn_out)`, `gated ← (silu, up)` — the edges that make the block a block, each
+named, plus the degenerate `reads[0]` edges that must be absent); the matrices
+`[4,8,8]` and `[8,176]` drawn as matrices (rank-3 as a stack of per-head
+matrices, rank-2 capped with the elision count printed, the node's rank glyph
+checked against `tensors[].shape`); the graph's geometry (18 nodes pairwise
+disjoint, inside the canvas, no edge through an unrelated box — the case the
+first version of the rail router failed — no operation label on a box or on
+another label), with the three violations then hand-placed and required to be
+caught by the same predicates; and the formula↔graph highlight through
+`step.binding_vars`, including the two mappings a page-side regex cannot get
+right on this trace (`U` denotes the tensor `up`; `X` denotes `x` and the
+residual's two slots name two different tensors).
+
+> **为什么 L04 用两张表而不是一个正则。** L00 从公式里扫出 `slot → 张量`
+> （`vars_in_sym`），那在 L00 成立是因为它的公式写的就是张量的名字。L04 的公式不是：
+> 概率矩阵写作 `P`，而 `S` 在 `x.gated` 那一步指门控激活、在 `x.scores` 那一步又指分数矩阵；
+> `U_{i,j}` 指的是张量 `up`，扫 `up` 找不到、扫 `u` 找错。所以 L04 的生成器把映射**逐 slot
+> 声明**（`SLOT_VARS`），并用一条结构性规则守着它：每个名字必须是**该步自己**读或写的张量
+> （`lint_slot_vars`），另有一张 `SLOT_VARS_REQUIRED` 钉死残差与门控那几条 —— 表被改空了
+> 会构建失败，而不是静默地不再点亮。
+
 `verify-l05.py` covers L05's five acceptance criteria (#19): the replay with the
 cache growing frame by frame, the with/without-cache shape comparison, the
 ledger component being consumed rather than re-implemented, the three parameter

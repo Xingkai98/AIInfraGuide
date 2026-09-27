@@ -38,9 +38,30 @@
 
   /* Geometry is fixed in viewBox units and scaled to fit by
      preserveAspectRatio, so a narrow panel shows the same drawing smaller
-     rather than a reflowed one. */
-  var NW = 116, NH = 46, GAPX = 112, GAPY = 74, PAD = 26;
-  var LOOP_W = 34, LOOP_GAP = 18;
+     rather than a reflowed one.
+     These are the DEFAULTS; a lab whose graph is deeper or wider than L00's
+     six-node one passes its own through `opts.geo`. The numbers are a budget,
+     not a style: a node's height times the band count plus the gaps is the
+     drawing's height, and the drawing's height against the panel's is what
+     decides whether the labels end up readable at 13px or at 4px. */
+  var GEO = {
+    /* L00's numbers, and they stay L00's: a lab that passes its own `geo` is
+       not entitled to move the defaults for everyone else, and the L00 page
+       does not pass one. L04 does (its graph is twice as deep), which is what
+       the option is for. */
+    NW: 116, NH: 46, GAPX: 112, GAPY: 74, PAD: 26,
+    LOOP_W: 34, LOOP_GAP: 18,
+    /* A layered drawing has edges that skip over a layer. Drawn as one bezier
+       they pass straight through the boxes of the layer they skipped -- see
+       `railPath` for what is done instead and why. RAIL_PAD is the width of
+       the outermost rail's margin, so it has to fit the operation label that
+       sits on the rail, not just the wire. */
+    RAIL_GAP: 20, RAIL_PAD: 36,
+    /* The smallest scale at which a node label is still a label. Below it the
+       drawing is rendered at this scale and the panel pans, rather than being
+       shrunk into a thumbnail. */
+    MIN_SCALE: 0.8
+  };
 
   var SENTINEL_TEXT = (TM && TM.SENTINEL_TEXT) || {};
 
@@ -69,8 +90,30 @@
    * edges against the trace's own reads/writes rather than against pixels.
    */
 
-  function build(trace) {
+  function build(trace, opts) {
     var idx = TM.index(trace);
+    /* How an edge is chosen, and why it is a choice.
+     *
+     * `carried` (the default) draws one edge per step: from the value the
+     * update is *about* to the variable it updates. L00 is the trace that
+     * motivated it -- `reads[0]` there is `x_blk` on every op step, so the
+     * naive rule draws a star out of the staging buffer and never shows that m
+     * gates l and acc. One edge per step is exactly right when a step carries
+     * one value forward, and it is what L00's acceptance harness asserts.
+     *
+     * `operands` draws one edge per (read, write) pair the step actually
+     * performs. A step with several operands -- a QKV projection, a residual
+     * add, an elementwise multiply -- writes several variables from several
+     * reads, and the carried rule silently drops all but one of them: L04's
+     * `x.scores` reads (q, k) and the carried rule keeps only q; `x.res1` reads
+     * (x, attn_out) and it keeps only attn_out, so the residual connection
+     * disappears from a drawing whose whole subject is the residual
+     * connection. Neither rule is a special case of the other: pick by whether
+     * the trace's steps are single-carried-value updates or multi-operand
+     * computations, which is a property of the ALGORITHM the trace replays,
+     * not of the lab. */
+    var mode = (opts && opts.edgeMode) === 'operands' ? 'operands' : 'carried';
+    var idxTM = idx;
 
     /* The nodes are the TENSORS, not `graph.nodes` -- that array is the step
        graph (init, ld1, m1, …) and it is what the engine's step DAG draws. The
@@ -127,8 +170,47 @@
     var edgeMap = {}, edges = [];
     var selfLoops = {}, loops = [];
 
+    function addEdge(from, to, step, isCarried) {
+      var key = from + '>' + to;
+      if (!edgeMap[key]) {
+        edgeMap[key] = { from: from, to: to, steps: [], ops: [], carried: false };
+        edges.push(edgeMap[key]);
+      }
+      edgeMap[key].steps.push(step.i);
+      if (edgeMap[key].ops.indexOf(step.op) === -1) edgeMap[key].ops.push(step.op);
+      /* WHICH EDGE OF A STEP WEARS THE STEP'S NAME.
+       *
+       * `operands` mode draws every dependency a step performs, and a step like
+       * L04's `x.attn` performs six of them -- all with the same op. Labelling
+       * all six prints "ATTENTION" six times across one band, which is not six
+       * facts, it is one fact said six times, and the labels collide with each
+       * other and with the wires. So the LABEL follows the rule the whole graph
+       * follows in `carried` mode: the step names the edge it carries its
+       * result along, the one from the value the update is *about*. The other
+       * edges are still drawn -- they are dependencies and dropping them is
+       * what this mode exists to stop -- they just do not repeat the name. */
+      if (isCarried !== false) edgeMap[key].carried = true;
+    }
+
+    function addLoop(id, step) {
+      if (!selfLoops[id]) {
+        selfLoops[id] = { id: id, steps: [], ops: [] };
+        loops.push(selfLoops[id]);
+      }
+      selfLoops[id].steps.push(step.i);
+      if (selfLoops[id].ops.indexOf(step.op) === -1) selfLoops[id].ops.push(step.op);
+    }
+
     steps.forEach(function (s) {
       if (!s.writes.length) return;
+
+      /* A step that reads what it writes is carrying a value across iterations,
+         not moving data between two variables. That is a self-loop, drawn as
+         one, once per variable, however many steps carry it. The recurrence
+         `m <- max(m, .)` IS the algorithm's shape, so it has to be visible
+         rather than discarded as a degenerate edge. */
+      var selfReading = s.writes.filter(function (w) { return s.reads.indexOf(w) !== -1; });
+      selfReading.forEach(function (w) { addLoop(w, s); });
 
       /* The variable this step produces: the write that sits furthest along,
          which is the step's output rather than one of its inputs. */
@@ -136,20 +218,6 @@
       s.writes.forEach(function (w) {
         if ((depth[w] || 0) > (depth[target] || 0)) target = w;
       });
-
-      /* A step that reads what it writes is carrying a value across iterations,
-         not moving data between two variables. That is a self-loop, drawn as
-         one, once per variable, however many steps carry it. The recurrence
-         `m <- max(m, .)` IS the algorithm's shape, so it has to be visible
-         rather than discarded as a degenerate edge. */
-      if (s.reads.indexOf(target) !== -1) {
-        if (!selfLoops[target]) {
-          selfLoops[target] = { id: target, steps: [], ops: [] };
-          loops.push(selfLoops[target]);
-        }
-        selfLoops[target].steps.push(s.i);
-        if (selfLoops[target].ops.indexOf(s.op) === -1) selfLoops[target].ops.push(s.op);
-      }
 
       /* Among the reads strictly BEFORE the target, take the one furthest
          along: that is the value being carried forward, and it is what the
@@ -163,15 +231,30 @@
         if ((depth[r] || 0) >= (depth[target] || 0)) return;
         if (!source || (depth[r] || 0) > (depth[source] || 0)) source = r;
       });
-      if (!source) return;
+      var carriedKey = source ? source + '>' + target : null;
 
-      var key = source + '' + target;
-      if (!edgeMap[key]) {
-        edgeMap[key] = { from: source, to: target, steps: [], ops: [] };
-        edges.push(edgeMap[key]);
+      if (mode === 'operands') {
+        /* Every operand of the step reaches every variable it produces. Both
+           ends are the trace's own reads/writes, so an edge drawn here is a
+           dependency the replay actually performed -- nothing is inferred from
+           proximity or from the order the arrays happen to be listed in. */
+        s.reads.forEach(function (r) {
+          if (selfReading.indexOf(r) !== -1) return;   /* drawn as a self-loop */
+          s.writes.forEach(function (w) {
+            if (r === w) return;
+            /* Every layer-consuming pair is upstream by construction, so this
+               guard should never fire; it is here so that a trace whose
+               layering disagrees with its reads/writes reports a back-edge
+               instead of drawing an arrow that points backwards. */
+            if ((depth[r] || 0) >= (depth[w] || 0)) return;
+            addEdge(r, w, s, r + '>' + w === carriedKey);
+          });
+        });
+        return;
       }
-      edgeMap[key].steps.push(s.i);
-      if (edgeMap[key].ops.indexOf(s.op) === -1) edgeMap[key].ops.push(s.op);
+
+      if (!source) return;
+      addEdge(source, target, s, true);
     });
 
     return {
@@ -179,6 +262,8 @@
       tensors: trace.tensors || {},
       steps: steps,
       edges: edges,
+      edgeMode: mode,
+      showLocation: !opts || opts.nodeLocation !== false,
       loops: loops,
       layers: layers,
       /* Steps that draw nothing at all: no reads and no write we can attribute
@@ -249,7 +334,9 @@
     return { bands: bands, nBands: used.length, raw: layer, rank: rank, depth: depth };
   }
 
-  function computePositions(model, targetAspect, vertical) {
+  function computePositions(model, targetAspect, vertical, geo) {
+    var G = geo || GEO;
+    var NW = G.NW, NH = G.NH, GAPX = G.GAPX, GAPY = G.GAPY, PAD = G.PAD;
     /* Reuse the layering the edge derivation used, so the drawing cannot be
        laid out on a different ordering than the one the edges were chosen
        against. */
@@ -292,15 +379,73 @@
 
     /* A self-loop bulges out to the right of its node, so the canvas has to
        reserve that width or the loop is cropped at the edge. */
-    var right = model.loops.length ? LOOP_GAP + LOOP_W + PAD : PAD;
+    var right = model.loops.length ? G.LOOP_GAP + G.LOOP_W + PAD : PAD;
+
+    /* An edge that skips a layer is routed on a rail outside the row of boxes
+       (`railPath`); the canvas has to reserve that space or the rail is cropped
+       at the edge. One side per orientation -- below a horizontal drawing,
+       right of a vertical one -- so the reserve is a single number and no
+       coordinate has to be shifted. */
+    var rails = railPlan(model, pos);
+    var nRails = rails.nRails;
+    var extra = nRails ? G.RAIL_PAD + nRails * G.RAIL_GAP : 0;
+
     return {
       pos: pos,
       vertical: vertical,
       bands: L.bands,
       nBands: L.nBands,
-      w: maxX + NW + right,
-      h: maxY + NH + PAD
+      rails: rails,
+      railCount: nRails,
+      geo: G,
+      w: maxX + NW + right + (vertical ? extra : 0),
+      h: maxY + NH + PAD + (vertical ? 0 : extra)
     };
+  }
+
+  /* ---------------------------------------------------------------- rails
+   *
+   * Which edges skip a layer.
+   *
+   * A layered drawing puts every edge between adjacent layers inside the gap,
+   * where there is nothing to collide with. An edge that spans two or more
+   * bands -- L04's residual additions, which carry `x` from band 0 to band 5 --
+   * drawn as a single bezier passes straight through every box in the bands it
+   * skips. That is not a hypothesis: it is what the first version drew, and the
+   * harness's "no edge through an unrelated box" predicate is what found it.
+   *
+   * The fix that needs no hand-placed geometry: route the edge out to a rail
+   * outside the drawing, along it past the skipped bands, and back in at the
+   * target. The rail's offset is a function of how many bands the edge skips,
+   * so edges that skip further run further out and the ones that skip least
+   * stay closest to the boxes they pass. The number of rails is therefore
+   * bounded by the band count, not by the number of edges, and the canvas can
+   * reserve exactly the space they need.
+   */
+  function railPlan(model, pos) {
+    var levels = [], skipping = [];
+    (model.edges || []).forEach(function (e) {
+      var a = pos[e.from], b = pos[e.to];
+      if (!a || !b) return;
+      var d = b.band - a.band;
+      e.bandDelta = d;
+      if (Math.abs(d) <= 1) { e.rail = null; return; }
+      /* Level 0 is the innermost rail: an edge that skips one band travels
+         closest to the boxes it passed, and one that skips five sits further
+         out. That ordering is what keeps the rails from coinciding. */
+      e.rail = {level: Math.abs(d) - 2};
+      skipping.push(e);
+      if (levels.indexOf(e.rail.level) === -1) levels.push(e.rail.level);
+    });
+    levels.sort(function (x, y) { return x - y; });
+    /* The rails are ranked by POSITION IN THE SORTED LIST, not by their level
+       number. Levels are `|bandDelta| - 2`, so a graph whose edges all skip one
+       or two bands produces levels 0 and 1 but one that only ever skips one and
+       six produces 0 and 4 -- and `railCount - 1 - level` then goes negative and
+       the rail is drawn off the canvas. Exactly the bug the pilot recorded for
+       layer numbers; it recurred here on the first graph deeper than L00's. */
+    skipping.forEach(function (e) { e.rail.rank = levels.indexOf(e.rail.level); });
+    return { levels: levels, nRails: levels.length, edges: skipping };
   }
 
   /* ============================================================ geometry
@@ -310,9 +455,21 @@
    * edge actually is.
    */
 
+  /* Adjacent bands: the straight/offset bezier inside the gap, unchanged. A
+     skipped band goes to `railPath` instead -- see `railPlan` for why. */
   function edgePath(L, from, to) {
+    var e = null, edges = (L.rails && L.rails.edges) || [];
+    for (var k = 0; k < edges.length; k++) {
+      if (edges[k].from === from && edges[k].to === to) { e = edges[k]; break; }
+    }
+    if (e && e.rail) return railPath(L, e);
+    return directPath(L, from, to);
+  }
+
+  function directPath(L, from, to) {
     var a = L.pos[from], b = L.pos[to];
     if (!a || !b) return null;
+    var NW = L.geo.NW, NH = L.geo.NH;
     var x1, y1, x2, y2, d, lx, ly;
 
     if (L.vertical) {
@@ -336,7 +493,7 @@
       }
       lx = (x1 + x2) / 2; ly = Math.min(y1, y2) - 7;
     }
-    return { d: d, lx: lx, ly: ly, x1: x1, y1: y1, x2: x2, y2: y2 };
+    return { d: d, lx: lx, ly: ly, x1: x1, y1: y1, x2: x2, y2: y2, rail: false };
   }
 
   /* A self-loop leaves the node's right edge and comes back to it. It is drawn
@@ -344,11 +501,95 @@
   function loopPath(L, id) {
     var p = L.pos[id];
     if (!p) return null;
+    var NW = L.geo.NW, NH = L.geo.NH, G = L.geo;
     var x0 = p.x + NW, yTop = p.y + NH * 0.26, yBot = p.y + NH * 0.74;
-    var reach = x0 + LOOP_GAP + LOOP_W;
+    var reach = x0 + G.LOOP_GAP + G.LOOP_W;
     var d = 'M' + x0 + ' ' + yTop +
             ' C' + reach + ' ' + yTop + ' ' + reach + ' ' + yBot + ' ' + x0 + ' ' + yBot;
     return { d: d, lx: reach - 2, ly: (yTop + yBot) / 2 };
+  }
+
+  /* An edge that skips one or more bands: out of the source, along a rail
+     outside the drawing, and back in at the target.
+   *
+   * WHERE EVERY SEGMENT RUNS, and why. The obvious route -- leave the source's
+   * side, run straight to the rail, run along it, come back -- passes through
+   * the source's own band-mates: in L04's `q, k, v` band, leaving `q` sideways
+   * crosses `k` and `v`. So each segment is placed in the empty channel between
+   * two bands instead:
+   *
+   *   vertical    down out of the source into the gap below its band, across to
+   *               the rail through that gap, along the rail (which is clear of
+   *               everything by construction), back through the gap above the
+   *               target's band, and in through the target's top edge.
+   *   horizontal  out of the source into the gap on its downstream side, down
+   *               through that gap to the rail below the drawing, across, and up
+   *               through the gap on the target's upstream side.
+   *
+   * Both routes only ever travel inside a gap or along the rail, so no segment
+   * can cross a box -- which is the property the harness measures.
+   *
+   * The rail's offset grows with the number of bands skipped, so longer detours
+   * run further out and no two rails coincide.
+   */
+  var RAIL_R = 9;     /* corner chamfer, in viewBox units */
+
+  function railPath(L, e) {
+    var a = L.pos[e.from], b = L.pos[e.to];
+    if (!a || !b) return null;
+    var G = L.geo;
+    var NW = G.NW, NH = G.NH, GX = G.GAPX, GY = G.GAPY;
+    var rank = L.railCount - 1 - e.rail.rank;
+    var d, lx, ly;
+
+    /* A polyline with chamfered corners.
+     *
+     * Each interior vertex is cut back along the INCOMING ray and forward along
+     * the OUTGOING one, and a quadratic through the vertex joins the two. The
+     * first version rounded toward the NEXT point instead of away from the
+     * previous one, which put the line's endpoint near the far end of the
+     * segment and made the path double back through it -- the drawn `d` swept
+     * across the whole canvas and the harness's "no edge through an unrelated
+     * box" predicate is what caught it. The cut-back length is capped by half of
+     * EACH adjacent segment so two short segments cannot eat into each other. */
+    function poly(pts) {
+      var out = 'M' + pts[0].x + ' ' + pts[0].y;
+      for (var i = 1; i < pts.length; i++) {
+        var p = pts[i];
+        if (i === pts.length - 1) { out += ' L' + p.x + ' ' + p.y; break; }
+        var nx = pts[i + 1].x - p.x, ny = pts[i + 1].y - p.y;
+        var nlen = Math.sqrt(nx * nx + ny * ny);
+        var px = p.x - pts[i - 1].x, py = p.y - pts[i - 1].y;
+        var plen = Math.sqrt(px * px + py * py);
+        if (nlen < 1e-6 || plen < 1e-6) continue;
+        var r = Math.min(RAIL_R, nlen / 2, plen / 2);
+        out += ' L' + (p.x - px / plen * r) + ' ' + (p.y - py / plen * r) +
+               ' Q' + p.x + ' ' + p.y + ' ' +
+               (p.x + nx / nlen * r) + ' ' + (p.y + ny / nlen * r);
+      }
+      return out;
+    }
+
+    if (L.vertical) {
+      var rail = L.w - G.RAIL_PAD - rank * G.RAIL_GAP;
+      var x0 = a.x + NW / 2, yA = a.y + NH + GY / 2;
+      var x1 = b.x + NW / 2, yB = b.y - GY / 2;
+      d = poly([
+        { x: x0, y: a.y + NH }, { x: x0, y: yA }, { x: rail, y: yA },
+        { x: rail, y: yB }, { x: x1, y: yB }, { x: x1, y: b.y }
+      ]);
+      lx = rail; ly = (yA + yB) / 2;
+    } else {
+      var railY = L.h - G.RAIL_PAD - rank * G.RAIL_GAP;
+      var ya = a.y + NH / 2, xa = a.x + NW + GX / 2;
+      var yb = b.y + NH / 2, xb = b.x - GX / 2;
+      d = poly([
+        { x: a.x + NW, y: ya }, { x: xa, y: ya }, { x: xa, y: railY },
+        { x: xb, y: railY }, { x: xb, y: yb }, { x: b.x, y: yb }
+      ]);
+      lx = (xa + xb) / 2; ly = railY - 6;
+    }
+    return { d: d, lx: lx, ly: ly, x1: 0, y1: 0, x2: 0, y2: 0, rail: true };
   }
 
   /* The rectangle a node occupies, in the same coordinate space the SVG draws
@@ -356,7 +597,9 @@
      re-deriving it. */
   function nodeRect(L, id) {
     var p = L.pos[id];
-    return p ? { x: p.x, y: p.y, w: NW, h: NH } : null;
+    if (!p) return null;
+    var G = (L && L.geo) || GEO;
+    return { x: p.x, y: p.y, w: G.NW, h: G.NH };
   }
 
   /* ============================================================ lint
@@ -385,6 +628,12 @@
           gaps.push('步骤 "' + sid + '" 的绑定 "' + k + '" 在 binding_vars 里没有条目 —— 点这个变量不会有任何高亮');
         }
       });
+      /* The step's own dataflow. An entry naming a tensor the step neither
+         reads nor writes is not a harmless extra: it is a link drawn between
+         two things this step has nothing to do with, which is the same class
+         of error as an edge drawn on proximity. The Python port carries the
+         same rule and its own sabotage case. */
+      var scope = (s.reads || []).concat(s.writes || []);
       Object.keys(bvars).forEach(function (k) {
         if (!Object.prototype.hasOwnProperty.call(binds, k)) {
           gaps.push('步骤 "' + sid + '" 的 binding_vars 有 "' + k + '"，但 bindings 里没有这个 slot');
@@ -397,6 +646,9 @@
         bvars[k].forEach(function (name) {
           if (declared.indexOf(name) === -1) {
             gaps.push('步骤 "' + sid + '" 的 binding_vars["' + k + '"] 指向未声明的张量 "' + name + '" —— 图上没有这个节点可高亮');
+          } else if (scope.indexOf(name) === -1) {
+            gaps.push('步骤 "' + sid + '" 的 binding_vars["' + k + '"] 指向 "' + name +
+              '"，但这一步既不读也不写它 —— 高亮会连到一个与本步无关的节点');
           }
         });
       });
@@ -410,6 +662,93 @@
       infos.push('binding_vars 覆盖 ' + (trace.steps || []).length + ' 步');
     }
     return { gaps: gaps, warns: warns, infos: infos };
+  }
+
+  /* This view's own control group, in the same shape the other views use: each
+   * entry breaks one rule on the REAL trace, and a lint that reports zero gaps
+   * for a broken copy is a lint that is not checking.
+   *
+   * WHAT IS NOT HERE, AND WHY. Two of the ways `binding_vars` can go wrong are
+   * structurally valid and semantically false -- an entry emptied, or rewired
+   * to a different tensor the step happens to touch -- and this lint cannot
+   * judge them, because "which tensor SHOULD the ℓ slot name" is a fact about
+   * L04's formulas that a generic view has no business knowing. Those rules
+   * live in the generator (`SLOT_VARS_REQUIRED` in decoder_block.py) and their
+   * control cases live beside it. The harness requires every case to be caught
+   * by at least one port, so moving them there is a decision about which file
+   * owns the rule, not a way of dropping the test.
+   *
+   * The mutations reach for steps and slots by their ROLES, so they keep biting
+   * if the replay's shape changes: `stepWith` finds the first step carrying the
+   * slot rather than indexing a literal, and the slot is named by the step's
+   * own formula rather than by a string written twice. */
+  function stepWith(trace, slot, linked) {
+    var out = -1;
+    (trace.steps || []).forEach(function (s, i) {
+      if (out !== -1 || !s.binding_vars) return;
+      var names = s.binding_vars[slot];
+      if (!names) return;
+      if (linked ? names.length > 0 : names.length === 0) out = i;
+    });
+    if (out === -1) throw new Error('no step with a ' + (linked ? 'linked' : 'empty') +
+      ' "' + slot + '" binding');
+    return out;
+  }
+
+  var SABOTAGE_CASES = {
+    'binding_vars 整块删除': function (t) { delete t.steps[1].binding_vars; },
+    'binding_vars 少一个活 slot 的条目': function (t) {
+      /* The slot is read out of the step's OWN formula, so the case cannot
+         drift from the trace it is written against. */
+      var i = stepWith(t, 'MU', true);
+      var m = /\\slot\{([A-Za-z0-9_]+)\}/.exec(t.steps[i].formula.num ||
+                                               t.steps[i].formula.idx ||
+                                               t.steps[i].formula.sym);
+      if (!m) throw new Error('no \\slot in the target step');
+      delete t.steps[i].binding_vars[m[1]];
+    },
+    'binding_vars 多一个不存在的 slot': function (t) {
+      t.steps[1].binding_vars.GHOST = ['x'];
+    },
+    'binding_vars 的条目不是列表': function (t) { t.steps[1].binding_vars.MU = 'x'; },
+    'binding_vars 指向未声明的张量': function (t) {
+      t.steps[stepWith(t, 'MU', true)].binding_vars.MU = ['ghost'];
+    },
+    'binding_vars 指向本步不读也不写的张量': function (t) {
+      var i = stepWith(t, 'MU', true);
+      var own = t.steps[i].binding_vars.MU[0];
+      var other = Object.keys(t.tensors).filter(function (n) {
+        return n !== own && t.steps[i].reads.indexOf(n) === -1 &&
+               t.steps[i].writes.indexOf(n) === -1;
+      })[0];
+      t.steps[i].binding_vars.MU = [other];
+    }
+  };
+
+  function sabotageChecks(trace) {
+    var before = JSON.stringify(trace);
+    var caught = [], missed = [], skipped = [], noop = [];
+    Object.keys(SABOTAGE_CASES).forEach(function (name) {
+      var copy = JSON.parse(before);
+      try {
+        SABOTAGE_CASES[name](copy);
+      } catch (err) {
+        /* Most of these mutate the trace, so they always apply; the failure
+         * mode this bucket catches is a mutation whose preconditions are not
+         * in this trace at all. Same treatment as `verify.js`. */
+        skipped.push(name);
+        return;
+      }
+      if (JSON.stringify(copy) === before) { noop.push(name); return; }
+      try {
+        if (lint(copy).gaps.length > 0) caught.push(name);
+        else missed.push(name);
+      } catch (err) {
+        missed.push(name);
+      }
+    });
+    return { caught: caught, missed: missed, skipped: skipped, noop: noop,
+             total: Object.keys(SABOTAGE_CASES).length };
   }
 
   /* ============================================================ value grid
@@ -436,7 +775,56 @@
     return '[' + shape.join('×') + ']';
   }
 
-  function valueGrid(name, model, snapshot) {
+  /* How much of a tensor is printed, and why there is a limit at all.
+   *
+   * A rank-3 tensor of L04's size is 256 numbers and a `[8, 176]` activation is
+   * 1408; printed in full, one step's values would be taller than the screen
+   * the step is supposed to fit on, and the reader would be scrolling a wall of
+   * digits to find the one they wanted. So each drawn block is capped and the
+   * cap is SAID: `⋯` marks an elided row, column or slice, and the header keeps
+   * the tensor's true shape. That is the same bargain `views/shape-guard.js`
+   * strikes for a `[128, 64]` operand -- draw what fits, label what is true --
+   * and the numbers that are drawn are the trace's own.
+   *
+   * The defaults are what a laptop sidebar can hold; a lab with more room
+   * passes its own through `opts.maxRows` / `maxCols` / `maxSlices`. */
+  var VALUE_LIMITS = { maxRows: 8, maxCols: 8, maxSlices: 2 };
+
+  function elided(n, cls) {
+    return n > 0 ? '<span class="vd-cell vd-cell-more' + (cls ? ' ' + cls : '') +
+      '">⋯ ' + n + '</span>' : '';
+  }
+
+  /* One rank-2 block, capped on both axes. */
+  function gridBody(rows, lim) {
+    var nR = rows.length, nC = rows[0] ? rows[0].length : 0;
+    var showR = Math.min(nR, lim.maxRows), showC = Math.min(nC, lim.maxCols);
+    var out = '';
+    for (var r = 0; r < showR; r++) {
+      out += '<div class="vd-vrow">';
+      for (var c = 0; c < showC; c++) {
+        out += '<span class="vd-cell">' + esc(formatValue(rows[r][c])) + '</span>';
+      }
+      if (showC < nC) out += elided(nC - showC);
+      out += '</div>';
+    }
+    if (showR < nR) {
+      out += '<div class="vd-vrow">' + elided(nR - showR, 'vd-cell-rowmore') + '</div>';
+    }
+    return out;
+  }
+
+  function sliceHeader(i, n) {
+    return '<div class="vd-vslice">第 ' + (i + 1) + ' / ' + n + ' 张</div>';
+  }
+
+  function valueGrid(name, model, snapshot, opts) {
+    var lim = {};
+    Object.keys(VALUE_LIMITS).forEach(function (k) { lim[k] = VALUE_LIMITS[k]; });
+    Object.keys((opts && opts.limits) || {}).forEach(function (k) {
+      lim[k] = opts.limits[k];
+    });
+
     var spec = model.tensors[name] || {};
     var entry = snapshot[name];
     if (!entry || entry.value === undefined) return '';
@@ -447,15 +835,28 @@
     if (!Array.isArray(val)) {
       body = '<span class="vd-cell vd-cell-1">' + esc(formatValue(val)) + '</span>';
     } else if (shape.length <= 1 || !Array.isArray(val[0])) {
-      body = '<div class="vd-vrow">' + val.map(function (v) {
+      var show = Math.min(val.length, lim.maxRows * lim.maxCols);
+      body = '<div class="vd-vrow">' + val.slice(0, show).map(function (v) {
         return '<span class="vd-cell">' + esc(formatValue(v)) + '</span>';
-      }).join('') + '</div>';
+      }).join('') + elided(val.length - show) + '</div>';
+    } else if (shape.length === 2 || !Array.isArray(val[0][0])) {
+      body = gridBody(val, lim);
     } else {
-      body = val.map(function (row) {
-        return '<div class="vd-vrow">' + row.map(function (v) {
-          return '<span class="vd-cell">' + esc(formatValue(v)) + '</span>';
-        }).join('') + '</div>';
+      /* Rank 3 and up: the leading index is a STACK of grids, not another row
+         of one. Drawn as one grid per slice, because `[H, N, N]` is H score
+         matrices and a reader who sees them run together horizontally would
+         read the whole thing as one wide matrix -- which is exactly the
+         misreading the shape is there to prevent. */
+      var slices = val.slice(0, lim.maxSlices).map(function (sl, i) {
+        return '<div class="vd-vslice-b">' + sliceHeader(i, val.length) + gridBody(sl, lim) + '</div>';
       }).join('');
+      body = '<div class="vd-vslices">' + slices +
+        (val.length > lim.maxSlices
+          ? '<div class="vd-vslice-b vd-vslice-more">' +
+            elided(val.length - lim.maxSlices, 'vd-cell-rowmore') +
+            '<div class="vd-vslice">其余 ' + (val.length - lim.maxSlices) + ' 张同形</div></div>'
+          : '') +
+        '</div>';
     }
 
     var where = entry.from === -1 ? '初值'
@@ -466,6 +867,44 @@
   }
 
   /* ============================================================ SVG scene */
+
+  /* How a tensor's rank is drawn on its node.
+   *
+   * Rank is the one property of a variable that a reader of a dataflow graph
+   * needs before any number appears: `[8,64]` and `[4,8,8]` are different
+   * kinds of thing to multiply, to add, or to draw, and a graph that prints
+   * only the name leaves that to the sidebar. The glyph is a filled rectangle
+   * whose proportions are the shape's own leading two dimensions, clamped:
+   *
+   *   rank 0  one small square        a scalar
+   *   rank 1  a wide flat bar         a row vector
+   *   rank ≥2 two nested rectangles   a matrix (the inner one is the rank-3+
+   *                                   "one of many" layer, so a batch of
+   *                                   matrices does not look like a matrix)
+   *
+   * It is a glyph and not a data plot -- the drawn size carries the ARGUMENT
+   * (how many dimensions, and which of them is the outer one), never the
+   * values, and the exact shape is printed beside it in text. Generic to any
+   * trace: it reads `tensors[].shape` and nothing else.
+   */
+  function shapeGlyph(shape, x, y) {
+    var s = shape || [];
+    var rank = s.length;
+    if (rank === 0) {
+      return '<rect class="vd-shape" x="' + x + '" y="' + y + '" width="7" height="7" rx="1.5"/>';
+    }
+    if (rank === 1) {
+      return '<rect class="vd-shape" x="' + x + '" y="' + (y + 1.5) + '" width="16" height="5" rx="1.5"/>';
+    }
+    var w = 20, h = 14;
+    var out = '<rect class="vd-shape" x="' + x + '" y="' + y + '" width="' + w +
+              '" height="' + h + '" rx="2"/>';
+    if (rank >= 3) {
+      out += '<rect class="vd-shape-inner" x="' + (x + 3) + '" y="' + (y + 3) +
+             '" width="' + (w - 6) + '" height="' + (h - 6) + '" rx="1.5"/>';
+    }
+    return out;
+  }
 
   function scene(L, model) {
     var out = '<defs>' +
@@ -479,9 +918,15 @@
       var g = edgePath(L, e.from, e.to);
       if (!g) return;
       e.geom = g;
-      out += '<path class="vd-e vd-e-off" data-vd-edge="' + esc(e.from + '>' + e.to) +
+      out += '<path class="vd-e vd-e-off' + (e.rail ? ' vd-e-rail' : '') +
+        '" data-vd-edge="' + esc(e.from + '>' + e.to) +
+        '" data-vd-rail="' + (e.rail ? '1' : '0') +
         '" d="' + g.d + '" marker-end="url(#vd-ar)"/>';
-      if (e.ops.length === 1) {
+      /* Only the carried edge wears the step's name -- see `addEdge`. The rule
+         is deliberately the same one the carried mode uses for its edges, so a
+         graph read in either mode says the same thing about what the algorithm
+         is doing; the operands mode just shows more of the wiring. */
+      if (e.carried && e.ops.length === 1) {
         out += '<text class="vd-el vd-el-off" data-vd-el="' + esc(e.from + '>' + e.to) +
           '" x="' + g.lx + '" y="' + g.ly + '" text-anchor="middle">' +
           esc(e.ops[0].toUpperCase()) + '</text>';
@@ -502,13 +947,16 @@
       var p = L.pos[id];
       if (!p) return;
       var spec = model.tensors[id] || {};
+      var NW = L.geo.NW, NH = L.geo.NH;
       out += '<g class="vd-n ' + cls(id) + '" data-vd-node="' + esc(id) + '" tabindex="0" role="button" ' +
-        'aria-label="变量 ' + esc(id) + '">' +
+        'aria-label="变量 ' + esc(id) + ' 形状 ' + esc(shapeText(spec.shape)) + '">' +
         '<rect class="vd-box vd-box-off" x="' + p.x + '" y="' + p.y + '" width="' + NW +
           '" height="' + NH + '" rx="10"/>' +
-        '<text class="vd-nl vd-nl-off" x="' + (p.x + 11) + '" y="' + (p.y + 20) + '">' + esc(id) + '</text>' +
+        '<g class="vd-nshape vd-nshape-off">' + shapeGlyph(spec.shape, p.x + 11, p.y + 17) + '</g>' +
+        '<text class="vd-nl vd-nl-off" x="' + (p.x + 37) + '" y="' + (p.y + 20) + '">' + esc(id) + '</text>' +
         '<text class="vd-ns vd-ns-off" x="' + (p.x + 11) + '" y="' + (p.y + 35) + '">' +
-          esc(shapeText(spec.shape)) + (spec.at ? ' · ' + esc(spec.at) : '') + '</text>' +
+          esc(shapeText(spec.shape)) +
+          (model.showLocation && spec.at ? ' · ' + esc(spec.at) : '') + '</text>' +
         '</g>';
     });
 
@@ -525,6 +973,17 @@
     tier: 'sym',
     param: 'step',
     digits: 4,
+    /* Node boxes are a fixed size and the drawing is scaled to fit, so a lab
+       whose graph is deeper than L00's has to say so or its labels come out at
+       4px. `geo` is merged over the defaults, field by field. */
+    geo: null,
+    edgeMode: 'carried',
+    /* The second line of a node box is the tensor's shape. The first line may
+       also carry `tensors[].at` -- L00's values there are short places ("HBM",
+       "SRAM"), which is what a node has room for. L04's are sentences ("多头注
+       意力的 Q"), and a sentence in a 112px box is not a label. */
+    nodeLocation: true,
+    valueLimits: null,
     onStep: null
   };
 
@@ -532,11 +991,15 @@
     var cfg = {};
     Object.keys(DEFAULTS).forEach(function (k) { cfg[k] = DEFAULTS[k]; });
     Object.keys(opts || {}).forEach(function (k) { cfg[k] = opts[k]; });
+    var geo = {};
+    Object.keys(GEO).forEach(function (k) { geo[k] = GEO[k]; });
+    Object.keys(cfg.geo || {}).forEach(function (k) { geo[k] = cfg.geo[k]; });
+    cfg.geo = geo;
 
     if (!host) throw new Error('variableDag: no mount element');
-    if (!NS.formula) throw new Error('variableDag: engine/formula.js must be loaded first');
+    if (!NS.formula) throw new Error('engine/formula.js must be loaded first');
 
-    var model = build(trace);
+    var model = build(trace, {edgeMode: cfg.edgeMode, nodeLocation: cfg.nodeLocation});
     var idx = model.idx;
     var lastStep = idx.lastStep;
 
@@ -604,7 +1067,7 @@
          never rebuilds it -- it toggles classes -- so a node's identity is
          stable across a cursor move and nothing on screen flickers. */
       var aspect = targetAspect();
-      var L = computePositions(model, aspect);
+      var L = computePositions(model, aspect, null, cfg.geo);
       var key = Math.round(L.w) + 'x' + Math.round(L.h) + ':' + L.nBands +
                 ':' + model.nodes.length;
       if (key === sceneKey) { state.layout = L; return L; }
@@ -617,7 +1080,43 @@
       svg.dataset.vdH = String(L.h);
       svg.dataset.vdOrientation = L.vertical ? 'vertical' : 'horizontal';
       bindScene();
+      /* A layered drawing scaled down far enough stops being a drawing: at
+         ~0.35 the 13px node labels come out under 5px and the reader has a
+         texture, not a graph. Measured, not guessed -- L04's twelve-band graph
+         letterboxed into its panel lands there with the defaults. Below
+         `MIN_SCALE` the drawing is NOT shrunk further: it is rendered at the
+         minimum and the panel pans, which costs a scroll and keeps the labels
+         readable. Above it nothing changes, which is why L00 never sees this
+         path: its six-band graph never comes close. */
+      fitScale(L);
       return L;
+    }
+
+    function fitScale(L) {
+      var r = dagwrap.getBoundingClientRect();
+      if (!r.width || !r.height) return;
+      var s = Math.min(r.width / L.w, r.height / L.h);
+      if (s >= cfg.geo.MIN_SCALE) {
+        svg.style.width = '';
+        svg.style.height = '';
+        dagwrap.dataset.vdFit = 'contain';
+        return;
+      }
+      var w = L.w * cfg.geo.MIN_SCALE, h = L.h * cfg.geo.MIN_SCALE;
+      svg.style.width = w + 'px';
+      svg.style.height = h + 'px';
+      dagwrap.dataset.vdFit = 'pan';
+      /* The cursor's own node is what a reader is looking at, so a panned
+         drawing is scrolled to it rather than to the middle. */
+      var hot = stepSet(state.cursor);
+      var first = model.nodes.filter(function (n) { return hot[n]; })[0];
+      var box = first && L.pos[first];
+      if (box) {
+        var cx = (box.x + cfg.geo.NW / 2) * cfg.geo.MIN_SCALE;
+        var cy = (box.y + cfg.geo.NH / 2) * cfg.geo.MIN_SCALE;
+        dagwrap.scrollTop = Math.max(0, Math.min(h - r.height, cy - r.height / 2));
+        dagwrap.scrollLeft = Math.max(0, Math.min(w - r.width, cx - r.width / 2));
+      }
     }
 
     function stepSet(i) {
@@ -655,6 +1154,7 @@
         setClass(g.querySelector('.vd-box'), 'vd-box vd-box-' + st);
         setClass(g.querySelector('.vd-nl'), 'vd-nl vd-nl-' + st);
         setClass(g.querySelector('.vd-ns'), 'vd-ns vd-ns-' + st);
+        setClass(g.querySelector('.vd-nshape'), 'vd-nshape vd-nshape-' + st);
         g.classList.toggle('vd-n-pin', !!state.pinned[id]);
         g.setAttribute('aria-pressed', hot[id] ? 'true' : 'false');
       });
@@ -746,7 +1246,7 @@
         if (entry && entry.source === 'init') gridNames.push(n);
       });
       q('vals').innerHTML = gridNames.map(function (n) {
-        return valueGrid(n, model, snapshot);
+        return valueGrid(n, model, snapshot, {limits: cfg.valueLimits});
       }).join('');
       q('narr').textContent = step.narration;
       paintFormula(step);
@@ -868,7 +1368,12 @@
           cursor: i,
           snapshot: snapshot,
           before: i > 0 ? TM.resolve(idx, i - 1) : null,
-          model: model
+          model: model,
+          /* The panels L04's page mounts read `ctx.trace` (the engine player
+             hands them one); the view has it and handing it on costs nothing.
+             Without it a panel written for the player silently renders an
+             empty block here -- which is a failure mode with no error in it. */
+          trace: trace
         });
       }
     }
@@ -1003,12 +1508,20 @@
     mount: mount,
     build: build,
     lint: lint,
+    sabotageChecks: sabotageChecks,
+    SABOTAGE_CASES: SABOTAGE_CASES,
     computeLayers: computeLayers,
     computePositions: computePositions,
+    railPlan: railPlan,
     edgePath: edgePath,
+    directPath: directPath,
+    railPath: railPath,
     loopPath: loopPath,
     nodeRect: nodeRect,
+    shapeGlyph: shapeGlyph,
+    shapeText: shapeText,
     formatValue: formatValue,
-    GEO: { NW: NW, NH: NH, GAPX: GAPX, GAPY: GAPY, PAD: PAD, LOOP_W: LOOP_W, LOOP_GAP: LOOP_GAP }
+    VALUE_LIMITS: VALUE_LIMITS,
+    GEO: GEO
   };
 })(typeof window !== 'undefined' ? window : globalThis);

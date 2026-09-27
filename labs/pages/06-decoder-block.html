@@ -6,7 +6,7 @@
     <title>L04 · Decoder Block：残差 / LayerNorm / SwiGLU - AIInfraGuide</title>
     <meta
       name="description"
-      content="一个完整 Decoder Block 的逐步回放：残差相加为什么要求两侧 shape 完全相同（以及不匹配时会怎样，真的跑一遍）、LayerNorm 的 μ 和 σ 是在哪个轴上算的、SwiGLU 的 gate/up/down 三条路径与逐元素门控，以及 Pre-Norm 与 Post-Norm 在残差尺度与梯度回传上的实测差异。"
+      content="一个完整 Decoder Block 的逐步回放，图里画的是变量：18 个张量是节点、每一次计算是边。残差相加为什么要求两侧 shape 完全相同（以及不匹配时会怎样，真的跑一遍）、LayerNorm 的 μ 和 σ 是在哪个轴上算的、SwiGLU 的 gate/up/down 三条路径与逐元素门控，以及 Pre-Norm 与 Post-Norm 在残差尺度与梯度回传上的实测差异。"
     />
     <link rel="canonical" href="./06-decoder-block.html" />
     <link rel="stylesheet" href="./assets/vendor/katex/katex.min.css" />
@@ -16,34 +16,64 @@
     <link rel="stylesheet" href="./assets/engine/views/norm-axis.css" />
     <link rel="stylesheet" href="./assets/engine/views/swiglu-paths.css" />
     <link rel="stylesheet" href="./assets/engine/views/norm-contrast.css" />
+    <link rel="stylesheet" href="./assets/engine/views/variable-dag.css" />
     <style>
       :root { color-scheme: light dark; }
+      /* The page is one screen and does not scroll, for the same reason L00's
+         is: whatever step the cursor is on -- its graph, its formula, its
+         values -- has to fit without scrolling, or stepping through the block
+         means scrolling after every step. L04 has MORE to teach than L00 (two
+         LayerNorms, two residual adds, five SwiGLU steps, a Pre/Post contrast
+         and a parameter account), so "one screen" here is bought the only way
+         it can be: the per-step content is the graph plus the formula, and
+         everything that is not per-step -- the reference numbers, the four
+         teaching panels, the ledger, the self-checks and the provenance note --
+         is folded into one <details> that scrolls internally when opened.
+         Nothing is removed; it is one click away instead of below the fold. */
+      html, body { height: 100%; }
       body {
         margin: 0;
-        padding: 20px 22px 56px;
+        padding: 10px 14px 10px;
+        box-sizing: border-box;   /* or the padding adds to 100dvh and the page scrolls by exactly it */
         background: #f9fafb;
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
           'Helvetica Neue', 'Noto Sans CJK SC', sans-serif;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        height: 100dvh;
+        overflow: hidden;
       }
-      @media (prefers-color-scheme: dark) { body { background: #0b1120; } }
-      .lab-back { display: inline-block; margin-bottom: 14px; color: #007aff; font-size: 13.5px; text-decoration: none; }
+      @media (prefers-color-scheme: dark) {
+        body { background: #0b1120; }
+      }
+      .lab-root { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+      #lab-stage { flex: 1 1 auto; min-height: 0; }
+      /* `height: 100%` needs a parent with a definite height at every level.
+         The host div exists only because the view is mounted into a fresh
+         element on each config change; without a height here the percentage
+         resolves against `auto` and the view falls back to its own content
+         height, which is what puts the control bar below the fold. */
+      #lab-stage > .vd-host { height: 100%; }
+      #lab-stage .vd-root { height: 100%; }
+      .lab-back { color: #007aff; font-size: 13px; text-decoration: none; flex: 0 0 auto; }
       .lab-provenance {
-        margin-top: 22px;
-        padding-top: 14px;
+        margin-top: 10px;
+        padding-top: 10px;
         border-top: 1px solid rgba(128, 128, 128, 0.25);
         color: #6b7280;
         font-size: 12px;
         line-height: 1.6;
       }
-      @media (prefers-color-scheme: dark) { .lab-provenance { color: #9ca3af; } }
       .lab-provenance code {
         background: rgba(128, 128, 128, 0.14);
         border-radius: 4px;
         padding: 1px 5px;
         font: 0.92em/1 ui-monospace, SFMono-Regular, Menlo, monospace;
       }
+      @media (prefers-color-scheme: dark) { .lab-provenance { color: #9ca3af; } }
       .lab-banner {
-        margin: 0 0 14px;
+        margin: 0 0 8px;
         padding: 8px 12px;
         border: 1px solid rgba(0, 122, 255, 0.35);
         border-radius: 8px;
@@ -54,31 +84,29 @@
       @media (prefers-color-scheme: dark) { .lab-banner { color: #e5e7eb; } }
       .lab-banner[hidden] { display: none; }
 
-      /* ---------------------------------------------------- the source figures
-       *
-       * The two images the tutorial already has are reused rather than redrawn
-       * (R01 classified both as 可直接复用). They are `public/` assets, so they
-       * are referenced by SITE-ROOT path, not by the `./assets/` rule that
-       * applies inside `labs/`: `scripts/build-labs.mjs` stages pages to
-       * `public/labs/`, and `public/images/` is a sibling of that directory —
-       * exactly the case where the relative-path rule does not apply. The path
-       * is written with the site's `base` because Astro serves this site under
-       * `/AIInfraGuide/`.
-       */
-      .l04-figs { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; margin: 0 0 14px; }
-      .l04-fig {
-        margin: 0;
-        padding: 10px 12px 12px;
-        border: 1px solid rgba(128, 128, 128, 0.22);
-        border-radius: 10px;
-        background: rgba(255, 255, 255, 0.6);
+      /* The reference panels and the provenance note, folded away so the page
+         is exactly one screen. Open, this section scrolls on its own rather
+         than growing the page -- which is what makes "fold it away" different
+         from "move it below the fold". */
+      .lab-more { flex: 0 0 auto; }
+      .lab-more > summary {
+        cursor: pointer;
+        color: #007aff;
+        font-size: 12.5px;
+        padding: 2px 0;
+        list-style: none;
       }
-      @media (prefers-color-scheme: dark) { .l04-fig { background: rgba(255, 255, 255, 0.04); } }
-      .l04-fig img { display: block; width: 100%; height: auto; border-radius: 6px; }
-      .l04-fig figcaption { margin-top: 8px; font-size: 11.5px; line-height: 1.6; color: #6b7280; }
-      @media (prefers-color-scheme: dark) { .l04-fig figcaption { color: #9ca3af; } }
-      .l04-fig b { color: #1f2937; }
-      @media (prefers-color-scheme: dark) { .l04-fig b { color: #e5e7eb; } }
+      .lab-more > summary::-webkit-details-marker { display: none; }
+      .lab-more > summary::before { content: '▸ '; }
+      .lab-more[open] > summary::before { content: '▾ '; }
+      .lab-more[open] .lab-more-bd {
+        max-height: 66vh;
+        overflow: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        padding-top: 8px;
+      }
 
       /* --------------------------------------------------------- the param bar
        *
@@ -87,8 +115,8 @@
        * properties so the bar follows the theme without a second palette.
        */
       .l04-params {
-        margin: 0 0 12px;
-        padding: 10px 14px;
+        margin: 0;
+        padding: 8px 12px;
         border: 1px solid var(--lab-line, #e3e6ec);
         border-radius: 12px;
         background: var(--lab-panel, #fff);
@@ -99,6 +127,11 @@
       .l04-param { display: flex; align-items: center; gap: 8px; }
       .l04-param-label { font: 600 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--lab-dim, #6b7280); }
       .l04-param-name { color: var(--lab-accent-2, #b45309); }
+      /* The long explanation is the desktop's; the phone gets the short form.
+         Both are in the DOM and CSS picks one, because the alternative --
+         swapping the text from script on a resize -- is a second source of
+         truth for a string. */
+      .l04-param-short { display: none; }
       .l04-param input[type="range"] { width: 96px; accent-color: var(--lab-accent, #007aff); cursor: pointer; }
       .l04-param-val {
         font: 650 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -119,16 +152,14 @@
 
       /* ----------------------------------------------------------- the readout
        *
-       * Outside the player's mount: the player replaces a panel's innerHTML on
-       * every paint, so anything injected into a panel body is wiped by the
-       * next frame. These are per-configuration values, so they belong beside
-       * the sliders.
+       * The numbers the ticket's criteria are about, folded with the panels.
+       * They live in the DOM whether or not the <details> is open, so the
+       * harness reads them the same way a reader does: by opening the section.
        */
       .l04-readout {
         display: flex;
         flex-wrap: wrap;
-        gap: 26px;
-        margin: 0 0 12px;
+        gap: 22px;
         padding: 10px 14px;
         border: 1px solid var(--lab-line, #e3e6ec);
         border-radius: 12px;
@@ -154,13 +185,37 @@
       .l04-metric.flat b { color: var(--lab-faint, #9ca3af); }
       .l04-metric.warn b { color: var(--lab-accent-2, #b45309); }
 
-      /* The four teaching panels lead, above the engine's own two-column block,
-       * in the order the block's data flow runs. */
+      /* The four teaching panels lead, above the engine's own blocks, in the
+       * order the block's data flow runs. */
       .lab-sg-panel, .lab-na-panel, .lab-sw-panel, .lab-nc-panel, .lab-p-lpanel {
-        margin-bottom: 14px;
+        margin-bottom: 0;
       }
       .lab-l04-caption { padding: 0 12px 10px; color: var(--lab-dim, #6b7280); font-size: 12px; line-height: 1.6; }
       .lab-l04-caption b { color: var(--lab-fg, #1f2937); }
+
+      @media (max-width: 720px) {
+        body { padding: 6px 8px 6px; gap: 6px; }
+        .lab-back { font-size: 12px; }
+        .l04-params { padding: 6px 8px; }
+        .l04-params-row {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 6px;
+          align-items: center;
+        }
+        .l04-param { gap: 3px; min-width: 0; flex-wrap: nowrap; }
+        .l04-param-label { font-size: 10px; white-space: nowrap; }
+        .l04-param-long { display: none; }
+        .l04-param-short { display: inline; }
+        .l04-param input[type="range"] {
+          flex: 1 1 24px;
+          width: auto;
+          min-width: 0;
+          margin: 0;
+        }
+        .l04-param-val { font-size: 10.5px; min-width: 20px; flex: 0 0 auto; }
+        .l04-param-hint { display: none; }
+      }
     </style>
   </head>
   <!--
@@ -174,83 +229,112 @@
         public/labs/*.html, so this page lands beside assets/ and must use
         ./assets/… — a ../ would 404 the whole engine.
 
-    The two figures at the top are the exception, and they are why that rule is
-    stated as "assets" rather than "everything": they are `public/` images, not
-    lab assets. They are still written RELATIVE — `../images/…` — because
-    `public/labs/` and `public/images/` are siblings in both the staged tree and
-    `dist/`, so `../images/…` resolves to the same file in both. A site-root path
-    (`/AIInfraGuide/images/…`) would be correct in the browser and wrong at build
-    time: `scripts/build-labs.mjs` resolves every non-external href/src against
-    the filesystem, so a leading slash is read as an absolute path and fails the
-    build with "references assets that do not exist after staging".
-
-    The page holds a trace SET and a configuration. Every algorithmic decision —
-    state reconstruction, layout, formula tiers, playback — lives in the engine;
-    the four teaching panels are view components under assets/engine/views/, and
-    the parameter account is drawn by the ledger component L05 shipped.
+    The page holds a trace SET and a configuration, and it draws the block with
+    `views/variable-dag.js` rather than the engine's step DAG: nodes are
+    VARIABLES (the 18 tensors), edges are COMPUTATIONS, and one step's graph
+    plus its formula fits one screen. Every algorithmic decision — state
+    reconstruction, layout, formula tiers, playback — still lives in the engine;
+    the four teaching panels are view components under assets/engine/views/ and
+    the parameter account is drawn by the ledger component L05 shipped. The page
+    mounts the view directly rather than through `player.js`, so it keeps the
+    player's panel-render contract by hand: same `(step, ctx)` signature, same
+    ctx field names, so a panel written for the player runs here unchanged.
   -->
   <body data-pagefind-ignore>
     <a class="lab-back" href="./">← 全部实验室</a>
     <p class="lab-banner" id="lab-banner" hidden></p>
 
-    <!--
-      The two figures the tutorial already has. Both were classified 可直接复用
-      by the R01 asset inventory (`docs/research/asset-inventory.md`), and they
-      say between them what the first paragraph would otherwise have to: the
-      macro stack, and the inside of one block with the step-by-step formulas
-      already written on it. They are here as the entrance, not as the lesson —
-      the lesson is the replay below, which is why nothing below depends on them.
-    -->
-    <div class="l04-figs">
-      <figure class="l04-fig">
-        <img src="../images/decoder-blocks.png"
-             alt="Decoder-only 模型的宏观结构：Token Embedding 与 RoPE 之后是 32 层 Decoder Block，最后接 LayerNorm、LM Head 与 Softmax" />
-        <figcaption>
-          <b>宏观：</b>Token Embedding + RoPE → Decoder Block × 32 → LayerNorm → LM Head →
-          Softmax。整条链路里被重复 32 次的就是下面这个 block ——
-          它之所以能堆 32 次，是因为输入和输出形状完全相同。
-        </figcaption>
-      </figure>
-      <figure class="l04-fig">
-        <img src="../images/decode-only.png"
-             alt="Decoder-only block 内部：LayerNorm → Masked Self-Attention → 残差 → LayerNorm → FFN → 残差，且两个子层框内分别写了逐步公式" />
-        <figcaption>
-          <b>微观（Pre-Norm 版）：</b>虚线框内 <code>LayerNorm → Masked Self-Attention → + → LayerNorm → FFN → +</code>，
-          且 MHA 与 FFN 两框里已经写了逐步公式。本页回放的就是它，
-          只是把每一步的<b>真实数值、形状和统计量</b>摊开。
-        </figcaption>
-      </figure>
+    <div class="lab-root" id="lab-root">
+      <div id="lab-params"></div>
+      <div id="lab-stage"></div>
+
+      <!-- Inside .lab-root, not after it: the panel styles in lab.css read the
+           palette custom properties, and those are defined on .lab-root. A
+           panel mounted outside it comes out unthemed. -->
+      <details class="lab-more" id="lab-more">
+      <summary>参考面板 · 残差 shape / LayerNorm 轴 / SwiGLU 路径 / Pre-Post 对照 / 参数量账本 / 自检</summary>
+      <div class="lab-more-bd">
+        <div id="lab-readout"></div>
+
+        <section class="lab-panel lab-panel-extra lab-sg-panel" data-panel="shape-guard">
+          <div class="lab-panel-hd">
+            <span class="lab-panel-t">残差相加：两侧 shape 与它不匹配时会怎样</span>
+            <span class="lab-panel-sub">契约 lint + 对照组</span>
+          </div>
+          <div class="lab-panel-bd" data-panel-body="shape-guard"></div>
+        </section>
+
+        <section class="lab-panel lab-panel-extra lab-na-panel" data-panel="norm-axis">
+          <div class="lab-panel-hd">
+            <span class="lab-panel-t">LayerNorm：μ、σ 在哪一维上</span>
+            <span class="lab-panel-sub">契约 lint + 对照组</span>
+          </div>
+          <div class="lab-panel-bd" data-panel-body="norm-axis"></div>
+        </section>
+
+        <section class="lab-panel lab-panel-extra lab-sw-panel" data-panel="swiglu-paths">
+          <div class="lab-panel-hd">
+            <span class="lab-panel-t">SwiGLU：三条路径与逐元素门控，维度全程标注</span>
+            <span class="lab-panel-sub">契约 lint + 对照组</span>
+          </div>
+          <div class="lab-panel-bd" data-panel-body="swiglu-paths"></div>
+        </section>
+
+        <section class="lab-panel lab-panel-extra lab-nc-panel" data-panel="norm-contrast">
+          <div class="lab-panel-hd">
+            <span class="lab-panel-t">Pre-Norm vs Post-Norm：残差尺度与梯度回传</span>
+            <span class="lab-panel-sub">契约 lint + 对照组</span>
+          </div>
+          <div class="lab-panel-bd" data-panel-body="norm-contrast"></div>
+        </section>
+
+        <section class="lab-panel lab-panel-extra lab-p-lpanel" data-panel="params">
+          <div class="lab-panel-hd">
+            <span class="lab-panel-t">本 block 的参数量与 fp16 显存（账本组件）</span>
+            <span class="lab-panel-sub">渲染复用 L05 的 ledger 组件</span>
+          </div>
+          <div class="lab-panel-bd" data-panel-body="params"></div>
+        </section>
+
+        <section class="lab-panel lab-panel-extra" data-panel="selfcheck">
+          <div class="lab-panel-hd">
+            <span class="lab-panel-t">自检 · 引擎正确性</span>
+            <span class="lab-panel-sub">在浏览器里真跑，不是预期值</span>
+          </div>
+          <div class="lab-panel-bd" data-panel-body="selfcheck"></div>
+        </section>
+
+        <section class="lab-panel lab-panel-extra" data-panel="slotvars">
+          <div class="lab-panel-hd">
+            <span class="lab-panel-t">自检 · 变量图的 slot → 张量映射</span>
+            <span class="lab-panel-sub">契约 lint + 对照组</span>
+          </div>
+          <div class="lab-panel-bd" data-panel-body="slotvars"></div>
+        </section>
+
+        <p class="lab-provenance" id="lab-provenance"></p>
+      </div>
+      </details>
     </div>
-
-    <div id="lab-params"></div>
-    <div id="lab-readout"></div>
-    <div id="lab-stage"></div>
-
-    <p class="lab-provenance" id="lab-provenance"></p>
 
     <!-- KaTeX is vendored, never a CDN: a lab page must make zero external requests. -->
     <script src="./assets/vendor/katex/katex.min.js"></script>
     <script src="./assets/engine/trace-model.js"></script>
-    <script src="./assets/engine/layout.js"></script>
     <script src="./assets/engine/formula.js"></script>
-    <script src="./assets/engine/dag.js"></script>
-    <script src="./assets/engine/tensors.js"></script>
-    <script src="./assets/engine/narrow.js"></script>
     <script src="./assets/engine/views/ledger.js"></script>
     <script src="./assets/engine/views/shape-guard.js"></script>
     <script src="./assets/engine/views/norm-axis.js"></script>
     <script src="./assets/engine/views/swiglu-paths.js"></script>
     <script src="./assets/engine/views/norm-contrast.js"></script>
-    <script src="./assets/engine/player.js"></script>
+    <script src="./assets/engine/views/variable-dag.js"></script>
     <script src="./assets/engine/verify.js"></script>
 
     <!--
       The whole trace set — the manifest plus every configuration it names — is
       substituted here at build time (see the trace-set step in
-      scripts/build-labs.mjs). The manifest is written by the generator, so the
-      sliders' positions and the traces behind them are defined in one place and
-      cannot drift apart: a configuration with no trace is unreachable by
-      construction.
+      scripts/build-labs.mjs). Inlining rather than fetching is what makes "the
+      lab page is data plus config" literally true: the page cannot disagree
+      with the JSON it was built from, because there is no second copy.
     -->
     <!-- traces:decoder-block -->
 
@@ -283,7 +367,8 @@
          */
         function num(v, digits) {
           if (v === null || v === undefined) return '—';
-          if (typeof v !== 'number') return String(v);
+          if (typeof v !== 'string' && typeof v !== 'number') return String(v);
+          if (typeof v === 'string') return v;
           var s = v.toPrecision(digits || 4);
           return s.replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
         }
@@ -327,9 +412,9 @@
 
         /* ------------------------------------------------------------ readout
          *
-         * The five numbers the ticket's criteria are about, printed beside the
-         * sliders so the sliders' effect is readable without scrolling into the
-         * panels.
+         * The five numbers the ticket's criteria are about, printed in the
+         * folded reference section so the sliders' effect is readable without
+         * scrolling into the panels.
          *
          * `data-metric` on each item is the acceptance harness's handle: it
          * reads these back off the DOM and compares them to the trace, so a page
@@ -454,7 +539,7 @@
         }
 
         /* ------------------------------------------------------ the panels */
-        var player = null;
+        var view = null;
         var ledgerView = null;
         var current = null;
 
@@ -694,224 +779,218 @@
 
         function mount(name) {
           var trace = traces[name];
+          var idx = LabEngine.traceModel.index(trace);
           current = name;
           ledgerView = null;
-          if (player) { try { player.destroy(); } catch (e) { /* already gone */ } }
+          if (view) { try { view.destroy(); } catch (e) { /* already gone */ } }
           stage.innerHTML = '';
 
           var cfg = trace.meta.config;
           var model = PARAM_MODEL(PARAM_SEGMENTS, 'B', trace.meta.params.deploy_bytes);
 
-          /* --- the replay's parameter account.
+          /* --- the four teaching panels + the ledger, built once.
            *
-           * Mounted BESIDE the engine's panel body, not into it: the engine
-           * assigns `host.innerHTML = render(...)` on every paint, which would
-           * detach a live view. `[data-panel="params"]` is the section the
-           * engine created and never touches again, so appending a sibling body
-           * survives repaints. (Same arrangement L05's ledger uses.)
+           * These are the panels the engine's player would have rendered, in
+           * the same boxes, driven here by the variable-DAG view's step
+           * callback instead — the view owns the cursor on this page, so it is
+           * the view's callback that has to repaint them. What is passed to
+           * each `render` is the TRACE's own step, not the view's model step:
+           * the model step carries the fields the graph needs (reads, writes,
+           * bindings, state) and deliberately not the lab's own blocks (`ln`,
+           * `residual`, `swiglu`, `params`), which are what these panels read.
+           * The `ctx` is the shape `player.js` hands a panel, field for field.
            */
-          var paramPanel = {
-            id: 'params',
-            label: '本 block 的参数量与 fp16 显存（账本组件）',
-            render: function (step, ctx) {
-              if (!ledgerView) {
-                var section = document.querySelector('[data-panel="params"]');
-                var host = document.createElement('div');
-                host.className = 'lab-panel-bd';
-                host.setAttribute('data-l04-ledger-mount', '1');
-                section.appendChild(host);
-                ledgerView = LabEngine.ledger.bar(host, {
-                  segments: PARAM_SEGMENTS,
-                  unit: 'B',
-                  caption: function () {
-                    var p = trace.meta.params;
-                    return '第 ' + ctx.cursor + ' 步 · ' + esc(step.title) +
-                      ' —— 整个 block 的参数量不随步骤变化，所以这条账本在每一帧都一样：' +
-                      '<b>' + p.elements.toLocaleString('en-US') + '</b> 个参数，' +
-                      '按 fp16（每参数 ' + p.deploy_bytes + ' 字节）计价为 <b>' +
-                      p.priced_total.toLocaleString('en-US') + ' B</b> = ' +
-                      p.segments.map(function (s) {
-                        return esc(s.label) + ' ' +
-                          p.priced[s.id].toLocaleString('en-US') + ' B';
-                      }).join(' + ') + '。每个数字都数了两遍：一遍从真实权重的 ' +
-                      '<code>arr.size</code>，一遍用 ' + tex(p.formula) + '。' +
-                      '滑杆一动，这条账本就地重算。';
-                  }
-                });
-              }
-              /* The numbers come from the trace, not the model: this is the
-               * replay. The model's job is to be checked against them, which is
-               * what the self-check panel below does. The trace's own `priced`
-               * is what the bar draws — the model's prediction is compared
-               * against it rather than shown in its place. */
-              ledgerView.update(step.params.priced);
-              ledgerView.root.setAttribute('data-step-id', step.id);
-              return '';
-            }
+          var panels = {
+            sg: LabEngine.shapeGuard.panel({ id: 'shape-guard' }),
+            na: LabEngine.normAxis.panel({ id: 'norm-axis' }),
+            sw: LabEngine.swigluPaths.panel({ id: 'swiglu-paths' }),
+            nc: LabEngine.normContrast.panel({ id: 'norm-contrast' }, { trace: trace })
           };
-
-          var resPanel = LabEngine.shapeGuard.panel({ id: 'shape-guard' });
-          var lnPanel = LabEngine.normAxis.panel({ id: 'norm-axis' });
-          var swPanel = LabEngine.swigluPaths.panel({ id: 'swiglu-paths' });
-          var ncPanel = LabEngine.normContrast.panel({ id: 'norm-contrast' }, { trace: trace });
-
-          player = LabEngine.lab(trace, {
-            mount: stage,
-            title: 'Decoder Block：残差 / LayerNorm / SwiGLU',
-            lead: '一个完整的 Pre-Norm block，14 步走完：' +
-              'x → LN → MHA → +x → LN → SwiGLU → +x。' +
-              'd_model=' + cfg.d_model + '，d_ff=' + cfg.d_ff + '，' + cfg.H +
-              ' 头 × d_h=' + cfg.d_head + '，N=' + cfg.N + '。' +
-              '四个面板分别把这一票的四件事摊开：残差两侧的 shape 与不匹配的后果、' +
-              'LayerNorm 的 μ/σ 在哪个轴上、SwiGLU 的三条路径、Pre/Post-Norm 的尺度对照。',
-            tier: 'num',
-            speed: 1100,
-            panels: [resPanel, lnPanel, swPanel, ncPanel, paramPanel],
-            tutorial: {
-              href: '/AIInfraGuide/prerequisites/transformer/37-transformer-decoder-block完整解析',
-              label: '返回教程正文：3.7 Transformer Decoder Block 完整解析'
-            }
-          });
-
-          /* The teaching panels lead, above the engine's own two-column block,
-           * in the order the block's data flow runs. */
-          ['shape-guard', 'norm-axis', 'swiglu-paths', 'norm-contrast', 'params']
+          var panelHosts = {};
+          ['shape-guard', 'norm-axis', 'swiglu-paths', 'norm-contrast']
             .forEach(function (pid) {
-              var el = document.querySelector('[data-panel="' + pid + '"]');
-              if (!el) return;
-              var cls = { 'shape-guard': 'sg', 'norm-axis': 'na', 'swiglu-paths': 'sw',
-                          'norm-contrast': 'nc', 'params': 'p' }[pid];
-              el.classList.add('lab-' + cls + '-panel');
-              document.querySelector('.lab-panel-dag').before(el);
+              panelHosts[pid] = document.querySelector('[data-panel-body="' + pid + '"]');
             });
+          var paramHost = document.querySelector('[data-panel-body="params"]');
 
-          /* Compact proof panel for the engine's own contracts. It carries the
-           * control group, so a green verdict here means something -- see
-           * labs/assets/engine/verify.js. */
-          var proof = document.createElement('section');
-          proof.className = 'lab-panel lab-panel-extra';
-          proof.innerHTML = '<div class="lab-panel-hd">' +
-            '<span class="lab-panel-t">自检 · 引擎正确性</span>' +
-            '<span class="lab-panel-sub">在浏览器里真跑，不是预期值</span></div>' +
-            '<div class="lab-panel-bd" style="padding:10px 12px"></div>';
-          stage.appendChild(proof);
-          LabEngine.verify.panel(proof.querySelector('.lab-panel-bd'), trace, player.index);
+          function renderPanels(i, step, ctx) {
+            /* The raw step, so the panels see `ln` / `residual` / `swiglu`. */
+            var raw = trace.steps[i];
+            var pctx = { cursor: i, step: raw, snapshot: ctx.snapshot, trace: trace };
+            panelHosts['shape-guard'].innerHTML = panels.sg.render(raw, pctx);
+            panelHosts['norm-axis'].innerHTML = panels.na.render(raw, pctx);
+            panelHosts['swiglu-paths'].innerHTML = panels.sw.render(raw, pctx);
+            panelHosts['norm-contrast'].innerHTML = panels.nc.render(raw, pctx);
 
-          /* --- the L04 self-checks.
-           *
-           * FIVE of them, because this lab introduced five contract blocks and
-           * each is governed by rules in a different file: step.residual
-           * (views/shape-guard.js), step.ln (views/norm-axis.js), step.swiglu
-           * (views/swiglu-paths.js), meta.norm_contrast
-           * (views/norm-contrast.js) and meta.params.
-           *
-           * The accounting's verdict is `paramSelfCheck` below rather than
-           * `LabEngine.ledger.check()`, for the two reasons its docstring
-           * records — `check()` reads `step.ledger`, which this trace does not
-           * have, so it would report "0 步不一致" over ZERO steps and miss every
-           * one of its L05-shaped control models. The panel says so in as many
-           * words rather than presenting a vacuous green.
-           *
-           * The verdicts are collected on `window.__labViewChecks` so
-           * scripts/verify-l04.py can read the same objects the page computed
-           * rather than re-deriving them. */
-          var checks = {};
-          function checkSection(title, sub, html, key, value) {
-            var sec = document.createElement('section');
-            sec.className = 'lab-panel lab-panel-extra';
-            sec.innerHTML = '<div class="lab-panel-hd"><span class="lab-panel-t">自检 · ' +
-              esc(title) + '</span><span class="lab-panel-sub">' + esc(sub) + '</span></div>' +
-              '<div class="lab-panel-bd" style="padding:10px 12px"></div>';
-            stage.appendChild(sec);
-            sec.querySelector('.lab-panel-bd').innerHTML = html;
-            checks[key] = value;
+            /* The ledger is the one view with DOM state (hover highlight,
+               width transitions), so it is appended beside the engine's panel
+               body rather than into it — `innerHTML` on every paint would
+               detach a live view. Same arrangement L05 and the player use. */
+            if (!ledgerView) {
+              var host = document.createElement('div');
+              host.className = 'lab-panel-bd';
+              host.setAttribute('data-l04-ledger-mount', '1');
+              paramHost.appendChild(host);
+              ledgerView = LabEngine.ledger.bar(host, {
+                segments: PARAM_SEGMENTS,
+                unit: 'B',
+                caption: function () {
+                  var p = trace.meta.params;
+                  return '第 ' + (i + 1) + ' 步 · ' + esc(raw.title) +
+                    ' —— 整个 block 的参数量不随步骤变化，所以这条账本在每一帧都一样：' +
+                    '<b>' + p.elements.toLocaleString('en-US') + '</b> 个参数，' +
+                    '按 fp16（每参数 ' + p.deploy_bytes + ' 字节）计价为 <b>' +
+                    p.priced_total.toLocaleString('en-US') + ' B</b> = ' +
+                    p.segments.map(function (s) {
+                      return esc(s.label) + ' ' +
+                        p.priced[s.id].toLocaleString('en-US') + ' B';
+                    }).join(' + ') + '。每个数字都数了两遍：一遍从真实权重的 ' +
+                    '<code>arr.size</code>，一遍用 ' + tex(p.formula) + '。' +
+                    '滑杆一动，这条账本就地重算。';
+                }
+              });
+            }
+            ledgerView.update(raw.params.priced);
+            ledgerView.root.setAttribute('data-step-id', raw.id);
+            void step;
           }
 
-          var led = paramSelfCheck(trace, model);
-          checkSection('参数量账本（渲染复用 L05 的 ledger 组件）',
-            '逐帧对拍 + 缩放性质 + 对照组',
-            '<div class="lab-verdict ' + (led.passed ? 'lab-ok' : 'lab-bad') + '">' +
-            '<b>逐步对拍：</b>' + led.steps.length + ' 步，' +
-            (led.stepFailures === 0
-              ? '<b>0 步不一致</b>（每一帧的三个分项都由 4d²+3dd_ff+4d 从该帧 config 重算' +
-                '再按 fp16 计价，与 trace 里从真实权重 <code>arr.size</code> 数出来的字节数' +
-                '逐位相同）。'
-              : '<b>' + led.stepFailures + ' 步不一致</b>。') +
-            '<br><b>缩放性质：</b>' + (led.propertyFailures === 0
-              ? led.properties.length + ' 条全部成立 —— 这些是公式的性质，不是某一次求值的结果。'
-              : '<b>' + led.propertyFailures + ' 条不成立</b>。') +
-            '<br><b>对照组（故意写错的模型）：</b>' + led.controls.length + ' 种，' +
-            (led.missedControls.length === 0
-              ? '全部被抓到 —— 所以上面的 0 不是对拍写错。'
-              : '<b>漏掉 ' + led.missedControls.length + ' 种，这组对拍没有区分力。</b>') +
-            '</div>' +
-            '<div class="lab-verdict lab-ok" style="margin-top:6px">' +
-            '<b>渲染来自组件，公式来自本页：</b>这个面板的堆叠条、字节格式化、表格与悬停' +
-            '都由 <code>views/ledger.js</code>（ticket #45）提供，本页没有重写其中任何一个。' +
-            '本页提供的是成本模型 <code>predict(config)</code> 与缩放性质。' +
-            '<br><b>为什么不用 <code>ledger.check()</code> 的判决：</b>' +
-            '它按 <code>step.ledger</code> 找步骤，而 L04 的账本挂在 <code>step.params</code> 上 ' +
-            '（<code>trace.ledger</code> 的 lint 要求 L05 的 KV 配置键，' +
-            'L04 没有 KV Cache，满足它就得发布一个什么都不指代的行数）。' +
-            '所以它对这份 trace 会看到 <b>0 个步骤</b>、报一句空洞的「0 步不一致」，' +
-            '而它的四个对照模型全是 KV Cache 的错法，一个都不是参数量的错法。' +
-            '上面的三项检查因此是对<b>本页的账本</b>重跑的同一套形状，' +
-            '四项破坏也都是参数量的错法 —— 一个绿结论只有在对照组确实翻车时才算数。' +
-            '</div>', 'params',
-            { stepFailures: led.stepFailures, propertyFailures: led.propertyFailures,
-              controls: led.controls.length, missedControls: led.missedControls.map(
-                function (c) { return c.label; }),
-              steps: led.steps.length, passed: led.passed });
+          view = LabEngine.variableDag.mount(stage, trace, {
+            title: 'Decoder Block · 变量图',
+            tier: 'num',
+            param: 'step',
+            /* L04's steps are multi-operand computations, not single carried
+               updates: `x.qkv` reads h1 three ways and writes three tensors,
+               `x.res1` adds two tensors into one. The carried rule would draw
+               one edge per step and drop the rest — including `x → y1`, the
+               residual connection, which is this lab's subject. See the
+               `edgeMode` note in views/variable-dag.js. */
+            edgeMode: 'operands',
+            /* Twelve layers deep and three nodes wide, against a panel that is
+               roughly square: the defaults were measured against L00's
+               six-node graph and letterbox a twelve-band one down to a ~4px
+               label. The budget below is what makes the drawing legible at the
+               size the panel actually is; the numbers are a measurement, and
+               the harness asserts the resulting label size. */
+            geo: { NW: 112, NH: 44, GAPX: 100, GAPY: 32, PAD: 22,
+                   RAIL_GAP: 18, RAIL_PAD: 34, MIN_SCALE: 0.66 },
+            /* Node labels here are tensor names on a shape, and the second line
+               is the tensor's shape. `tensors[].at` for this lab is a sentence
+               ("多头注意力的 Q"), which does not fit a 112px box; the sidebar's
+               read/write chips carry the shape and the value grid carries the
+               values, so the graph line stays name + shape. */
+            nodeLocation: false,
+            /* `[8,176]` is 1408 cells and `[4,8,8]` is 256; both are printed
+               capped with the elision count shown, so one step's values still
+               fit the sidebar. The cap is what makes a step with THREE written
+               tensors (`x.qkv`, `x.attn`) fit at all -- and the true shape is
+               always in the header, so the reader knows what is elided. The
+               numbers were chosen by measuring the sidebar at 1600×1000, the
+               panel's own proportions, not by taste. */
+            valueLimits: { maxRows: 5, maxCols: 6, maxSlices: 2 },
+            onStep: renderPanels
+          });
 
-          /* The four pure-lint views. Their verdicts are the same shape, so the
-           * harness reads all of them the same way and the panel renders them
-           * the same way. */
+          /* The slot → tensor map's own lint, with its control group. It is
+             this view's contract, so its verdict is reported in the view's
+             terms: the same {gaps, warns, infos} + sabotage shape the four
+             teaching views use, read back by the harness off
+             `window.__labViewChecks`. */
+          var svLint = LabEngine.variableDag.lint(trace);
+          var svSab = LabEngine.variableDag.sabotageChecks(trace);
+
+          /* Compact proof panel for the engine's own contracts. It carries the
+             control group, so a green verdict here means something -- see
+             labs/assets/engine/verify.js. */
+          LabEngine.verify.panel(
+            document.querySelector('[data-panel-body="selfcheck"]'), trace, view.index);
+
+          /* The parameter account's own check, reported under `params` the way
+             it was before this page mounted the variable-DAG view. Its verdict
+             is `paramSelfCheck`'s rather than `LabEngine.ledger.check()`'s, for
+             the two reasons that function's docstring records. */
+          var led = paramSelfCheck(trace, model);
+
+          /* The four teaching views' own lints, reported the way they were
+             before: each panel's verdict is `{gaps, warns, infos}` plus its
+             sabotage table, all computed in the browser. */
+          var checks = { params: {
+            stepFailures: led.stepFailures, propertyFailures: led.propertyFailures,
+            controls: led.controls.length,
+            missedControls: led.missedControls.map(function (c) { return c.label; }),
+            steps: led.steps.length, passed: led.passed
+          }, slotVars: {
+            lintGaps: svLint.gaps.length, lintWarns: svLint.warns.length,
+            sabotageTotal: svSab.total, sabotageMissed: svSab.missed,
+            sabotageSkipped: svSab.skipped, sabotageNoop: svSab.noop,
+            present: true,
+            infos: svLint.infos,
+            passed: svLint.gaps.length === 0 && svSab.missed.length === 0 &&
+                    svSab.noop.length === 0
+          } };
+
           [['残差相加的 shape 契约', '契约 lint + 对照组', LabEngine.shapeGuard, 'shapeGuard'],
            ['LayerNorm 轴的契约', '契约 lint + 对照组', LabEngine.normAxis, 'normAxis'],
            ['SwiGLU 路径的契约', '契约 lint + 对照组', LabEngine.swigluPaths, 'swigluPaths'],
            ['Pre/Post-Norm 对照的契约', '契约 lint + 对照组', LabEngine.normContrast,
             'normContrast']].forEach(function (entry) {
-            var title = entry[0], sub = entry[1], view = entry[2], key = entry[3];
-            var r = view.lint(trace);
-            var missed = view.sabotageChecks(trace);
-            var total = Object.keys(view.SABOTAGE_CASES).length;
-            var verdict = { lintGaps: r.gaps.length, lintWarns: r.warns.length,
-                            sabotageTotal: total, sabotageMissed: missed,
-                            present: r.present !== false,
-                            infos: (r.infos || []).map(function (x) { return x.what; }),
-                            passed: r.gaps.length === 0 && missed.length === 0 };
-            checkSection(title, sub,
-              '<div class="lab-verdict ' + (verdict.passed ? 'lab-ok' : 'lab-bad') + '">' +
-              '<b>契约 lint：</b>干净的 trace 报 <b>' + r.gaps.length + '</b> 个 gap、' +
-              r.warns.length + ' 个 warn；对照组 ' + total + ' 种破坏' +
-              (missed.length
-                ? '，<b>漏掉 ' + missed.length + ' 种：' + esc(missed.join('、')) + '</b>'
-                : '全部被抓到') + '。' +
-              (missed.length ? '' : 'lint 是活的，所以这个 0 有意义。') +
-              (verdict.infos.length ? '<br>' + esc(verdict.infos.join(' · ')) : '') +
-              '</div>', key, verdict);
+            var view_ = entry[2];
+            var r = view_.lint(trace);
+            var missed = view_.sabotageChecks(trace);
+            var total = Object.keys(view_.SABOTAGE_CASES).length;
+            checks[entry[3]] = { lintGaps: r.gaps.length, lintWarns: r.warns.length,
+                                 sabotageTotal: total, sabotageMissed: missed,
+                                 present: r.present !== false,
+                                 infos: (r.infos || []).map(function (x) {
+                                   return x.what; }),
+                                 passed: r.gaps.length === 0 && missed.length === 0 };
           });
           window.__labViewChecks = checks;
 
+          document.querySelector('[data-panel-body="slotvars"]').innerHTML =
+            '<div class="lab-verdict ' + (checks.slotVars.passed ? 'lab-ok' : 'lab-bad') + '">' +
+            '<b>契约 lint：</b>干净的 trace 报 <b>' + svLint.gaps.length + '</b> 个 gap、' +
+            svLint.warns.length + ' 个 warn；对照组 ' + svSab.total + ' 种破坏' +
+            (svSab.missed.length
+              ? '，<b>漏掉 ' + svSab.missed.length + ' 种：' +
+                esc(svSab.missed.join('、')) + '</b>'
+              : '全部被抓到') + '。' +
+            (svSab.skipped.length
+              ? '另有 ' + svSab.skipped.length + ' 种不适用于本份 trace，已跳过。' : '') +
+            (svSab.missed.length ? '' : 'lint 是活的，所以这个 0 有意义。') +
+            '<br><b>两个 port：</b>这条契约在生成器 <code>labs/traces/decoder_block.py</code> 里' +
+            '另有一份实现，两边的规则与对照组必须一致 —— 一边有规则而另一边没有，' +
+            '等于两边都没测。这里的 6 种破坏覆盖本视图能判的四条规则；' +
+            '「某个 slot 本该指向哪个张量」是 L04 公式专属的事实，归生成器判' +
+            '（<code>SLOT_VARS_REQUIRED</code>），它的对照组在 Python 侧。' +
+            '<br><b>这张表是写出来的，不是从 LaTeX 里猜的：</b>' +
+            '<code>step.binding_vars</code> 由生成器逐 slot 声明。' +
+            'L00 可以用正则扫公式，因为它那里的公式写的就是张量的名字；' +
+            'L04 的不行 —— 概率矩阵写成 <code>P</code> 而门控激活也叫 <code>S</code>，' +
+            '同一个字母在两个步骤里指两个张量，没有哪张别名表能同时对。' +
+            '</div>';
+
           readoutHost.innerHTML = readout(trace);
 
-          /* The player handle, for scripts/verify-l04.py. Exposing it is
-           * harmless in production and it is the only way a harness can assert
-           * against the same object the page drives rather than a
-           * re-implementation of it. */
-          window.__p = player;
+          /* The view handle, for scripts/verify-l04.py. Exposing it is harmless
+             in production and it is the only way the harness can assert against
+             the same object the page drives rather than a re-implementation of
+             it. */
+          window.__vd = view;
           window.__labTrace = trace;
           window.__labConfig = name;
           window.__labManifest = manifest;
           window.__labTraces = traces;
           window.__labModel = model;
-          return player;
+          window.__labIndex = idx;
+          window.__labPanels = panels;
+          return view;
         }
 
         /* ------------------------------------------------------ the sliders */
         var PARAMS = [
-          ['d_model', '模型维度（注意力四个投影的边长）'],
-          ['d_ff', 'FFN 中间维度（SwiGLU 三个矩阵的公共边）']
+          ['d_model', '模型维度（注意力四个投影的边长）', '模型维度'],
+          ['d_ff', 'FFN 中间维度（SwiGLU 三个矩阵的公共边）', 'FFN 中间维度']
         ];
 
         function buildParamBar() {
@@ -922,7 +1001,8 @@
             var opts = manifest.params[key];
             var i = opts.indexOf(cur[key]);
             html += '<div class="l04-param">' +
-              '<span class="l04-param-label">' + esc(p[1]) + '</span>' +
+              '<span class="l04-param-label l04-param-long">' + esc(p[1]) + '</span>' +
+              '<span class="l04-param-label l04-param-short">' + esc(p[2]) + '</span>' +
               '<span class="l04-param-label l04-param-name">' + esc(key) + '</span>' +
               '<input type="range" min="0" max="' + (opts.length - 1) + '" step="1" value="' + i +
                 '" data-param="' + esc(key) + '" aria-label="' + esc(p[1]) + '">' +
@@ -980,7 +1060,7 @@
         }
 
         /* Deep links: ?cfg= and ?step=, each announced when out of range rather
-         * than silently ignored — the same terms the player uses. */
+         * than silently ignored — the same terms the view uses. */
         var query = new URLSearchParams(location.search);
         var messages = [];
         var requestedCfg = query.get('cfg');
@@ -1012,7 +1092,7 @@
           '本页每个数字都来自一次真实的 numpy / torch 运行，不是手编的演示数据。' +
           'trace 由 <code>labs/traces/decoder_block.py</code> 生成，它对<b>每一组</b>滑杆配置做六件事：' +
           '① 用 numpy 走完整条 block，并与一份<b>独立的 torch 实现</b>逐元素对拍' +
-          '（实测最大相对偏差 ~5e-15）；' +
+          '（实测最大相对偏差 ~3e-15）；' +
           '② 把 <b>7 种候选右操作数</b>真的加到残差流的左侧操作数上，' +
           '记录每一次的结局 —— 三个静默广播、三个抛异常，异常文本是 numpy 自己的原话；' +
           '③ 把 LayerNorm 的 μ、σ 与归一化后数组的<b>行、列两个方向</b>的统计量都算出来，' +
@@ -1026,14 +1106,18 @@
           '每一种都必须被抓到，否则那份「0 gap」不算数。' +
           '滑杆只是在<b>已经生成好的 ' + manifest.traces.length + ' 组配置之间</b>切换，' +
           '浏览器里不算任何算法量。' +
-          '视图组件：残差 shape <code>views/shape-guard.js</code>、' +
-          'LayerNorm 轴 <code>views/norm-axis.js</code>、' +
-          'SwiGLU 路径 <code>views/swiglu-paths.js</code>、' +
-          'Pre/Post 对照 <code>views/norm-contrast.js</code>；' +
-          '参数量账本<b>复用</b> L05 的 <code>views/ledger.js</code>（ticket #45）。' +
-          '五个组件都不含任何 Decoder Block 专属公式 —— 公式由 trace 传入。' +
-          '两条源图 <code>decoder-blocks.png</code>、<code>decode-only.png</code> ' +
-          '来自教程 3.7 与 Transformer 架构快速入门，均为可直接复用的纯示意图。';
+          '变量图里的「哪个公式变量对应图里哪个节点」同样不是页面猜的：' +
+          '生成脚本把 <code>step.binding_vars</code> 逐 slot 写进 trace，页面只读它。' +
+          '之所以不能像 L00 那样用正则扫公式，是因为 L04 的公式写的不是张量的名字 —— ' +
+          '概率矩阵写作 <code>P</code> 而门控激活也叫 <code>S</code>，同一个字母在两个' +
+          '步骤里指两个张量，一张别名表不可能同时对；<code>U_{i,j}</code> 指的是张量 ' +
+          '<code>up</code>，扫 <code>up</code> 找不到、扫 <code>u</code> 找错。' +
+          '视图组件：变量图 <code>views/variable-dag.js</code>、残差 shape ' +
+          '<code>views/shape-guard.js</code>、LayerNorm 轴 <code>views/norm-axis.js</code>、' +
+          'SwiGLU 路径 <code>views/swiglu-paths.js</code>、Pre/Post 对照 ' +
+          '<code>views/norm-contrast.js</code>；参数量账本<b>复用</b> L05 的 ' +
+          '<code>views/ledger.js</code>（ticket #45）。五个组件都不含任何 Decoder Block ' +
+          '专属公式 —— 公式由 trace 传入。';
       })();
     </script>
   </body>
