@@ -927,6 +927,173 @@ def param_block(cfg, p):
 
 
 # ---------------------------------------------------------------- trace build
+#
+# `slot -> tensor names`, per step, for the variable-DAG view. See the comment
+# at the point of use for why this is stated rather than scanned out of the
+# LaTeX. A slot not listed here maps to NO tensor -- which is correct for most
+# of them: `NT`, `DM`, `DFF`, `H`, `DH` are dimensions, `RI`/`CJ` are indices,
+# `A`/`BB`/`P` are single numbers out of a matrix, and `PA`/`PF`/`PN`/`PT` are
+# parameter counts. Only the slots that denote a TENSOR appear, because only
+# those have a node to light.
+SLOT_VARS = {
+    "x.in": {},
+    # The formula names the array three ways: `X` (itself), and μ/σ (the
+    # statistics of `x`, not tensors of their own).
+    "x.ln1": {"DM": [], "MU": ["x"], "SIGMA": ["x"]},
+    # `Q = LN(X)W_q` -- the operands are both tensors: the input `h1` that the
+    # `LN(X)` denotes, and the weight `W_q`, which is not a graph node.
+    "x.qkv": {},
+    # `S = QK^T/... + M`. The score matrix is written `S`; the query and key are
+    # written `Q`/`K`. The mask `M` is the second write of this step.
+    "x.scores": {"MROW": ["mask"]},
+    # The step the regex cannot do at all, and the one where the honest answer
+    # is "nothing": the formula writes `\mathrm{softmax}(QK^T/...+M)V W_o` and
+    # names none of the three tensors it writes. The `M` in it denotes the mask
+    # the PREVIOUS step already folded into `scores`, and `V` is a literal with
+    # no slot -- so there is no slot to click and no node to light, which is
+    # correct: the rw chips above carry the step's reads and writes, and the
+    # node highlight is driven by those.
+    "x.attn": {},
+    # `Y_1 = X_{[N,d]} + Attn_{[N,d]}` -- both slots denote tensors, and this is
+    # the residual connection: `x` is the value carried all the way from the
+    # input, `attn_out` the sublayer's contribution.
+    "x.res1": {"LHS": ["x"], "RHS": ["attn_out"]},
+    # `Y_1` denotes the tensor `y1`; μ/σ are statistics of it.
+    "x.ln2": {"MU": ["y1"], "SIGMA": ["y1"]},
+    "x.gate": {},
+    "x.up": {},
+    # `SiLU(g) = g·σ(g)` -- `g` is the tensor `gate`.
+    "x.silu": {},
+    # `S = SiLU(G) ⊙ U` where the num tier substitutes ONE CELL of each:
+    # `SiLU(G)_{i,j}` and `U_{i,j}`. Both denote tensors (`silu`, `up`), and the
+    # A/BB/P slots are that cell's three numbers -- the ⊙ is one cell of a
+    # tensor operation, so it lights the two tensors it multiplies.
+    "x.gated": {"A": ["silu"], "BB": ["up"], "P": ["gated"]},
+    "x.down": {},
+    "x.res2": {"LHS": ["y1"], "RHS": ["ffn_out"]},
+    "x.out": {},
+}
+
+# The mappings the graph's picture depends on: if any of these goes empty the
+# drawing silently stops showing the algorithm, which is the failure mode the
+# pilot recorded as the most expensive one. `lint_slot_vars` refuses the trace
+# if one is missing, so this is a contract and not a comment.
+SLOT_VARS_REQUIRED = (
+    ("x.scores", "MROW", ["mask"]),
+    ("x.res1", "LHS", ["x"]),
+    ("x.res1", "RHS", ["attn_out"]),
+    ("x.res2", "LHS", ["y1"]),
+    ("x.res2", "RHS", ["ffn_out"]),
+    ("x.ln1", "MU", ["x"]),
+    ("x.ln2", "MU", ["y1"]),
+    ("x.gated", "A", ["silu"]),
+    ("x.gated", "BB", ["up"]),
+)
+
+
+def vars_in_sym_l00(sym, declared):
+    """L00's resolver, verbatim in shape, kept ONLY as a control.
+
+    `labs/traces/online_softmax.py` resolves `slot -> tensor` by scanning the
+    LaTeX, and that is the right answer for L00: its formulas write each tensor
+    under its own name (`m`, `acc`, `x_blk`, and `\\ell` for the tensor `l`,
+    which is the one alias it needs).
+
+    This copy exists so `slot_vars_selftest` can RUN it against L04's formulas
+    and show, by measurement, that it is the wrong tool here. A design note
+    saying "the regex does not work on these formulas" is an assertion; a
+    self-test that runs it and names the three tensors it gets wrong is
+    evidence, and it is what keeps a future reader from "simplifying" the table
+    back into a scan.
+    """
+    if not sym:
+        return []
+    s = re.sub(r"\\mathrm\{([A-Za-z]+)\}", r"\1", sym)
+    s = s.replace(r"\ell", "l")
+    s = re.sub(r"\\[A-Za-z]+", " ", s)
+    found = []
+    for name in declared:
+        if re.search(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])", s):
+            found.append(name)
+    return sorted(found)
+
+
+# The POSITIVE CONTROL for the comparison below: one of L00's formulas, L00's
+# declared tensor names, and the tensors the scan is expected to resolve.
+#
+# Without this leg, "the scan found nothing on L04" would be equally consistent
+# with "the scan is broken" -- and the argument for a table would rest on a
+# function nobody had checked was working. The declaration list has to be L00's
+# and not L04's: the scan resolves names it is TOLD to look for, so running it
+# against the wrong vocabulary would manufacture exactly the failure this leg
+# exists to rule out. (The first version of this control did that, and it is
+# what the self-test reported.)
+L00_CONTROL = (
+    # `\ell^{(j)} = \ell^{(j-1)}·exp(m^{(j-1)} − m^{(j)}) + \sum_i exp(x^{(j)}_i − m^{(j)})`
+    # names two of L00's tensors: the exponent sum `l` (written `\ell`) and the
+    # running max `m`. `x_blk`, which that step also reads, is deliberately not
+    # in the declaration list below -- the word-boundary rule is what keeps `x`
+    # from matching inside it, and that rule is L00's whole reason for scanning.
+    r"\ell^{(\slot{J})} = \slot{LOLD}\cdot \exp\left(\slot{MOLD} - \slot{MNEW}\right)"
+    r" + \sum_i \exp\left(x^{(j)}_i - m^{(j)}\right)",
+    ["l", "m", "x_blk"],
+    ("l", "m"),
+)
+
+
+def slot_vars_selftest(trace):
+    """Prove the stated map is right AND that the scan is the wrong tool here.
+
+    Three legs, and the last two are the ones that matter -- a table can be
+    self-consistent and wrong, so the argument for having a table at all has to
+    be that the thing it replaces measurably fails, and that failure has to be
+    attributable to the FORMULAS rather than to a broken function:
+
+      1. every required mapping is present and names what it claims to;
+      2. the scan, run over L04's formulas, resolves NONE of the mappings the
+         table states -- and the number it resolves is reported, not asserted
+         away;
+      3. the SAME scan, over an L00 formula, resolves the right tensors. This is
+         the leg that makes leg 2 evidence instead of an artifact.
+
+    All three run against the trace that is about to be written.
+    """
+    fails = []
+    declared = list(trace["tensors"])
+    by_id = {s["id"]: s for s in trace["steps"]}
+
+    # --- leg 1: the stated map names the tensors it claims to.
+    for sid, slot, want in SLOT_VARS_REQUIRED:
+        got = (by_id.get(sid, {}).get("binding_vars") or {}).get(slot)
+        if got != want:
+            fails.append(f"SLOT_VARS[{sid}][{slot}] = {got!r}，自检要求 {want!r}")
+
+    # --- leg 3 first, so a broken scan is reported as such before leg 2 is read
+    # as evidence about the formulas. Uses L00's vocabulary, not this trace's.
+    l00_sym, l00_vocab, l00_want = L00_CONTROL
+    l00_got = tuple(vars_in_sym_l00(l00_sym, l00_vocab))
+    if l00_got != l00_want:
+        fails.append(f"对照失效：同一段扫描在 L00 的公式上应读出 {l00_want}，"
+                     f"实得 {l00_got} —— 那「扫描在 L04 上读不出东西」就不是"
+                     f"关于公式的证据，而是关于函数的")
+
+    # --- leg 2: the scan on L04's own formulas.
+    stated_total = sum(len(v) for s in trace["steps"]
+                       for v in (s.get("binding_vars") or {}).values())
+    scanned_hits = []
+    for s in trace["steps"]:
+        for key, names in (s.get("binding_vars") or {}).items():
+            if not names:
+                continue
+            sym = (s.get("bindings") or {}).get(key, {}).get("sym") or ""
+            got = vars_in_sym_l00(sym, declared)
+            if got:
+                scanned_hits.append((s["id"], key, names, got))
+    # Any hit at all is worth naming: on these formulas even a broken clock
+    # finding one would be a fact about that formula, and the report says which.
+    return fails, stated_total, scanned_hits
+
+
 def b(slot, sym, idx, num):
     return slot, {"sym": sym, "idx": idx, "num": num}
 
@@ -1241,6 +1408,46 @@ def build_trace(cfg, p, x):
                        "priced_total": par["priced_total"],
                        "deploy_bytes": par["deploy_bytes"], "config": par["config"]}
 
+    # ---- `step.binding_vars`: which tensors each formula slot names.
+    #
+    # The variable-DAG view lights a graph node from it when its formula slot is
+    # clicked and the reverse, so it needs `slot -> tensor names` PER BINDING,
+    # not one flat set per step: a flat set would light half the graph when the
+    # reader pointed at one variable.
+    #
+    # WHY THIS IS A TABLE AND NOT A REGEX. L00 resolves the same map by scanning
+    # the LaTeX (`vars_in_sym` in online_softmax.py) and that works there
+    # because its formulas write the tensors' own names. L04's do not, and the
+    # difference is not a matter of tuning the pattern:
+    #
+    #   * the probability matrix is written `P` and the score matrix `S`, while
+    #     `S` is ALSO how `x.gated` writes the gated activation -- one letter,
+    #     two different tensors, two different steps. No per-trace alias table
+    #     can be right for both;
+    #   * `U_{i,j}` denotes the tensor `up`: a scan for `up` finds nothing there,
+    #     and a scan for `u` finds the wrong thing. This is L00's `\ell`/`l`
+    #     trap with the case flipped;
+    #   * `X_{[N,d]}` denotes `x`, and the `_` immediately after `X` is a word
+    #     character, so even a case-insensitive scan with word boundaries misses
+    #     it -- measured, not assumed;
+    #   * a scan for `x` over `x.gated`'s formula hits the `x` in `\times`, and
+    #     over `x.scores`' hits the `x` in the `\max_i x^{(j)}_i` it does not
+    #     have but a sibling step does.
+    #
+    # So the generator states the map, slot by slot, exactly where the formulas
+    # are written. Nothing is greyed out by it: `lint_slot_vars` below requires
+    # every name to be a tensor THIS STEP reads or writes, so a stale entry is a
+    # build failure rather than a link that quietly stops working, and a
+    # required-entry list pins the four mappings the graph's whole picture
+    # depends on.
+    tensors = tensors_for(cfg)
+    for s in steps:
+        table = SLOT_VARS.get(s["id"], {})
+        s["binding_vars"] = {
+            k: list(table.get(k, []))
+            for k in (s.get("bindings") or {})
+        }
+
     graph = build_graph(steps)
     meta = {
         "lab": "L04",
@@ -1446,15 +1653,93 @@ def lint(trace):
     gaps += lint_swiglu(trace)
     gaps += lint_norm_contrast(trace)
     gaps += lint_params(trace)
+    gaps += lint_slot_vars(trace)
 
     infos.append(f'共 {len(trace["steps"])} 步 / {len(trace["graph"]["nodes"])} 节点 / '
                  f'{len(trace["graph"]["edges"])} 数据边')
     infos.append(f'state 写过的张量：{", ".join(sorted(written))}')
+    n_slots = sum(len(v) for s in trace["steps"]
+                  for v in (s.get("binding_vars") or {}).values())
+    infos.append(f'binding_vars：{n_slots} 条「slot → 张量」映射，'
+                 f'覆盖 {len(trace["steps"])} 步')
     return gaps, warns, infos
 
 
 def steps_with(trace, field):
     return [s for s in trace["steps"] if field in s]
+
+
+def lint_slot_vars(trace):
+    """The `step.binding_vars` contract, which the variable-DAG view consumes.
+
+    The rules are the ones that make the map a statement about THIS trace rather
+    than a table someone wrote once:
+
+      1. every binding has an entry, and no entry names a slot that has no
+         binding -- otherwise the map has a hole exactly where the reader will
+         click;
+      2. every listed name is a tensor the STEP ITSELF reads or writes. This is
+         the rule that keeps the table honest: `x.res1/LHS` naming `x` is a
+         claim about this step's dataflow, and a table that drifted (a step
+         renamed, a tensor split in two) is rejected here rather than drawn as a
+         link to a node that has nothing to do with the step;
+      3. the mappings the picture depends on are present AND non-empty, so a
+         table edited down to `{}` fails rather than quietly unlighting the
+         residual connection.
+    """
+    gaps = []
+    steps = trace["steps"]
+    declared = set(trace["tensors"])
+    by_id = {s["id"]: s for s in steps}
+
+    for s in steps:
+        sid = s["id"]
+        bindings = s.get("bindings") or {}
+        bvars = s.get("binding_vars")
+        if not isinstance(bvars, dict):
+            gaps.append(f'步骤 "{sid}" 没有 binding_vars —— 变量图无法把公式里的'
+                        f"变量与图节点对应起来")
+            continue
+        for key in sorted(set(bindings) - set(bvars)):
+            gaps.append(f'步骤 "{sid}" 的绑定 "{key}" 在 binding_vars 里没有条目 —— '
+                        f"点这个变量不会有任何高亮")
+        scope = set(s.get("reads") or []) | set(s.get("writes") or [])
+        for key in sorted(set(bvars) - set(bindings)):
+            gaps.append(f'步骤 "{sid}" 的 binding_vars 有 "{key}"，但 bindings 里没有这个 slot')
+        for key, names in sorted(bvars.items()):
+            if not isinstance(names, list):
+                gaps.append(f'步骤 "{sid}" 的 binding_vars["{key}"] = {names!r} 不是张量名列表')
+                continue
+            for name in names:
+                if name not in declared:
+                    gaps.append(f'步骤 "{sid}" 的 binding_vars["{key}"] 指向未声明的张量'
+                                f' "{name}" —— 图上没有这个节点可高亮')
+                elif name not in scope:
+                    gaps.append(f'步骤 "{sid}" 的 binding_vars["{key}"] 指向 "{name}"，'
+                                f"但这一步既不读也不写它 —— 高亮会连到一个与本步无关的节点")
+
+    for sid, key, want in SLOT_VARS_REQUIRED:
+        s = by_id.get(sid)
+        if s is None:
+            gaps.append(f'SLOT_VARS_REQUIRED 指向不存在的步骤 "{sid}"')
+            continue
+        got = (s.get("binding_vars") or {}).get(key)
+        if got != want:
+            gaps.append(f'步骤 "{sid}" 的 binding_vars["{key}"] = {got!r}，'
+                        f"应该是 {want!r} —— 变量图靠这一条画出残差/门控的数据流")
+
+    # The table itself: an entry for a slot the step does not have, or for a
+    # step that does not exist, is a mapping that can never light anything.
+    for sid, table in SLOT_VARS.items():
+        s = by_id.get(sid)
+        if s is None:
+            gaps.append(f'SLOT_VARS 里有步骤 "{sid}"，但 trace 里没有这一步')
+            continue
+        for key in table:
+            if key not in (s.get("bindings") or {}):
+                gaps.append(f'SLOT_VARS["{sid}"] 有 slot "{key}"，但该步骤的 bindings 里没有')
+
+    return gaps
 
 
 def lint_exposure(trace):
@@ -2148,6 +2433,43 @@ SABOTAGE_CASES = {
     "params a step disagrees with the block total": lambda t: t["steps"][4]["params"][
         "bytes"].update({"ffn": 1}),
     "params a step loses its account": lambda t: t["steps"][4].pop("params"),
+    # -- step.binding_vars. Two groups, and the prefixes say which port owns
+    # them, because the harness scopes each group to its owner and a rule with
+    # no owner is a rule tested nowhere.
+    #
+    # `slotvars ` -- the structural rules that `views/variable-dag.js` also
+    # carries, checked there against the same broken copies by the harness.
+    "slotvars block removed from a step": lambda t: t["steps"][1].pop("binding_vars"),
+    "slotvars an entry removed for a live slot": lambda t: t["steps"][1][
+        "binding_vars"].pop("MU"),
+    "slotvars an entry added for a slot that does not exist": lambda t: t["steps"][1][
+        "binding_vars"].update({"GHOST": ["x"]}),
+    "slotvars an entry is not a list": lambda t: t["steps"][1]["binding_vars"].update(
+        {"MU": "x"}),
+    "slotvars pointing at an undeclared tensor": lambda t: t["steps"][1][
+        "binding_vars"].update({"MU": ["ghost"]}),
+    # The rule that keeps the table a statement about THIS step. `silu` exists
+    # and is a real node, but x.ln1 neither reads nor writes it -- the same rule
+    # the JS port carries, so this one is caught by both.
+    "slotvars pointing at a tensor this step does not touch": lambda t: t["steps"][1][
+        "binding_vars"].update({"MU": ["silu"]}),
+    #
+    # `slotmap ` -- the SEMANTIC rules, which only the generator can judge.
+    # "Which tensor SHOULD the μ slot name" is a fact about L04's formulas, and
+    # a generic view has no business knowing it. The JS port therefore has no
+    # rule here, and the harness's `slotvars` scope explicitly does not require
+    # it to; these are caught by the Python side and their control group lives
+    # here with the rule.
+    "slotmap the residual's left operand unlinked": lambda t: t["steps"][5][
+        "binding_vars"].update({"LHS": []}),
+    "slotmap the residual's right operand relinked to the wrong tensor": lambda t: t[
+        "steps"][5]["binding_vars"].update({"RHS": ["x"]}),
+    "slotmap the second residual unlinked": lambda t: t["steps"][12][
+        "binding_vars"].update({"RHS": []}),
+    "slotmap a LayerNorm's mu relinked to a tensor it is not about": lambda t: t[
+        "steps"][1]["binding_vars"].update({"MU": ["h1"]}),
+    "slotmap the elementwise multiply's operands unlinked": lambda t: t["steps"][10][
+        "binding_vars"].update({"BB": []}),
 }
 
 
@@ -2318,6 +2640,20 @@ def main():
               f"梯度回传放大 Pre {pre['grad_in_over_out']:.1f}× vs "
               f"Post {post['grad_in_over_out']:.0f}×")
 
+        # --- the slot -> tensor map: right, and not the scan
+        sv_fails, sv_total, sv_hits = slot_vars_selftest(trace)
+        if sv_fails:
+            fails.append(f"{name}: SLOT_VARS 自检未通过")
+            for line in sv_fails:
+                print(f"  SLOTMAP   {line}")
+        else:
+            hit_txt = ("一条也没读到" if not sv_hits
+                       else "读到了 " + "、".join(f"{s}/{k}→{g}" for s, k, _, g in sv_hits))
+            print(f"  slot→张量映射自检：{len(SLOT_VARS_REQUIRED)} 条必需映射成立；"
+                  f"表声明 {sv_total} 条映射，L00 式正则扫描在 L04 的公式上{hit_txt}"
+                  f"（同一段扫描在 L00 的公式上读得出 l 与 m —— 所以差别在公式，"
+                  f"不在函数）")
+
         # --- 3: lint + control group
         gaps, warns, infos = lint(trace)
         for line in infos:
@@ -2405,8 +2741,16 @@ def main():
     if only_json:
         base_name = cfg_id(*DEFAULT_PAIR)
         base = built[base_name]
+        sv_fails, sv_total, sv_hits = slot_vars_selftest(base)
         payload = {"traces": built, "base": base_name,
-                   "grid": [list(g) for g in grid()], "sabotages": {}}
+                   "grid": [list(g) for g in grid()], "sabotages": {},
+                   # The map's self-test, so the acceptance harness can report
+                   # the measurement rather than restating the design note.
+                   "slotmap": {"ok": not sv_fails, "failures": sv_fails,
+                               "stated": sv_total,
+                               "scanned": len(sv_hits),
+                               "required": len(SLOT_VARS_REQUIRED),
+                               "l00Control": list(L00_CONTROL[2])}}
         for name, mutate in SABOTAGE_CASES.items():
             broken = copy.deepcopy(base)
             try:

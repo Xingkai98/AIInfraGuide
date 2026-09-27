@@ -122,6 +122,14 @@
   background: var(--vd-bg);
 }
 .vd-dag { display: block; width: 100%; height: 100%; }
+/* When the drawing cannot fit at a legible scale the view renders it at
+   `MIN_SCALE` and the wrapper pans instead of shrinking further. Auto on both
+   axes, because which axis overflows is a property of the drawing. */
+.vd-dagwrap[data-vd-fit="pan"] { overflow: auto; }
+/* The rail an edge takes when it skips a layer (`railPath`). Dashed, so a
+   reader can tell at a glance which lines are hops inside a layer and which
+   are long-haul dependencies; the arrowhead still lands on the target. */
+.vd-e-rail { stroke-linejoin: round; }
 
 /* ------------------------------------------------------------------- sidebar */
 .vd-side {
@@ -239,7 +247,20 @@
 .vd-chip-none { border-style: dashed; color: var(--vd-faint); cursor: default; }
 
 /* -------------------------------------------------------------- value grid */
+/* The grids flow rather than stack, at every width.
+ *
+ * Two of L04's steps write three tensors each (`x.qkv` writes q/k/v, `x.attn`
+ * writes probs/ctx/attn_out), and three stacked `[8, 64]` grids cost ~660px of
+ * a ~760px sidebar -- the narration goes off the bottom and the step stops
+ * fitting its screen, which is the whole promise the layout makes. Side by side
+ * they cost one band. L00's mobile rule already did this for the same reason
+ * ("three scalar grids cost ~160px of a ~380px sidebar"); the only change here
+ * is that the desktop gets the same treatment, because on this trace it has the
+ * same problem. */
+.vd-vals { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; }
 .vd-vg {
+  flex: 1 1 220px;
+  min-width: 0;
   margin-top: 9px;
   border: 1px solid var(--vd-line);
   border-radius: 10px;
@@ -266,6 +287,27 @@
   white-space: nowrap;
 }
 .vd-cell-1 { background: var(--vd-lit-soft); border-color: var(--vd-lit); color: var(--vd-lit); font-weight: 650; }
+/* The elision marker. Deliberately NOT a number: a cell reading "1408" in a row
+   of values would be read as a value. It says how many were left out, which is
+   the honest form of a cap -- the alternative is a grid that silently looks
+   complete. */
+.vd-cell-more {
+  border-style: dashed;
+  color: var(--vd-faint);
+  background: transparent;
+  font-weight: 500;
+}
+.vd-cell-rowmore { flex: 1 1 100%; text-align: center; }
+/* Rank 3+: one block per leading index, so `[H, N, N]` reads as H matrices
+   rather than as one wide one. */
+.vd-vslices { display: flex; flex-wrap: wrap; gap: 0 8px; padding: 0 7px 4px; }
+.vd-vslice-b { min-width: 0; }
+.vd-vslice {
+  font: 600 0.62rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--vd-faint);
+  padding: 2px 0 0;
+}
+.vd-vslice-more { opacity: 0.8; }
 
 .vd-narr { color: var(--vd-dim); font-size: 0.82rem; margin: 9px 0 0; }
 
@@ -318,6 +360,21 @@
 .vd-box { fill: var(--vd-panel); stroke: var(--vd-line); stroke-width: 1.5; }
 .vd-nl { font: 650 13px ui-monospace, SFMono-Regular, Menlo, monospace; fill: var(--vd-fg); }
 .vd-ns { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; fill: var(--vd-dim); }
+
+/* The rank glyph. It follows the node's three states by opacity alone -- the
+   SHAPE is the tensor's rank and must not change with the cursor, which is
+   also why it is drawn from `tensors[].shape` and never from the value. */
+.vd-nshape .vd-shape {
+  fill: none;
+  stroke: var(--vd-dim);
+  stroke-width: 1.2;
+}
+.vd-nshape .vd-shape-inner { fill: none; stroke: var(--vd-dim); stroke-width: 1; opacity: 0.75; }
+.vd-nshape-off { opacity: 0.45; }
+.vd-nshape-past { opacity: 0.8; }
+.vd-nshape-on { opacity: 1; }
+.vd-nshape-on .vd-shape,
+.vd-nshape-on .vd-shape-inner { stroke: var(--vd-lit); }
 
 .vd-box-on { stroke: var(--vd-lit); stroke-width: 2.6; fill: var(--vd-lit-soft); }
 .vd-nl-on { font-weight: 700; }
@@ -376,10 +433,10 @@
   .vd-legend { display: none; }
   .vd-stitle { font-size: 0.86rem; margin: 5px 0 6px; }
   .vd-narr { font-size: 0.78rem; margin-top: 7px; }
-  /* Stacked, three scalar grids cost ~160px of a ~380px sidebar and push the
-     narration off the bottom. Side by side they cost one row. */
-  .vd-vals { display: flex; flex-wrap: wrap; gap: 6px; }
-  .vd-vg { flex: 1 1 104px; min-width: 0; margin-top: 7px; }
+  /* The flow rule is in the base stylesheet (see the note there); a phone just
+     makes the grids narrower before they wrap. */
+  .vd-vals { gap: 6px; }
+  .vd-vg { flex: 1 1 104px; margin-top: 7px; }
   .vd-vg-hd { font-size: 0.69rem; padding: 3px 6px; }
   .vd-cell { font-size: 0.68rem; padding: 0.06rem 0.28rem; }
   .vd-vrow { padding: 2px 5px; }
