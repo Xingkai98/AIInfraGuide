@@ -71,6 +71,28 @@ and `step.state` carries only the rows appended by that step (`k_new` / `v_new`)
 — genuinely new tensors, not deltas of an existing one. The full-snapshot path
 stays unimplemented, exactly as the design doc says.
 
+**But the cache IS a node in the variable graph, with no published value.** The
+variable-graph migration (the same one L00 and L04 went through) draws the
+TENSORS as nodes and the computations as edges, and the cache is the one
+variable this lab is about — leaving it out would draw the algorithm without its
+subject. So `tensors.kv_cache` is DECLARED — shape, dtype, location, role — and
+the append step reads and writes it, which is where the self-loop in the drawing
+comes from (the same shape L00's `m`/`l`/`acc` recurrences have).
+
+What it deliberately does NOT carry is a value: adding one would re-snapshot the
+cache on every `kv` step, and the measured cost is the decision recorded above —
++0.9 MB on the N=128, L=2 traces and +1.8 MB at L=4, ≈8.4 MB across the set,
+against the 3.9 MB the whole set costs today. A page four times its size is an
+anomaly this repo has already decided against once (`docs/research/size-budget.md`
+§4, and the note below on `STATE_SIG_FIGS`). The cache's *size* is published
+instead, per step, in `step.ledger.bytes.kv_cache` — a number counted from the
+real arrays — and the lab page says which of the two a reader is looking at.
+
+The consequence for the sidebar is worth stating rather than leaving to be
+noticed: `kv_cache` appears in the read/write chips and as a graph node with a
+shape, and it has no value grid. That is not a rendering failure — it is the
+same statement as this paragraph, and the page carries it in the node's tooltip.
+
 **Variable-length tensors declare their terminal shape.** `tokens`, `h` and
 `attn` all grow during the replay, and the contract has one static `shape` per
 tensor. They therefore declare the shape they end at; the tensor grid lays out
@@ -863,6 +885,377 @@ LEDGER_SEGMENTS = [
 ]
 
 
+# ------------------------------------------------- `slot -> tensor` for the graph
+#
+# The variable-DAG view lights a graph node when the reader clicks the formula
+# slot that names it, and the reverse. It gets that map from `step.binding_vars`
+# — PER BINDING, not one flat set per step, because a flat set would light half
+# the graph when the reader pointed at one variable.
+#
+# WHY THIS IS A TABLE AND NOT A SCAN, on a trace whose formulas DO name tensors.
+# L00 resolves the same map by scanning the LaTeX (`vars_in_sym` in
+# `online_softmax.py`), and that technique is worth actually trying here —
+# `\mathrm{LN}(h)` and `\mathrm{logits}` visibly contain tensor names — so
+# `slot_vars_selftest` runs it rather than ruling on it. It resolves 20 of this
+# trace's 135 bindings (15%), and every one of the 20 is an incidental `h` in
+# `\mathrm{LN}(h)`, `\mathrm{LN}_f(h)` or `h_1 = h + O`. The slots that are ABOUT
+# the cache and the new rows — `KOLD`, `VOLD`, `KNEW`, `VNEW`, and attention's
+# `K`/`V` — resolve to nothing, which is the opposite of what the graph needs.
+# The symbols here are overwhelmingly dimension parameters (`l`, `t`, `n_q`,
+# `d_model`, `d_ff`, `vocab`), and the tensors carry a `_new` / `_cache` suffix
+# the formulas never write.
+#
+# Worse than sparse, it is WRONG in the direction that matters, and that is also
+# measured. The obvious way to repair the sparsity is to match a tensor by its
+# STEM, so the formulas' upper-case `K` finds the tensor `k_new`. Run that, and
+# `KOLD`/`VOLD` — the cache as it stood BEFORE this step — resolve to
+# `k_new`/`v_new`, the rows this step ADDS: 30 slots in all, on this trace. A
+# reader clicking "the cache so far" would be shown the new rows, which is a link
+# drawn between two things that are not the same thing — the failure mode the
+# whole contract exists to prevent. (L00's own resolver has no such trouble,
+# which is why leg 2 of the self-test runs it there first: it resolves `\ell` as
+# the tensor `l` and keeps `x` out of `x_blk`, so the misfire above is a fact
+# about these formulas rather than about the technique.)
+#
+# So the map is stated, slot by slot, beside the formulas that use it. The rule
+# the table follows is L04's dominant one: A SLOT NAMES THE TENSOR ITS VALUE
+# DENOTES. `KNEW` displays `\mathrm{LN}(h)W_k^{(l)}`, whose value IS `k_new`, so
+# it names `k_new`; `KOLD` displays the cache's existing rows, so it names
+# `kv_cache`. A slot that denotes a dimension, an index or a single number names
+# nothing and gets `[]` — which is the honest answer, not a gap: the read/write
+# chips above the graph still carry the step's dataflow, and the graph's edges
+# come from `reads`/`writes` rather than from this table.
+#
+# Keyed by the step's SUFFIX, not its id: this lab's replay is 5 phases × 4
+# sub-steps, so `prefill.kv` and `d4.kv` are the same row of this table.
+SLOT_VARS = {
+    # `K^{(l)} <- [K_old ; LN(h)W_k]` — the four slots that denote a tensor are
+    # the two ends of the append: the cache it extends, and the new rows it
+    # extends it with.
+    "kv": {"KOLD": ["kv_cache"], "VOLD": ["kv_cache"],
+           "KNEW": ["k_new"], "VNEW": ["v_new"]},
+    # `S = QK^T`, `O = WVW_o` — `K` and `V` here are the WHOLE cache: this
+    # step's fresh rows sitting on top of every row the earlier steps appended.
+    # That is the one dependency decode has on the history, and the graph draws
+    # it as `kv_cache -> attn`.
+    "attn": {"K": ["kv_cache"], "V": ["kv_cache"]},
+    # `h_1 = H + O` — the residual stream this step reads and writes back into.
+    "ffn": {"HIN": ["h"]},
+    # `logits = LN_f(H)W_lm` and `x_{t+1} = argmax logits`. `H` is the last
+    # position's residual stream; `TOK` is the sampled token, which the step
+    # appends to `tokens` — that edge is what closes the autoregressive loop.
+    "head": {"H": ["h"], "TOK": ["token_new"]},
+}
+
+# The mappings the graph's picture depends on. Same reasoning as L04's: these are
+# the links that make the drawing say what the algorithm does, and a table edited
+# down to `{}` would stop showing them SILENTLY — the expensive failure mode the
+# variable-graph pilot recorded. `lint_slot_vars` refuses the trace if one goes
+# missing, so this is a contract and not a comment.
+SLOT_VARS_REQUIRED = (
+    # `k_new` and `v_new` — the rows this step appends. Both are pinned because
+    # the two are computed from the same input by sibling projections, and a
+    # table that named only one would light half the step.
+    ("prefill.kv", "KNEW", ["k_new"]),
+    ("prefill.kv", "VNEW", ["v_new"]),
+    # The cache as the append sees it, before and after — one tensor, because a
+    # cache is one variable here; the self-loop the view draws from it is the
+    # accumulation made visible (the same shape L00's `m`/`l`/`acc` have).
+    ("prefill.kv", "KOLD", ["kv_cache"]),
+    ("prefill.kv", "VOLD", ["kv_cache"]),
+    # WHAT ATTENTION DEPENDS ON. `attn` reads `kv_cache` and not just `k_new`:
+    # that dependency on the accumulated history is the reason a cache exists.
+    ("prefill.attn", "K", ["kv_cache"]),
+    ("prefill.attn", "V", ["kv_cache"]),
+    # The residual stream in and out of the FFN, and the logits read off it.
+    ("prefill.ffn", "HIN", ["h"]),
+    ("prefill.head", "H", ["h"]),
+    ("prefill.head", "TOK", ["token_new"]),
+)
+
+
+def lint_slot_vars(trace):
+    """The `step.binding_vars` contract, which the variable-DAG view consumes.
+
+    The rules are the ones that make the map a statement about THIS trace rather
+    than a table someone wrote once:
+
+      1. every binding has an entry, and no entry names a slot that has no
+         binding — otherwise the map has a hole exactly where the reader will
+         click;
+      2. every listed name is a tensor the STEP ITSELF reads or writes. This is
+         the rule that keeps the table honest: `prefill.kv`'s `KNEW` naming
+         `k_new` is a claim about this step's dataflow, and a table that drifted
+         (a step renamed, a tensor split in two) is rejected here rather than
+         drawn as a link to a node that has nothing to do with the step;
+      3. the mappings the picture depends on are present AND name what they
+         claim, so a table edited down to `{}` fails rather than quietly
+         unlinking the cache from the attention that reads it.
+    """
+    gaps = []
+    steps = trace["steps"]
+    declared = set(trace["tensors"])
+    by_id = {s["id"]: s for s in steps}
+
+    for s in steps:
+        sid = s["id"]
+        bindings = s.get("bindings") or {}
+        bvars = s.get("binding_vars")
+        if not isinstance(bvars, dict):
+            gaps.append(f'步骤 "{sid}" 没有 binding_vars —— 变量图无法把公式里的'
+                        f"变量与图节点对应起来")
+            continue
+        for key in sorted(set(bindings) - set(bvars)):
+            gaps.append(f'步骤 "{sid}" 的绑定 "{key}" 在 binding_vars 里没有条目 —— '
+                        f"点这个变量不会有任何高亮")
+        scope = set(s.get("reads") or []) | set(s.get("writes") or [])
+        for key in sorted(set(bvars) - set(bindings)):
+            gaps.append(f'步骤 "{sid}" 的 binding_vars 有 "{key}"，但 bindings 里没有这个 slot')
+        for key, names in sorted(bvars.items()):
+            if not isinstance(names, list):
+                gaps.append(f'步骤 "{sid}" 的 binding_vars["{key}"] = {names!r} 不是张量名列表')
+                continue
+            for name in names:
+                if name not in declared:
+                    gaps.append(f'步骤 "{sid}" 的 binding_vars["{key}"] 指向未声明的张量'
+                                f' "{name}" —— 图上没有这个节点可高亮')
+                elif name not in scope:
+                    gaps.append(f'步骤 "{sid}" 的 binding_vars["{key}"] 指向 "{name}"，'
+                                f"但这一步既不读也不写它 —— 高亮会连到一个与本步无关的节点")
+
+    for sid, key, want in SLOT_VARS_REQUIRED:
+        s = by_id.get(sid)
+        if s is None:
+            gaps.append(f'SLOT_VARS_REQUIRED 指向不存在的步骤 "{sid}"')
+            continue
+        got = (s.get("binding_vars") or {}).get(key)
+        if got != want:
+            gaps.append(f'步骤 "{sid}" 的 binding_vars["{key}"] = {got!r}，'
+                        f"应该是 {want!r} —— 变量图靠这一条画出 KV Cache 与注意力的数据流")
+
+    # The table itself: a row for a step kind this trace does not have, or a slot
+    # the step does not have, is a mapping that can never light anything.
+    for suffix, table in SLOT_VARS.items():
+        used = [s for s in steps if s["id"].endswith("." + suffix)]
+        if not used:
+            gaps.append(f'SLOT_VARS 里有 "{suffix}" 这一类步骤，但 trace 里没有')
+            continue
+        for s in used:
+            for key in table:
+                if key not in (s.get("bindings") or {}):
+                    gaps.append(f'SLOT_VARS["{suffix}"] 有 slot "{key}"，'
+                                f'但步骤 "{s["id"]}" 的 bindings 里没有')
+
+    return gaps
+
+
+# The step-level dataflow the graph's whole picture rests on, as a table rather
+# than as prose.
+#
+# WHY THIS IS NOT REDUNDANT WITH `reads`/`writes`. The variable graph draws one
+# edge per (read, write) pair the step performs, so a read that goes MISSING does
+# not make the drawing fail — it makes it draw a different algorithm. The pilot
+# recorded the exact shape of this: an index bug silently degraded "the furthest
+# progressed input" to "whatever `reads[0]` happens to be", and the graph came
+# out as a fan-out from a staging buffer with no error anywhere. The failure is
+# invisible in the data and obvious in the picture, so the picture's inputs are
+# pinned here.
+#
+# Each row says: this step READS these tensors and WRITES these, and nothing
+# about the order — order is not a contract, membership is.
+DATAFLOW_REQUIRED = (
+    # `k_new`/`v_new` come from `h`. Not from `reads[0]`: the append reads
+    # `tokens` first (it is the row count), so a reader checking only "did it
+    # read something" would pass a trace where the projection lost its input.
+    ("prefill.kv", ["tokens", "h", "kv_cache"], ["k_new", "v_new", "kv_cache"]),
+    # Attention reads BOTH fresh rows and the accumulated cache. `v_new` is the
+    # one that quietly goes missing: the values are never mentioned again in the
+    # narration, and a trace whose `attn` read only `k_new` lints clean while
+    # drawing an attention that cannot compute `O = WV`.
+    ("prefill.attn", ["tokens", "k_new", "v_new", "kv_cache"], ["h", "attn"]),
+    # `logits` is read off the residual stream, same as `k_new` is off `h`.
+    ("prefill.head", ["h"], ["logits", "token_new", "tokens"]),
+    # The same three at decode — the phase where `n_q = 1` and the cache is
+    # non-empty. Pinning one phase would let a trace whose decode path diverged
+    # from its prefill path pass, and the divergence between the two is this
+    # lab's subject.
+    ("d1.kv", ["tokens", "h", "kv_cache"], ["k_new", "v_new", "kv_cache"]),
+    ("d1.attn", ["tokens", "k_new", "v_new", "kv_cache"], ["h", "attn"]),
+    ("d1.head", ["h"], ["logits", "token_new", "tokens"]),
+)
+
+
+def lint_dataflow(trace):
+    """The pinned dataflow, checked against the trace the graph will be drawn from.
+
+    A table rather than a picture test on purpose: this runs in the generator and
+    in CI, before anything is written, and it is the same table the acceptance
+    harness re-states against the built page's model.
+    """
+    gaps = []
+    by_id = {s["id"]: s for s in trace["steps"]}
+    declared = set(trace["tensors"])
+    for sid, want_reads, want_writes in DATAFLOW_REQUIRED:
+        s = by_id.get(sid)
+        if s is None:
+            gaps.append(f'DATAFLOW_REQUIRED 指向不存在的步骤 "{sid}"')
+            continue
+        for kind, want in (("reads", want_reads), ("writes", want_writes)):
+            got = s.get(kind) or []
+            missing = [t for t in want if t not in got]
+            if missing:
+                gaps.append(f'步骤 "{sid}" 的 {kind} 少了 {missing} —— '
+                            f"变量图会画出另一条数据流（实得 {got}）")
+            stray = [t for t in got if t not in want]
+            if stray:
+                gaps.append(f'步骤 "{sid}" 的 {kind} 多了 {stray}（应为 {want}）—— '
+                            f"变量图会画出一条算法里没有的边")
+            for t in want:
+                if t not in declared:
+                    gaps.append(f'DATAFLOW_REQUIRED 的 "{sid}.{kind}" 提到未声明的张量 "{t}"')
+    return gaps
+
+
+def vars_in_sym_l00(sym, declared):
+    """L00's resolver, verbatim in shape, used ONLY as a control.
+
+    `labs/traces/online_softmax.py` resolves `slot -> tensor` by scanning the
+    LaTeX, and that is the right answer for L00: its formulas write each tensor
+    under its own name, with `\\ell` for the tensor `l` as the one alias a scan
+    cannot avoid needing.
+
+    This copy is here so the self-test can run the technique that WORKS on L00
+    against L05's formulas, and measure how much of it survives the move.
+    """
+    if not sym:
+        return []
+    s = re.sub(r"\\mathrm\{([A-Za-z]+)\}", r"\1", sym)
+    s = s.replace(r"\ell", "l")
+    s = re.sub(r"\\[A-Za-z]+", " ", s)
+    found = []
+    for name in declared:
+        # Word boundaries: `x` must not match inside `x_blk`.
+        if re.search(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])", s):
+            found.append(name)
+    return sorted(found)
+
+
+def vars_in_sym_stem(sym, declared):
+    """The scan L05's formulas TEMPT you into, kept ONLY as a misfire to measure.
+
+    L00's scan is name-exact, and on L05 it resolves almost nothing (measured
+    below) because this lab's tensors are called `k_new` / `v_new` / `kv_cache`
+    while the formulas write `K`, `V` and `k`/`v` subscripts. The obvious repair
+    is to match a tensor by its STEM — text before the first `_` — so that `K`
+    finds `k_new`. That is what this function does, and running it is what shows
+    the repair is worse than the gap: `K^{(l)}_{[t_prev,H,d_h]}` (the cache as it
+    stood BEFORE this step) has the stem `k` in it, so the slot that denotes the
+    OLD cache gets linked to the tensor of the rows this step ADDS.
+
+    A design note calling that "a misfire" is an assertion. This copy is what
+    makes it a measurement, and it is what keeps a future reader from
+    "simplifying" the table back into a scan.
+    """
+    if not sym:
+        return []
+    s = re.sub(r"\\mathrm\{([A-Za-z]+)\}", r"\1", sym)
+    s = s.replace(r"\ell", "l")
+    s = re.sub(r"\\[A-Za-z]+", " ", s)
+    # Lower-cased, so the maths' upper-case `K`/`V` can meet `k_new`/`v_new`.
+    s = s.lower()
+    found = []
+    for name in declared:
+        stem = name.split("_")[0]
+        if re.search(r"(?<![a-z0-9])" + re.escape(stem) + r"(?![a-z0-9])", s):
+            found.append(name)
+    return sorted(found)
+
+
+# The POSITIVE CONTROL for the comparison below: one of L00's formulas, L00's
+# declared tensor names, and the tensors L00's resolver is expected to read.
+#
+# Without this leg, "the scan resolves 9% of L05's slots" would be equally
+# consistent with "the scan is broken" — and the argument for a table would rest
+# on a function nobody had checked was working. `x_blk` is in the declaration
+# list on purpose: the word-boundary rule is what keeps the formula's bare `x`
+# from matching inside it, and that rule is L00's own reason for scanning.
+L00_CONTROL = (
+    r"\ell^{(\slot{J})} = \slot{LOLD}\cdot \exp\left(\slot{MOLD} - \slot{MNEW}\right)"
+    r" + \sum_i \exp\left(x^{(j)}_i - m^{(j)}\right)",
+    ["l", "m", "x_blk"],
+    ("l", "m"),
+)
+
+
+def slot_vars_selftest(trace):
+    """Prove the stated map is right AND that a scan cannot produce it here.
+
+    A table can be self-consistent and wrong, so the argument for having a table
+    at all rests on measurement — and the measurement has to separate four
+    different claims that a single number would blur:
+
+      leg 1  the stated map's required rows are present and name what they claim.
+      leg 2  L00's own resolver, run on L00's formula, resolves it correctly.
+             This is the control that makes leg 3 evidence about the FORMULAS
+             rather than about a broken function.
+      leg 3  the same resolver, run on this trace's slots, resolves almost
+             nothing — reported as a ratio, not asserted. This is the SPARSE
+             failure: the scan is not wrong so much as silent.
+      leg 4  the stem-matched variant (the obvious repair for leg 3) links a slot
+             to a tensor its step is not about. This is the WRONG-LINK failure,
+             and it is the dangerous one: a silent scan leaves a reader with no
+             highlight, a wrong link shows them a connection that is not there.
+
+    Returns (fails, n_stated, resolved, total, lies): legs 2's verdict is in
+    `fails`; `resolved`/`total` is leg 3's measurement; `lies` is leg 4's.
+    """
+    fails = []
+    declared = list(trace["tensors"])
+    by_id = {s["id"]: s for s in trace["steps"]}
+
+    # --- leg 1: the stated map names the tensors it claims to.
+    for sid, slot, want in SLOT_VARS_REQUIRED:
+        got = (by_id.get(sid, {}).get("binding_vars") or {}).get(slot)
+        if got != want:
+            fails.append(f"SLOT_VARS[{sid}][{slot}] = {got!r}，自检要求 {want!r}")
+
+    # --- leg 2: the control. Run FIRST, so that if the technique is broken
+    # here the report says so before legs 3 and 4 are read as evidence about
+    # L05's formulas. Uses L00's vocabulary, not this trace's.
+    l00_sym, l00_vocab, l00_want = L00_CONTROL
+    l00_got = tuple(vars_in_sym_l00(l00_sym, l00_vocab))
+    if l00_got != l00_want:
+        fails.append(f"对照失效：L00 的解析器在 L00 的公式上应读出 {l00_want}，"
+                     f"实得 {l00_got} —— 那「解析器在 L05 上读不出东西」就不是"
+                     f"关于公式的证据，而是关于函数的")
+
+    # --- legs 3 and 4, over the slots the table actually links to a tensor.
+    # Restricted to `names` non-empty: "the scan found nothing where the table
+    # says nothing" is not a failure of either kind, and counting it would make
+    # the ratio below depend on how many dimension slots a step happens to have.
+    linked = resolved = 0
+    lies = []
+    for s in trace["steps"]:
+        for key, names in (s.get("binding_vars") or {}).items():
+            if not names:
+                continue
+            linked += 1
+            sym = (s.get("bindings") or {}).get(key, {}).get("sym") or ""
+            # leg 3: L00's resolver, on this trace's formula.
+            if vars_in_sym_l00(sym, declared):
+                resolved += 1
+            # leg 4: the stem variant, against what the table states. A result
+            # is a LIE when it names a tensor the table does not name for this
+            # slot — either an extra one, or a different one entirely.
+            wrong = [n for n in vars_in_sym_stem(sym, declared) if n not in names]
+            if wrong:
+                lies.append((s["id"], key, names, wrong))
+
+    n_stated = sum(len(v) for s in trace["steps"]
+                   for v in (s.get("binding_vars") or {}).values())
+    return fails, n_stated, resolved, linked, lies
+
+
 # ---------------------------------------------------------------- trace build
 def b(slot, sym, idx, num):
     return slot, {"sym": sym, "idx": idx, "num": num}
@@ -984,7 +1377,7 @@ def build_trace(cfg, p, deploy, prompt_ids):
                r"\mathrm{LN}(h^{(n_q)})W_v^{(l)}", shape_str(n_q, H, dh)),
              b("KSHAPE", r"\cdot", r"\cdot", shape_str(n_q, H, dh)),
              b("VSHAPE", r"\cdot", r"\cdot", shape_str(n_q, H, dh))],
-            ["tokens"], ["k_new", "v_new"],
+            ["tokens", "h", "kv_cache"], ["k_new", "v_new", "kv_cache"],
             {"k_new": state_mat(new_k_row), "v_new": state_mat(new_v_row)},
             f"这一步只做一件事：把本步 {n_q} 个 token 的 K、V 算出来，追加到 {L} 层各自的缓存上"
             f"（每层从 {t_after - n_q} 行长到 {t_after} 行）。历史部分一个字节都不动 —— "
@@ -997,9 +1390,9 @@ def build_trace(cfg, p, deploy, prompt_ids):
         steps.append(step(
             f"{pid}.attn", f"{plabel}：查询与全量 K/V 做注意力", "op", "attention", plabel,
             {
-                "sym": r"S = \frac{Q K^{\top}}{\sqrt{d_h}},\qquad "
+                "sym": r"S = \frac{Q \slot{K}^{\top}}{\sqrt{d_h}},\qquad "
                        r"W = \mathrm{softmax}\left(\region{MASK}{S + M}\right),\qquad "
-                       r"O = W V W_o",
+                       r"O = W \slot{V} W_o",
                 "idx": r"Q_{[\slot{NQ},H,d_h]} \times K^{\top}_{[\slot{T},H,d_h]} "
                        r"\to S + M_{[\slot{H},\slot{NQ},\slot{T}]} "
                        r"\to W_{[\slot{H},\slot{NQ},\slot{T}]}",
@@ -1010,8 +1403,16 @@ def build_trace(cfg, p, deploy, prompt_ids):
              b("T", "t", str(t_new), str(t_new)),
              b("H", "H", str(H), str(H)),
              b("d", "d_{model}", str(d), str(d)),
+             # The cache the queries are multiplied against, named as a slot so
+             # the graph can be lit from the formula: `K` here is the WHOLE
+             # cache, i.e. this step's fresh `k_new` rows sitting on top of the
+             # history the previous steps appended.
+             b("K", f"K^{{(l)}}_{{[t,H,d_h]}}", f"K^{{(l)}}_{{[{t_new},H,d_h]}}",
+               shape_str(t_new, H, dh)),
+             b("V", f"V^{{(l)}}_{{[t,H,d_h]}}", f"V^{{(l)}}_{{[{t_new},H,d_h]}}",
+               shape_str(t_new, H, dh)),
              b("SMAX", r"\max S", r"\max S", fmt(float(np.max(live["attn"].arrays["scores"]))))],
-            ["tokens", "k_new"], ["h", "attn"],
+            ["tokens", "k_new", "v_new", "kv_cache"], ["h", "attn"],
             {"h": state_mat(live["attn"].arrays["h1"]),
              "attn": state_mat(attn_row)},
             (f"有 cache 之后，本步只有 {n_q} 个 Query，却要对 {t_new} 个 Key 做内积，"
@@ -1038,7 +1439,8 @@ def build_trace(cfg, p, deploy, prompt_ids):
         steps.append(step(
             f"{pid}.ffn", f"{plabel}：前馈网络 + 第二个残差", "op", "ffn", plabel,
             {
-                "sym": r"h_1 = h + O,\qquad h_2 = h_1 + \mathrm{SwiGLU}(\mathrm{LN}(h_1))",
+                "sym": r"h_1 = \slot{HIN} + O,\qquad "
+                       r"h_2 = h_1 + \mathrm{SwiGLU}(\mathrm{LN}(h_1))",
                 "idx": r"\mathrm{gate}_{[\slot{NQ},\slot{DFF}]},\ "
                        r"\mathrm{up}_{[\slot{NQ},\slot{DFF}]} \to "
                        r"\mathrm{down}_{[\slot{NQ},\slot{d}]}",
@@ -1047,6 +1449,8 @@ def build_trace(cfg, p, deploy, prompt_ids):
             [b("NQ", "n_q", str(n_q), str(n_q)),
              b("DFF", "d_{ff}", str(dff), str(dff)),
              b("d", "d_{model}", str(d), str(d)),
+             # The residual stream the FFN reads and writes back into.
+             b("HIN", "h", r"h_{[n_q,d]}", shape_str(n_q, d)),
              b("SHAPE", r"\cdot", r"\cdot", shape_str(n_q, d))],
             ["h"], ["h"],
             {"h": state_mat(new_h2)},
@@ -1062,15 +1466,18 @@ def build_trace(cfg, p, deploy, prompt_ids):
             f"{pid}.head", f"{plabel}：取最后一个位置，采样下一个 token",
             "op", "head", plabel,
             {
-                "sym": r"\mathrm{logits} = \mathrm{LN}_f(h)\,W_{lm}^{\top},\qquad "
+                "sym": r"\mathrm{logits} = \mathrm{LN}_f(\slot{H})\,W_{lm}^{\top},\qquad "
                        r"x_{t+1} = \arg\max \mathrm{logits}",
                 "idx": r"\mathrm{logits}_{[\slot{V}]} = "
-                       r"h_{[1,\slot{d}]}\,W_{lm}^{\top},\quad x_{t+1} = \slot{TOK}",
+                       r"\slot{H}_{[1,\slot{d}]}\,W_{lm}^{\top},\quad x_{t+1} = \slot{TOK}",
                 "num": r"\arg\max \mathrm{logits} = \slot{TOK}\ "
                        r"(\text{共 } \slot{T} \text{ 个 token})",
             },
             [b("V", "vocab", str(V), str(V)),
              b("d", "d_{model}", str(d), str(d)),
+             # The last position's residual stream: what the LM head reads, and
+             # the same `h` the FFN wrote. A slot so the graph can be lit from it.
+             b("H", "h", r"h_{[1,d]}", shape_str(1, d)),
              b("TOK", r"x_{t+1}", "x_{t+1}", str(sampled)),
              b("T", "t", str(len(tokens)), str(len(tokens)))],
             ["h"], ["logits", "token_new", "tokens"],
@@ -1103,6 +1510,17 @@ def build_trace(cfg, p, deploy, prompt_ids):
     for i in range(len(phases) - 1):
         a, bnext = phases[i][0], phases[i + 1][0]
         edges.append({"from": f"{a}.kv", "to": f"{bnext}.kv", "tensor": "kv_cache"})
+
+    # ---- `step.binding_vars`: which tensors each formula slot names.
+    #
+    # Keyed by the step's SUFFIX (see SLOT_VARS): the replay is one shape
+    # repeated five times, so `prefill.kv` and `d4.kv` carry the same row of the
+    # table. Every binding gets an entry, EMPTY where the slot denotes a
+    # dimension or an index rather than a tensor — an absent key would be a hole
+    # exactly where the reader is about to click, and `lint_slot_vars` rejects it.
+    for s in steps:
+        table = SLOT_VARS.get(s["id"].split(".", 1)[1], {})
+        s["binding_vars"] = {k: list(table.get(k, [])) for k in (s.get("bindings") or {})}
 
     max_kv_rows_total = max(s["ledger"]["config"]["kv_rows_total"] for s in steps)
     prefill_cost, decode_cost = steps[1]["attn_cost"], steps[5]["attn_cost"]
@@ -1176,6 +1594,11 @@ def build_trace(cfg, p, deploy, prompt_ids):
                       "role": "staging", "note": "本步算出的 K（最后一层的最后一行）"},
             "v_new": {"shape": [cfg["H"], cfg["d_head"]], "dtype": "fp32", "at": "SRAM",
                       "role": "staging", "note": "本步算出的 V"},
+            "kv_cache": {"shape": [cfg["L"], cfg["N"], cfg["H"], cfg["d_head"]],
+                         "dtype": "fp32", "at": "HBM", "role": "state",
+                         "note": "累积的 KV 缓存：每层一个 [t, H, d_h] 矩阵，逐 token 追加。"
+                                 "形状是终态容量；内容不发布（见模块 docstring），"
+                                 "它的字节数在账本里"},
             "attn": {"shape": [cfg["H"], cfg["N"]], "dtype": "fp32", "at": "SRAM",
                      "role": "staging",
                      "note": "最后一层最后一个查询对全部上下文的注意力权重；标签是终态容量"},
@@ -1293,10 +1716,16 @@ def lint(trace):
     gaps += lint_attn_cost(trace)
     gaps += lint_phase_roofline(trace)
     gaps += lint_crossover(trace)
+    gaps += lint_slot_vars(trace)
+    gaps += lint_dataflow(trace)
 
     infos.append(f'共 {len(trace["steps"])} 步 / {len(trace["graph"]["nodes"])} 节点 / '
                  f'{len(trace["graph"]["edges"])} 数据边')
     infos.append(f'state 写过的张量：{", ".join(sorted(written))}')
+    n_slots = sum(len(v) for s in trace["steps"]
+                  for v in (s.get("binding_vars") or {}).values())
+    infos.append(f'binding_vars：{n_slots} 条「slot → 张量」映射，'
+                 f'覆盖 {len(trace["steps"])} 步')
     # Informational only, so it must survive a trace whose ledger block is
     # malformed -- a lint that crashes on the very input it is meant to report
     # on is worse than one that misses the rule.
@@ -1899,6 +2328,72 @@ SABOTAGE_CASES = {
         {"ai": t["meta"]["phase_roofline"]["points"][0]["ai"] * 2}),
     "roofline point config missing its prompt length": lambda t: t["meta"][
         "phase_roofline"]["points"][0]["config"].pop("prompt"),
+    # -- step.binding_vars, i.e. the variable graph's `slot -> tensor` map.
+    #
+    # Three groups, and the prefixes say which port OWNS each rule, because the
+    # harness scopes each group to its owner and a rule with no owner is a rule
+    # tested nowhere:
+    #
+    #   `slotvars `  structural rules `views/variable-dag.js` also carries, so
+    #                the JS port catches these on the same broken copies.
+    #   `slotmap `   SEMANTIC rules only the generator can judge ("which tensor
+    #                SHOULD this slot name" is a fact about L05's formulas), so
+    #                the JS port has no rule here and the harness does not
+    #                require one.
+    #   `dataflow `  the pinned reads/writes, which is what the drawing is OF.
+    "slotvars block removed from a step": lambda t: t["steps"][0].pop("binding_vars"),
+    "slotvars an entry removed for a live slot": lambda t: t["steps"][0][
+        "binding_vars"].pop("KOLD"),
+    "slotvars an entry added for a slot that does not exist": lambda t: t["steps"][0][
+        "binding_vars"].update({"GHOST": ["h"]}),
+    "slotvars an entry is not a list": lambda t: t["steps"][0]["binding_vars"].update(
+        {"KOLD": "kv_cache"}),
+    "slotvars pointing at an undeclared tensor": lambda t: t["steps"][0][
+        "binding_vars"].update({"KOLD": ["ghost"]}),
+    # The rule that keeps the table a statement about THIS step. `logits` is a
+    # real node, but `prefill.kv` neither reads nor writes it.
+    "slotvars pointing at a tensor this step does not touch": lambda t: t["steps"][0][
+        "binding_vars"].update({"KOLD": ["logits"]}),
+    #
+    # `slotmap` -- the rules only the generator can judge.
+    #
+    # THE TRAP THIS LAB SITS ON, as a control. `KOLD` denotes the cache as it
+    # stood BEFORE this step; `KNEW` denotes the rows this step adds. A scan by
+    # tensor stem (the tempting generalisation of L00's alias table, needed
+    # because L00 writes its tensor `l` as `\ell`) links `KOLD` to `k_new` —
+    # measured, not hypothesised: `slot_vars_selftest` runs that scan and names
+    # the slot. These two cases re-state the consequence here, so a table that
+    # drifts toward what the scan would have said is a build failure.
+    "slotmap the old cache relinked to the rows this step adds": lambda t: t["steps"][0][
+        "binding_vars"].update({"KOLD": ["k_new"]}),
+    "slotmap the new K relinked to the cache it is appended to": lambda t: t["steps"][0][
+        "binding_vars"].update({"KNEW": ["kv_cache"]}),
+    "slotmap the new V left unlinked": lambda t: t["steps"][0][
+        "binding_vars"].update({"VNEW": []}),
+    # Attention's dependency on the accumulated history, unlinked.
+    "slotmap attention's K unlinked": lambda t: t["steps"][1][
+        "binding_vars"].update({"K": []}),
+    "slotmap attention's V linked to the rows of this step only": lambda t: t["steps"][1][
+        "binding_vars"].update({"V": ["k_new"]}),
+    "slotmap the LM head's residual stream unlinked": lambda t: t["steps"][3][
+        "binding_vars"].update({"H": []}),
+    #
+    # `dataflow` -- the reads/writes themselves. These are the mutations whose
+    # symptom is a DIFFERENT DRAWING rather than a failure, which is why they are
+    # pinned: the view's edge set is derived from `reads`/`writes`, so dropping
+    # one silently redraws the algorithm.
+    "dataflow the K/V projection loses its residual-stream input": lambda t: t["steps"][0][
+        "reads"].remove("h"),
+    "dataflow the K/V projection stops returning the cache it appends to":
+        lambda t: t["steps"][0]["writes"].remove("kv_cache"),
+    "dataflow attention stops reading the values": lambda t: t["steps"][1][
+        "reads"].remove("v_new"),
+    "dataflow attention stops reading the accumulated cache": lambda t: t["steps"][1][
+        "reads"].remove("kv_cache"),
+    "dataflow the LM head stops reading the residual stream": lambda t: t["steps"][3][
+        "reads"].remove("h"),
+    "dataflow the head stops appending the sampled token": lambda t: t["steps"][3][
+        "writes"].remove("tokens"),
     # -- the crossover point
     "crossover block missing": lambda t: t["meta"].pop("kv_crossover"),
     "crossover not equal to params / per_token": lambda t: t["meta"][
@@ -2181,6 +2676,32 @@ def main():
             print(f"  lint: {len(gaps)} gap / {len(warns)} warn；"
                   f"对照 {len(SABOTAGE_CASES)} 种破坏全部被抓到")
         built[name] = trace
+
+        # --- 4: the `slot -> tensor` map, against the scan it replaces.
+        #
+        # Three legs (see `slot_vars_selftest`), and the third is the one that
+        # makes the second evidence: the same scan that links L05's `KOLD` to
+        # `k_new` resolves L00's `\ell`/`l` correctly, so the misfire is a fact
+        # about these formulas rather than about the function. Reported for
+        # every configuration rather than once, because the table is keyed by
+        # step SUFFIX and a config-dependent binding would only show up in the
+        # config that has it.
+        sv_fails, n_stated, sv_hits, sv_linked, sv_lies = slot_vars_selftest(trace)
+        for line in sv_fails:
+            fails.append(f"{name}: {line}")
+            print(f"  SLOTVARS-FAIL  {line}")
+        # Both failure modes of the scan are reported, because they are
+        # different and only one of them is dangerous: sparse leaves a reader
+        # with no highlight, mislinked shows them a connection that is not
+        # there. Neither is asserted to a fixed number -- the ratio is a
+        # property of the formulas and would be wrong to freeze.
+        print(f"  slot→张量映射：{n_stated} 条声明式写入，"
+              f"{len(SLOT_VARS_REQUIRED)} 条必需映射成立")
+        print(f"  扫描对照：L00 的解析器在同一条 L05 公式上只能解出 "
+              f"{sv_hits}/{sv_linked} 个「有张量可点亮」的 slot"
+              f"（其余靠人声明）；按词干扫的变体则把 {len(sv_lies)} 个 slot "
+              f"连到错的张量，例如 {sv_lies[0][0]}.{sv_lies[0][1]}：表里是 "
+              f"{sv_lies[0][2]}，扫描给出 {sv_lies[0][3]}")
 
     # ------------------------------------------------------ cross-configuration
     #

@@ -6,7 +6,7 @@
     <title>L05 · KV Cache 与自回归生成 - AIInfraGuide</title>
     <meta
       name="description"
-      content="逐 token 生成的回放：每步把新的 K/V 追加进缓存，只用最后一个 query 算注意力。有/无 cache 的 attention shape 并排对比，显存账本随上下文增长，Prefill 与 Decode 落在 Roofline 的不同位置。"
+      content="逐 token 生成的回放，图里画的是变量：8 个张量是节点、每一次计算是边。缓存是图上一个自环的累积变量，attention 读它而不是只读本步新算的 K/V —— 这就是 cache 的全部意义。有/无 cache 的 attention shape 并排对比，显存账本随上下文增长，Prefill 与 Decode 落在 Roofline 的不同位置。"
     />
     <link rel="canonical" href="./05-kv-cache.html" />
     <link rel="stylesheet" href="./assets/vendor/katex/katex.min.css" />
@@ -15,34 +15,66 @@
     <link rel="stylesheet" href="./assets/engine/views/roofline.css" />
     <link rel="stylesheet" href="./assets/engine/views/attn-shape.css" />
     <link rel="stylesheet" href="./assets/engine/views/phase-roofline.css" />
+    <link rel="stylesheet" href="./assets/engine/views/variable-dag.css" />
     <style>
       :root { color-scheme: light dark; }
+      /* The page is one screen and does not scroll, for the same reason L00's
+         and L04's are: whatever step the cursor is on — its graph, its formula,
+         its values — has to fit without scrolling, or stepping through the
+         generation means scrolling after every step.
+
+         What L05 has to teach does not all fit that budget, and the split is the
+         decision this page makes rather than hides: the PER-STEP content is the
+         variable graph plus the formula sidebar, and everything that is about a
+         whole CONFIGURATION or the whole replay — the with/without-cache shape
+         comparison, the memory ledger, the two Rooflines, the sliders — is
+         folded into one <details> that scrolls internally when opened. Nothing
+         is removed; it is one click away instead of below the fold. L04 made the
+         same call for the same reason. */
+      html, body { height: 100%; }
       body {
         margin: 0;
-        padding: 20px 22px 56px;
+        padding: 10px 14px 10px;
+        box-sizing: border-box;   /* or the padding adds to 100dvh and the page scrolls by exactly it */
         background: #f9fafb;
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
           'Helvetica Neue', 'Noto Sans CJK SC', sans-serif;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        height: 100dvh;
+        overflow: hidden;
       }
-      @media (prefers-color-scheme: dark) { body { background: #0b1120; } }
-      .lab-back { display: inline-block; margin-bottom: 14px; color: #007aff; font-size: 13.5px; text-decoration: none; }
+      @media (prefers-color-scheme: dark) {
+        body { background: #0b1120; }
+      }
+      .lab-root { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+      #lab-stage { flex: 1 1 auto; min-height: 0; }
+      /* `height: 100%` needs a parent with a definite height at every level.
+         The host div exists only because the view is mounted into a fresh
+         element on each config change; without a height here the percentage
+         resolves against `auto` and the view falls back to its own content
+         height, which is what puts the control bar below the fold. */
+      #lab-stage > .vd-host { height: 100%; }
+      #lab-stage .vd-root { height: 100%; }
+      .lab-back { color: #007aff; font-size: 13px; text-decoration: none; flex: 0 0 auto; }
       .lab-provenance {
-        margin-top: 22px;
-        padding-top: 14px;
+        margin-top: 10px;
+        padding-top: 10px;
         border-top: 1px solid rgba(128, 128, 128, 0.25);
         color: #6b7280;
         font-size: 12px;
         line-height: 1.6;
       }
-      @media (prefers-color-scheme: dark) { .lab-provenance { color: #9ca3af; } }
       .lab-provenance code {
         background: rgba(128, 128, 128, 0.14);
         border-radius: 4px;
         padding: 1px 5px;
         font: 0.92em/1 ui-monospace, SFMono-Regular, Menlo, monospace;
       }
+      @media (prefers-color-scheme: dark) { .lab-provenance { color: #9ca3af; } }
       .lab-banner {
-        margin: 0 0 14px;
+        margin: 0 0 8px;
         padding: 8px 12px;
         border: 1px solid rgba(0, 122, 255, 0.35);
         border-radius: 8px;
@@ -51,18 +83,43 @@
         color: #1f2937;
       }
       @media (prefers-color-scheme: dark) { .lab-banner { color: #e5e7eb; } }
+      .lab-banner[hidden] { display: none; }
+
+      /* The reference panels, the sliders and the provenance note, folded away
+         so the page is exactly one screen. Open, this section scrolls on its
+         own rather than growing the page — which is what makes "fold it away"
+         different from "move it below the fold". */
+      .lab-more { flex: 0 0 auto; }
+      .lab-more > summary {
+        cursor: pointer;
+        color: #007aff;
+        font-size: 12.5px;
+        padding: 2px 0;
+        list-style: none;
+      }
+      .lab-more > summary::-webkit-details-marker { display: none; }
+      .lab-more > summary::before { content: '▸ '; }
+      .lab-more[open] > summary::before { content: '▾ '; }
+      .lab-more[open] .lab-more-bd {
+        max-height: 66vh;
+        overflow: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        padding-top: 8px;
+      }
 
       /* --------------------------------------------------------- the param bar
        *
-       * L05's own chrome, so it lives here rather than in the shared lab.css:
+       * L05's own chrome, so it lives here rather than in the shared lab.css —
        * the generic panels in that file are used by every lab, and keeping this
        * lab's sliders in this lab's page is what keeps them from colliding with
        * L01's. Colours come from the engine's custom properties so the bar
        * follows the light/dark theme without a second palette.
        */
       .l05-params {
-        margin: 0 0 12px;
-        padding: 10px 14px;
+        margin: 0;
+        padding: 8px 12px;
         border: 1px solid var(--lab-line, #e3e6ec);
         border-radius: 12px;
         background: var(--lab-panel, #fff);
@@ -73,11 +130,11 @@
       .l05-param { display: flex; align-items: center; gap: 8px; }
       .l05-param-label { font: 600 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--lab-dim, #6b7280); }
       .l05-param-name { color: var(--lab-accent-2, #b45309); }
-      .l05-param input[type="range"] { width: 90px; accent-color: var(--lab-accent, #007aff); cursor: pointer; }
+      .l05-param input[type="range"] { width: 96px; accent-color: var(--lab-accent, #007aff); cursor: pointer; }
       .l05-param-val {
         font: 650 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
         color: var(--lab-accent, #007aff);
-        min-width: 34px;
+        min-width: 38px;
         text-align: right;
       }
       .l05-param-hint { color: var(--lab-faint, #9ca3af); font-size: 11.5px; margin-left: auto; }
@@ -93,23 +150,21 @@
 
       /* ----------------------------------------------------------- the readout
        *
-       * The configuration's numbers, printed OUTSIDE the player's mount: the
-       * player replaces a panel's innerHTML on every paint, so anything injected
-       * into a panel body is wiped by the next frame. These are per-configuration
-       * values, so they belong beside the sliders.
+       * The numbers the ticket's criteria are about, folded with the panels.
+       * They live in the DOM whether or not the <details> is open, so the
+       * harness reads them the same way a reader does: by opening the section.
        */
       .l05-readout {
         display: flex;
         flex-wrap: wrap;
-        gap: 26px;
-        margin: 0 0 12px;
+        gap: 22px;
         padding: 10px 14px;
         border: 1px solid var(--lab-line, #e3e6ec);
         border-radius: 12px;
         background: var(--lab-panel, #fff);
         color: var(--lab-fg, #1f2937);
       }
-      .l05-group { min-width: 200px; }
+      .l05-group { min-width: 190px; }
       .l05-group-t {
         display: block;
         font-size: 11px;
@@ -126,29 +181,35 @@
       .l05-metric.good b { color: var(--lab-ok, #0f7b52); }
       .l05-metric.move b { color: var(--lab-accent, #007aff); }
       .l05-metric.flat b { color: var(--lab-faint, #9ca3af); }
+      .l05-metric.warn b { color: var(--lab-accent-2, #b45309); }
 
       /* The comparison and the Roofline are the two pictures this page is
-       * about, so they lead, above the engine's own two-column block. */
-      .lab-as-panel, .lab-pr-panel, .lab-ledger-panel { margin-bottom: 14px; }
-
-      /* The predicted-configuration ledger, beneath the replay one, so a reader
-       * can compare "what this trace ran" against "what my sliders say". */
-      .l05-predict { margin-bottom: 14px; }
-      .l05-predict-ctl { display: flex; flex-wrap: wrap; gap: 16px; padding: 10px 12px; align-items: center; }
-      .l05-predict-ctl label { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--lab-dim, #6b7280); }
-      .l05-predict-ctl input[type="range"] { width: 118px; accent-color: var(--lab-accent, #007aff); }
-      .l05-predict-ctl .l05-predict-val {
-        font: 650 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
-        color: var(--lab-accent, #007aff);
-        min-width: 64px;
-      }
+       * about, so they lead, above the engine's own blocks. */
+      .lab-as-panel, .lab-pr-panel, .lab-ledger-panel { margin-bottom: 0; }
       .lab-ledger-caption { padding: 0 12px 8px; color: var(--lab-dim, #6b7280); font-size: 12px; line-height: 1.6; }
       .lab-ledger-caption b { color: var(--lab-fg, #1f2937); }
+
+      @media (max-width: 720px) {
+        body { padding: 6px 8px 6px; gap: 6px; }
+        .lab-back { font-size: 12px; }
+        .l05-params { padding: 6px 8px; }
+        .l05-params-row {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 6px;
+          align-items: center;
+        }
+        .l05-param { gap: 3px; min-width: 0; flex-wrap: nowrap; }
+        .l05-param-label { font-size: 10px; white-space: nowrap; }
+        .l05-param input[type="range"] { flex: 1 1 24px; width: auto; min-width: 0; margin: 0; }
+        .l05-param-val { font-size: 10.5px; min-width: 20px; flex: 0 0 auto; }
+        .l05-param-hint { display: none; }
+      }
     </style>
   </head>
   <!--
-    Two build-time facts this document depends on, both learned the hard way in
-    the scaffolding ticket:
+    Two build-time facts this document depends on, both learned in the
+    scaffolding ticket and carried by every lab page since:
 
       * The no-index marker must wrap the whole document. On a bare <meta> tag
         Pagefind ignores it and indexes the page anyway.
@@ -157,35 +218,94 @@
         public/labs/*.html, so this page lands beside assets/ and must use
         ./assets/… — a ../ would 404 the whole engine.
 
-    The page holds a trace SET and a configuration. Every algorithmic decision —
-    state reconstruction, layout, formula tiers, playback — lives in the engine;
+    The page holds a trace SET and a configuration, and it draws the replay with
+    `views/variable-dag.js` rather than the engine's step DAG: nodes are
+    VARIABLES (the 8 tensors), edges are COMPUTATIONS, and one step's graph plus
+    its formula fits one screen. Every algorithmic decision — state
+    reconstruction, layout, formula tiers, playback — still lives in the engine;
     the memory ledger, the attention-shape comparison and the two Rooflines are
-    view components under assets/engine/views/. This file is the wiring between
-    them.
+    view components under assets/engine/views/. The page mounts the view directly
+    rather than through `player.js`, so it keeps the player's panel-render
+    contract by hand: same `(step, ctx)` signature, same ctx field names, so a
+    panel written for the player runs here unchanged.
   -->
   <body data-pagefind-ignore>
     <a class="lab-back" href="./">← 全部实验室</a>
     <p class="lab-banner" id="lab-banner" hidden></p>
 
-    <div id="lab-params"></div>
-    <div id="lab-readout"></div>
-    <div id="lab-stage"></div>
+    <div class="lab-root" id="lab-root">
+      <div id="lab-stage"></div>
 
-    <p class="lab-provenance" id="lab-provenance"></p>
+      <!-- Inside .lab-root, not after it: the panel styles in lab.css read the
+           palette custom properties, and those are defined on .lab-root. A
+           panel mounted outside it comes out unthemed. -->
+      <details class="lab-more" id="lab-more">
+      <summary>配置与参考面板 · 有/无 cache 形状对比 / 显存账本 / Prefill-Decode Roofline / 自检</summary>
+      <div class="lab-more-bd">
+        <div id="lab-params"></div>
+        <div id="lab-readout"></div>
+
+        <section class="lab-panel lab-panel-extra lab-as-panel" data-panel="attn-shape">
+          <div class="lab-panel-hd">
+            <span class="lab-panel-t">有 / 无 KV Cache：attention 的输入 shape 对比</span>
+            <span class="lab-panel-sub">契约 lint + 对照组</span>
+          </div>
+          <div class="lab-panel-bd" data-panel-body="attn-shape"></div>
+        </section>
+
+        <section class="lab-panel lab-panel-extra lab-ledger-panel" data-panel="ledger">
+          <div class="lab-panel-hd">
+            <span class="lab-panel-t">显存账本（本配置的回放）</span>
+            <span class="lab-panel-sub">视图组件 · ticket #45</span>
+          </div>
+        </section>
+
+        <section class="lab-panel lab-panel-extra lab-pr-panel" data-panel="phase-roofline">
+          <div class="lab-panel-hd">
+            <span class="lab-panel-t">Prefill / Decode 落在 Roofline 的不同位置</span>
+            <span class="lab-panel-sub">契约 lint + 对照组</span>
+          </div>
+          <div class="lab-panel-bd" data-panel-body="phase-roofline"></div>
+        </section>
+
+        <section class="lab-panel lab-panel-extra" data-panel="predict">
+          <div class="lab-panel-hd">
+            <span class="lab-panel-t">改配置，账本重算（预测值）</span>
+            <span class="lab-panel-sub">纯函数 predict(config) → 字节数；这些配置没有对应的 trace</span>
+          </div>
+          <div class="lab-panel-bd" data-panel-body="predict"></div>
+        </section>
+
+        <section class="lab-panel lab-panel-extra" data-panel="selfcheck">
+          <div class="lab-panel-hd">
+            <span class="lab-panel-t">自检 · 引擎正确性</span>
+            <span class="lab-panel-sub">在浏览器里真跑，不是预期值</span>
+          </div>
+          <div class="lab-panel-bd" data-panel-body="selfcheck"></div>
+        </section>
+
+        <section class="lab-panel lab-panel-extra" data-panel="checks">
+          <div class="lab-panel-hd">
+            <span class="lab-panel-t">自检 · 账本 / 形状对比 / Roofline / 变量图映射</span>
+            <span class="lab-panel-sub">契约 lint + 对照组</span>
+          </div>
+          <div class="lab-panel-bd" data-panel-body="checks"></div>
+        </section>
+
+        <p class="lab-provenance" id="lab-provenance"></p>
+      </div>
+      </details>
+    </div>
 
     <!-- KaTeX is vendored, never a CDN: a lab page must make zero external requests. -->
     <script src="./assets/vendor/katex/katex.min.js"></script>
     <script src="./assets/engine/trace-model.js"></script>
-    <script src="./assets/engine/layout.js"></script>
     <script src="./assets/engine/formula.js"></script>
-    <script src="./assets/engine/dag.js"></script>
-    <script src="./assets/engine/tensors.js"></script>
-    <script src="./assets/engine/narrow.js"></script>
     <script src="./assets/engine/views/ledger.js"></script>
     <script src="./assets/engine/views/roofline.js"></script>
     <script src="./assets/engine/views/attn-shape.js"></script>
     <script src="./assets/engine/views/phase-roofline.js"></script>
-    <script src="./assets/engine/player.js"></script>
+    <script src="./assets/engine/views/variable-dag.js"></script>
     <script src="./assets/engine/verify.js"></script>
 
     <!--
@@ -207,10 +327,10 @@
         var manifest = (window.LabTraceSets || {})[SET];
         var esc = LabEngine.formula.escapeText;
 
-        var paramsHost = document.getElementById('lab-params');
-        var readoutHost = document.getElementById('lab-readout');
         var stage = document.getElementById('lab-stage');
+        var readoutHost = document.getElementById('lab-readout');
         var banner = document.getElementById('lab-banner');
+        var more = document.getElementById('lab-more');
 
         if (!manifest || !traces[manifest.default]) {
           stage.textContent = 'trace 未加载：本页的 trace 集合占位符没有被构建脚本替换。';
@@ -271,7 +391,7 @@
 
         /* ------------------------------------------------------------ readout
          *
-         * The four numbers the ticket's fourth criterion is about: the ledger's
+         * The numbers the ticket's fourth criterion is about: the ledger's
          * segments must recompute when the context, layer count or precision
          * changes, and the reader checks that here.
          *
@@ -332,15 +452,15 @@
           return '<div class="l05-readout">' + html + '</div>';
         }
 
-        /* ------------------------------------------------------ the config ledger
+        /* ------------------------------------------------------ the cost model
          *
-         * The replay's ledger is driven by the trace (see the panel below). This
-         * second one is driven by the MODEL, because its whole purpose is to show
-         * a configuration the trace never ran: at this toy model's size the KV
-         * cache is still a small fraction of the weights, and the crossover is at
-         * context ≈ 410 for 2 layers — beyond anything the sliders can replay.
-         * So a reader who wants to see the cache dominate has to extrapolate, and
-         * this is where they do it.
+         * The replay's ledger is driven by the trace. The PREDICTED one is driven
+         * by this model, because its whole purpose is to show a configuration the
+         * trace never ran: at this toy model's size the KV cache is still a small
+         * fraction of the weights, and the crossover is at context ≈ 402 for 2
+         * layers — beyond anything the sliders can replay. So a reader who wants
+         * to see the cache dominate has to extrapolate, and this is where they
+         * do it.
          *
          * Every number it shows is a PREDICTION from the closed form, and the
          * self-check panel underneath is what says the formula is the same one
@@ -451,136 +571,189 @@
         }
 
         /* ------------------------------------------------------ the panels */
-        var player = null;
+        var view = null;
         var ledgerView = null;
-        var predictBar = null;
         var current = null;
 
         function mount(name) {
           var trace = traces[name];
+          var idx = LabEngine.traceModel.index(trace);
           current = name;
           ledgerView = null;
-          predictBar = null;
-          if (player) { try { player.destroy(); } catch (e) { /* already gone */ } }
+          if (view) { try { view.destroy(); } catch (e) { /* already gone */ } }
           stage.innerHTML = '';
-          // Clear the predicted-config panel too: it belongs to the configuration
-          // that was mounted, and leaving it behind would show one trace's ledger
-          // beside another trace's sliders.
-          var old = document.querySelector('.l05-predict');
-          if (old) old.remove();
 
           var cfg = trace.meta.config;
           var model = MODEL(trace.ledger.segments, trace.ledger.unit);
 
-          /* --- the replay's ledger.
+          /* --- the three L05 views, built once.
            *
-           * Mounted BESIDE the engine's panel body, not into it: the engine
-           * assigns `host.innerHTML = render(...)` on every paint, which would
-           * detach a live view — and this one is stateful on purpose (hover
-           * highlighting and a CSS transition on the segment widths, so the
-           * reader watches the KV block grow rather than seeing it jump).
-           * `[data-panel="ledger"]` is the section the engine created and never
-           * touches again, so appending a sibling body to it survives repaints. */
-          var ledgerPanel = {
-            id: 'ledger',
-            label: '显存账本（本配置的回放）',
-            render: function (step, ctx) {
-              if (!ledgerView) {
-                var section = document.querySelector('[data-panel="ledger"]');
-                var host = document.createElement('div');
-                host.className = 'lab-panel-bd';
-                host.setAttribute('data-ledger-mount', '1');
-                section.appendChild(host);
-                ledgerView = LabEngine.ledger.bar(host, {
-                  segments: trace.ledger.segments,
-                  unit: trace.ledger.unit,
-                  caption: function (bytes, c) {
-                    if (c) return '';
-                    var k = step.ledger.config;
-                    return '第 ' + ctx.cursor + ' 步 · ' + step.title +
-                      ' —— 上下文 ' + k.seq_len + ' 个 token，KV Cache ' +
-                      k.layers + ' 层 × ' + k.seq_len + ' 行 = ' + k.kv_rows_total +
-                      ' 行。这里画的是<b>这份 trace 真跑过的</b>配置。';
-                  }
-                });
-              }
-              /* The numbers come from the trace, not the model: this is the
-               * replay, and the model's job is only to be checked against them
-               * (see the self-check panel). */
-              ledgerView.update(step.ledger.bytes);
-              ledgerView.root.setAttribute('data-step-id', step.id);
-              return '';
-            }
-          };
-
+           * These are the panels the engine's player would have rendered, in the
+           * same boxes, driven here by the variable-DAG view's step callback
+           * instead — the view owns the cursor on this page, so it is the view's
+           * callback that has to repaint them. What is passed to each `render`
+           * is the TRACE's own step, not the view's model step: the model step
+           * carries the fields the graph needs (reads, writes, bindings, state)
+           * and deliberately not the lab's own blocks (`ledger`, `attn_cost`),
+           * which are what these panels read. The `ctx` is the shape
+           * `player.js` hands a panel, field for field.
+           */
           var shapePanel = LabEngine.attnShape.panel({ id: 'attn-shape' }, { trace: trace });
           var phasePanel = LabEngine.phaseRoofline.panel({ id: 'phase-roofline' }, { trace: trace });
 
-          player = LabEngine.lab(trace, {
-            mount: stage,
-            title: 'KV Cache 与自回归生成',
-            lead: 'Prompt ' + cfg.prompt_len + ' 个 token → 生成 ' + cfg.gen_len +
-                  ' 个，' + cfg.L + ' 层 ' + cfg.dtype + '，共 ' + trace.steps.length +
-                  ' 步。每步四件事：把本步的 K/V 追加进缓存（缓存每层长一行）、' +
-                  '只用本步的 query 对全量 K/V 做注意力、FFN、再取最后一个位置采样下一个 token。' +
-                  '缓存每长一行，账本里的 KV 分项就涨一格，而『不做缓存要重算多少』' +
-                  '也随上下文变长而拉开 —— 两张图都在下面。',
-            tier: 'num',
-            speed: 1000,
-            panels: [shapePanel, ledgerPanel, phasePanel],
-            tutorial: {
-              href: '/AIInfraGuide/prerequisites/transformer/38-从transformer到llm自回归生成深入理解',
-              label: '返回教程正文：3.8 从 Transformer 到 LLM 自回归生成'
+          function renderPanels(i, step, ctx) {
+            /* The raw step, so the panels see `ledger` / `attn_cost`. */
+            var raw = trace.steps[i];
+            var pctx = { cursor: i, step: raw, snapshot: ctx.snapshot, trace: trace };
+            document.querySelector('[data-panel-body="attn-shape"]').innerHTML =
+              shapePanel.render(raw, pctx);
+            document.querySelector('[data-panel-body="phase-roofline"]').innerHTML =
+              phasePanel.render(raw, pctx);
+
+            /* The ledger is the one view with DOM state (hover highlight, width
+               transitions), so it is appended beside the engine's panel body
+               rather than into it — `innerHTML` on every paint would detach a
+               live view. Same arrangement L04 and the player use. */
+            if (!ledgerView) {
+              var host = document.createElement('div');
+              host.className = 'lab-panel-bd';
+              /* `data-ledger-mount`, not a lab-specific name: this attribute
+                 is how `scripts/verify-l05.py` and `scripts/verify-ledger.py`
+                 find the live ledger view, and it did not change when the page
+                 moved from the engine player to the variable graph. */
+              host.setAttribute('data-ledger-mount', '1');
+              document.querySelector('[data-panel="ledger"]').appendChild(host);
+              ledgerView = LabEngine.ledger.bar(host, {
+                segments: trace.ledger.segments,
+                unit: trace.ledger.unit,
+                caption: function (bytes, c) {
+                  if (c) return '';
+                  var k = raw.ledger.config;
+                  return '第 ' + (i + 1) + ' 步 · ' + esc(raw.title) +
+                    ' —— 上下文 ' + k.seq_len + ' 个 token，KV Cache ' +
+                    k.layers + ' 层 × ' + k.seq_len + ' 行 = ' + k.kv_rows_total +
+                    ' 行。这里画的是<b>这份 trace 真跑过的</b>配置。';
+                }
+              });
             }
+            /* The numbers come from the trace, not the model: this is the
+               replay, and the model's job is only to be checked against them. */
+            ledgerView.update(raw.ledger.bytes);
+            ledgerView.root.setAttribute('data-step-id', raw.id);
+            void step;
+          }
+
+          view = LabEngine.variableDag.mount(stage, trace, {
+            title: 'KV Cache 与自回归生成 · 变量图',
+            tier: 'num',
+            param: 'step',
+            /* L05's steps are multi-operand computations like L04's: the append
+               writes three variables (`k_new`, `v_new`, and the cache it
+               extends), attention writes two, the head writes three. The
+               carried rule draws one edge per step and would drop the rest —
+               including `k_new -> attn` and `v_new -> attn`, the two edges that
+               make attention attention. See the `edgeMode` note in
+               views/variable-dag.js. */
+            edgeMode: 'operands',
+            /* Five bands deep (tokens → kv_cache → the fresh K/V → h/attn →
+               logits) and four wide, against a panel that is roughly square.
+               The defaults were measured against L00's six-node graph and
+               letterbox a five-band one down to a ~4px label. The budget below
+               is what makes the drawing legible at the size the panel actually
+               is; the numbers are a measurement, and the harness asserts the
+               resulting label size. */
+            geo: { NW: 112, NH: 44, GAPX: 96, GAPY: 26, PAD: 16,
+                   RAIL_GAP: 16, RAIL_PAD: 30, MIN_SCALE: 0.7 },
+            /* Node labels here are tensor names on a shape, and the second line
+               is the tensor's shape. `tensors[].at` for this lab is short
+               ("HBM", "SRAM"), which fits — but the shape at the end of a
+               long name (`kv_cache [2×8×4×16]`) does not, and the sidebar's
+               read/write chips carry the shape anyway. */
+            nodeLocation: false,
+            /* `[N, 64]` at N=128 is 8192 cells and `[4, 16]` is 64; both are
+               printed capped with the elision count shown, so one step's values
+               still fit the sidebar. The cap is what makes a step that writes
+               THREE tensors (`prefill.kv`) fit at all — and the true shape is
+               always in the header, so the reader knows what is elided. */
+            valueLimits: { maxRows: 5, maxCols: 6, maxSlices: 2 },
+            onStep: renderPanels
           });
 
-          /* The panels lead, above the engine's own two-column block, in the
-           * order the argument is made: the shape comparison is the teaching
-           * point, the ledger is the cost, the Roofline is why it costs that. */
-          ['attn-shape', 'ledger', 'phase-roofline'].forEach(function (pid) {
-            var el = document.querySelector('[data-panel="' + pid + '"]');
-            if (!el) return;
-            el.classList.add('lab-' + (pid === 'attn-shape' ? 'as' : pid === 'ledger' ? 'ledger' : 'pr') + '-panel');
-            document.querySelector('.lab-panel-dag').before(el);
+          /* The slot → tensor map's own lint, with its control group. It is this
+             view's contract, so its verdict is reported in the view's terms: the
+             same {gaps, warns, infos} + sabotage shape the other views use, read
+             back by the harness off `window.__labViewChecks`. */
+          var svLint = LabEngine.variableDag.lint(trace);
+          var svSab = LabEngine.variableDag.sabotageChecks(trace);
+
+          /* --- the step-level dataflow, restated against the trace the graph is
+           * drawn FROM. The view derives its edges from `reads`/`writes`, so a
+           * read that goes missing does not make the drawing fail — it redraws a
+           * different algorithm, with no error anywhere. These pins are what
+           * make that a page-level verdict rather than something a reader has to
+           * notice from the picture. The generator carries the same table. */
+          var DATAFLOW = [
+            ['prefill.kv', ['tokens', 'h', 'kv_cache'], ['k_new', 'v_new', 'kv_cache']],
+            ['prefill.attn', ['tokens', 'k_new', 'v_new', 'kv_cache'], ['h', 'attn']],
+            ['prefill.head', ['h'], ['logits', 'token_new', 'tokens']],
+            ['d1.kv', ['tokens', 'h', 'kv_cache'], ['k_new', 'v_new', 'kv_cache']],
+            ['d1.attn', ['tokens', 'k_new', 'v_new', 'kv_cache'], ['h', 'attn']],
+            ['d1.head', ['h'], ['logits', 'token_new', 'tokens']]
+          ];
+          var dfBad = [];
+          DATAFLOW.forEach(function (row) {
+            var s = null;
+            trace.steps.forEach(function (x) { if (x.id === row[0]) s = x; });
+            if (!s) { dfBad.push(row[0] + ' 不在 trace 里'); return; }
+            [['reads', row[1]], ['writes', row[2]]].forEach(function (pair) {
+              var got = s[pair[0]] || [];
+              var missing = pair[1].filter(function (t) { return got.indexOf(t) === -1; });
+              if (missing.length) {
+                dfBad.push(row[0] + '.' + pair[0] + ' 少了 ' + missing.join('、'));
+              }
+            });
           });
 
           /* Compact proof panel for the engine's own contracts. It carries the
-           * control group, so a green verdict here means something -- see
-           * labs/assets/engine/verify.js. */
-          var proof = document.createElement('section');
-          proof.className = 'lab-panel lab-panel-extra';
-          proof.innerHTML = '<div class="lab-panel-hd"><span class="lab-panel-t">自检 · 引擎正确性</span>' +
-            '<span class="lab-panel-sub">在浏览器里真跑，不是预期值</span></div>' +
-            '<div class="lab-panel-bd" style="padding:10px 12px"></div>';
-          stage.appendChild(proof);
-          LabEngine.verify.panel(proof.querySelector('.lab-panel-bd'), trace, player.index);
+             control group, so a green verdict here means something -- see
+             labs/assets/engine/verify.js. */
+          LabEngine.verify.panel(
+            document.querySelector('[data-panel-body="selfcheck"]'), trace, view.index);
 
           /* --- the L05 self-checks. Each carries its own control group, so a
            * green verdict here means something.
            *
-           * THREE of them, because this lab introduced three contract blocks
-           * and each is governed by rules in a different file: the ledger's
-           * (views/ledger.js, ticket #45), the shape comparison's
-           * (views/attn-shape.js) and the phase Roofline's
-           * (views/phase-roofline.js). The ledger's is `check()` rather than a
-           * bare `lint()` — it also cross-checks the page's cost model against
-           * every published step, which is the thing that makes the
-           * predicted-configuration sliders legitimate.
+           * FOUR of them, because this lab's contract blocks are governed by
+           * rules in four different files: the ledger's (views/ledger.js, ticket
+           * #45), the shape comparison's (views/attn-shape.js), the phase
+           * Roofline's (views/phase-roofline.js), and — added by this migration —
+           * the variable graph's slot→tensor map
+           * (views/variable-dag.js + labs/traces/kv_cache.py).
+           *
+           * The ledger's is `check()` rather than a bare `lint()` — it also
+           * cross-checks the page's cost model against every published step,
+           * which is the thing that makes the predicted-configuration sliders
+           * legitimate.
            *
            * The verdicts are collected on `window.__labViewChecks` so
            * scripts/verify-l05.py can read the same objects the page computed
            * rather than re-deriving them. */
-          var checks = {};
-          function checkSection(title, sub, html, key, value) {
-            var sec = document.createElement('section');
-            sec.className = 'lab-panel lab-panel-extra';
-            sec.innerHTML = '<div class="lab-panel-hd"><span class="lab-panel-t">自检 · ' +
-              esc(title) + '</span><span class="lab-panel-sub">' + esc(sub) + '</span></div>' +
-              '<div class="lab-panel-bd" style="padding:10px 12px"></div>';
-            stage.appendChild(sec);
-            sec.querySelector('.lab-panel-bd').innerHTML = html;
-            checks[key] = value;
-          }
+          var checks = {
+            /* The dataflow pins and the slot map, both this page's own rules. */
+            dataflow: {
+              rows: DATAFLOW.length,
+              failures: dfBad,
+              passed: dfBad.length === 0
+            },
+            slotVars: {
+              lintGaps: svLint.gaps.length, lintWarns: svLint.warns.length,
+              sabotageTotal: svSab.total, sabotageMissed: svSab.missed,
+              sabotageSkipped: svSab.skipped, sabotageNoop: svSab.noop,
+              present: true, infos: svLint.infos,
+              passed: svLint.gaps.length === 0 && svSab.missed.length === 0 &&
+                      svSab.noop.length === 0
+            }
+          };
 
           var led = LabEngine.ledger.check(trace, model);
           var ledBad = [];
@@ -593,109 +766,149 @@
             ledBad.push('契约 lint ' + led.lint.gaps.length + ' gap，对照组漏 ' +
                         led.lintSabotageMissed.length + ' 种');
           }
-          checkSection('账本数值与契约',
-            '逐帧对拍 + 缩放性质 + 对照组',
-            '<div class="lab-verdict ' + (led.passed ? 'lab-ok' : 'lab-bad') + '">' +
-            '<b>逐步对拍：</b>' + led.steps.length + ' 步，' +
-            (led.stepFailures === 0
-              ? '<b>0 步不一致</b>（每一格都由 shape 公式从该步 config 重算，' +
-                '与 trace 里的实算字节数逐位相同）。'
-              : '<b>' + led.stepFailures + ' 步不一致</b>。') +
-            '<br><b>缩放性质：</b>' + (led.propertyFailures === 0
-              ? led.properties.length + ' 条全部成立 —— 这些是公式的性质，不是某一次求值的结果。'
-              : '<b>' + led.propertyFailures + ' 条不成立</b>。') +
-            '<br><b>对照组（故意写错的模型）：</b>' + led.controls.length + ' 种，' +
-            (led.missedControls.length === 0
-              ? '全部被抓到 —— 所以上面的 0 不是对拍写错。'
-              : '<b>漏掉 ' + led.missedControls.length + ' 种，这组对拍没有区分力。</b>') +
-            '</div>', 'ledger', led);
+          checks.ledger = led;
 
-          /* The two pure-lint views. Their verdicts are the same shape the
-           * ledger's `check()` returns, so the harness reads all three the same
-           * way and the panel renders them the same way. */
           [['有 / 无 KV Cache · 形状对比', '契约 lint + 对照组',
             LabEngine.attnShape, 'attnShape'],
            ['Prefill / Decode Roofline', '契约 lint + 对照组',
             LabEngine.phaseRoofline, 'phaseRoofline']].forEach(function (entry) {
-            var title = entry[0], sub = entry[1], view = entry[2], key = entry[3];
-            var r = view.lint(trace);
-            var missed = view.sabotageChecks(trace);
-            var total = Object.keys(view.SABOTAGE_CASES).length;
-            var verdict = { lintGaps: r.gaps.length, lintWarns: r.warns.length,
+            var title = entry[0], sub = entry[1], v = entry[2], key = entry[3];
+            var r = v.lint(trace);
+            var missed = v.sabotageChecks(trace);
+            var total = Object.keys(v.SABOTAGE_CASES).length;
+            checks[key] = { lintGaps: r.gaps.length, lintWarns: r.warns.length,
                             sabotageTotal: total, sabotageMissed: missed,
                             infos: (r.infos || []).map(function (x) { return x.what; }),
                             passed: r.gaps.length === 0 && missed.length === 0 };
-            checkSection(title, sub,
-              '<div class="lab-verdict ' + (verdict.passed ? 'lab-ok' : 'lab-bad') + '">' +
-              '<b>契约 lint：</b>干净的 trace 报 <b>' + r.gaps.length + '</b> 个 gap、' +
-              r.warns.length + ' 个 warn；对照组 ' + total + ' 种破坏' +
-              (missed.length
-                ? '，<b>漏掉 ' + missed.length + ' 种：' + esc(missed.join('、')) + '</b>'
-                : '全部被抓到') + '。' +
-              (missed.length ? '' : 'lint 是活的，所以这个 0 有意义。') +
-              (verdict.infos.length ? '<br>' + esc(verdict.infos.join(' · ')) : '') +
-              '</div>', key, verdict);
           });
           window.__labViewChecks = checks;
 
-          /* --- the predicted-configuration ledger, under its own sliders. */
-          predictBar = buildPredictPanel(trace, model);
+          /* The verdict text, in the components' own terms. */
+          function verdict(title, ok, html) {
+            return '<div class="lab-verdict ' + (ok ? 'lab-ok' : 'lab-bad') + '">' +
+              '<b>' + esc(title) + '</b><br>' + html + '</div>';
+          }
+          var parts = [];
+
+          parts.push(verdict('账本数值与契约', led.passed,
+            '逐步对拍：' + led.steps.length + ' 步，' +
+            (led.stepFailures === 0
+              ? '<b>0 步不一致</b>（每一格都由 shape 公式从该步 config 重算，与 trace 里的实算字节数逐位相同）。'
+              : '<b>' + led.stepFailures + ' 步不一致</b>。') +
+            '<br>缩放性质：' + (led.propertyFailures === 0
+              ? led.properties.length + ' 条全部成立 —— 这些是公式的性质，不是某一次求值的结果。'
+              : '<b>' + led.propertyFailures + ' 条不成立</b>。') +
+            '<br>对照组（故意写错的模型）：' + led.controls.length + ' 种，' +
+            (led.missedControls.length === 0
+              ? '全部被抓到 —— 所以上面的 0 不是对拍写错。'
+              : '<b>漏掉 ' + led.missedControls.length + ' 种，这组对拍没有区分力。</b>') +
+            (ledBad.length ? '<br><b>' + esc(ledBad.join('；')) + '</b>' : '')));
+
+          [['有 / 无 KV Cache · 形状对比', 'attnShape'],
+           ['Prefill / Decode Roofline', 'phaseRoofline']].forEach(function (pair) {
+            var c = checks[pair[1]];
+            parts.push(verdict(pair[0], c.passed,
+              '契约 lint：干净的 trace 报 <b>' + c.lintGaps + '</b> 个 gap、' +
+              c.lintWarns + ' 个 warn；对照组 ' + c.sabotageTotal + ' 种破坏' +
+              (c.sabotageMissed.length
+                ? '，<b>漏掉 ' + c.sabotageMissed.length + ' 种：' +
+                  esc(c.sabotageMissed.join('、')) + '</b>'
+                : '全部被抓到') + '。' +
+              (c.sabotageMissed.length ? '' : 'lint 是活的，所以这个 0 有意义。')));
+          });
+
+          parts.push(verdict('变量图的数据流与 slot → 张量映射',
+            checks.dataflow.passed && checks.slotVars.passed,
+            '数据流钉死了 ' + checks.dataflow.rows + ' 步的 reads/writes' +
+            (checks.dataflow.passed
+              ? '（<b>全部成立</b>）—— 变量图的边就是从这两个数组推出来的，'
+                : '，<b>' + esc(dfBad.join('；')) + '</b> —— ') +
+            '少了任何一条，图画出来的是<b>另一个算法</b>，而且不会报错。<br>' +
+            '映射契约 lint：' + checks.slotVars.lintGaps + ' 个 gap、' +
+            checks.slotVars.lintWarns + ' 个 warn；对照组 ' +
+            checks.slotVars.sabotageTotal + ' 种破坏' +
+            (checks.slotVars.sabotageMissed.length
+              ? '，<b>漏掉 ' + esc(checks.slotVars.sabotageMissed.join('、')) + '</b>'
+              : '全部被抓到') + '。' +
+            '<br><b>这张表是写出来的，不是从 LaTeX 里猜的：</b>' +
+            '<code>step.binding_vars</code> 由生成器逐 slot 声明。' +
+            'L00 可以用正则扫公式，因为它那里的公式写的就是张量的名字；' +
+            'L05 的不行 —— 公式里的符号几乎全是维度参数（<code>l</code>、' +
+            '<code>t</code>、<code>n_q</code>、<code>d_model</code>），' +
+            '而张量叫 <code>k_new</code>/<code>v_new</code>/<code>kv_cache</code>。' +
+            '更危险的是「按词干扫」这个显然的修法会把 <code>KOLD</code>' +
+            '（这一步之前就有的缓存）连到 <code>k_new</code>（这一步新加的几行）—— ' +
+            '把「缓存」和「新行」说成同一个东西。'))
+
+          document.querySelector('[data-panel-body="checks"]').innerHTML = parts.join('');
 
           readoutHost.innerHTML = readout(trace);
 
-          /* The player handle, for scripts/verify-l05.py. Exposing it is
-           * harmless in production and it is the only way a harness can assert
-           * against the same object the page drives rather than a
-           * re-implementation of it. */
-          window.__p = player;
+          /* --- the predicted-configuration ledger, under its own sliders. */
+          buildPredictPanel(trace, model);
+
+          /* The view handle, for scripts/verify-l05.py. Exposing it is harmless
+           * in production and it is the only way the harness can assert against
+           * the same object the page drives rather than a re-implementation of
+           * it.
+           *
+           * `window.__p` as well as `window.__vd`: the same object under the
+           * name the player used to be exposed as. The harness drives the cursor
+           * through it (`setCursor`, `index`) — an interface the variable-DAG
+           * view has too, and the two agree on it because both are the engine's
+           * idea of a cursor. Keeping the old name means the replay/ledger/shape
+           * assertions in `scripts/verify-l05.py` did not have to be rewritten
+           * for a rename that carries no meaning. */
+          window.__vd = view;
+          window.__p = view;
           window.__labTrace = trace;
           window.__labConfig = name;
           window.__labManifest = manifest;
           window.__labTraces = traces;
           window.__labModel = model;
-          return player;
+          window.__labIndex = idx;
+          window.__labChecks = checks;
+          return view;
         }
 
         /* -------------------------------------------------- the predict panel
          *
          * The sliders here do NOT select a trace — they drive the closed form
          * for a configuration no trace covers. That is a different kind of
-         * control from the ones above, so it gets its own panel with its own
+         * control from the one above, so it gets its own panel with its own
          * heading saying so, rather than being mixed into the config bar.
          */
         function buildPredictPanel(trace, model) {
           var base = {};
           Object.keys(trace.meta.config).forEach(function (k) { base[k] = trace.meta.config[k]; });
 
-          var ctl = document.createElement('section');
-          ctl.className = 'lab-panel lab-panel-extra l05-predict';
-          ctl.innerHTML =
-            '<div class="lab-panel-hd"><span class="lab-panel-t">改配置，账本重算（预测值）</span>' +
-              '<span class="lab-panel-sub">纯函数 predict(config) → 字节数；' +
-              '这些配置没有对应的 trace，是公式算出来的</span></div>' +
-            '<div class="l05-predict-ctl" id="l05-predict-row"></div>' +
-            '<div class="lab-panel-bd" id="l05-predict-ledger" style="padding:0 12px 12px"></div>';
-          stage.appendChild(ctl);
+          var host = document.querySelector('[data-panel-body="predict"]');
+          host.innerHTML =
+            '<div class="l05-params-row" id="l05-predict-row"></div>' +
+            '<div id="l05-predict-ledger" style="padding-top:10px"></div>';
 
           var sliders = [
-            { key: 'seq_len', label: '上下文长度', min: 1, max: 4096, step: 1, value: trace.meta.config.N },
+            { key: 'seq_len', label: '上下文', min: 1, max: 4096, step: 1, value: trace.meta.config.N },
             { key: 'layers', label: '层数', min: 1, max: 80, step: 1, value: trace.meta.config.L },
             { key: 'kv_bytes', label: 'KV 精度（字节/元素）', min: 1, max: 2, step: 1,
               value: trace.meta.config.kv_bytes }
           ];
           var controls = {};
-          var row = ctl.querySelector('#l05-predict-row');
+          var row = host.querySelector('#l05-predict-row');
           sliders.forEach(function (s) {
             var el = document.createElement('label');
-            el.innerHTML = s.label + ' <input type="range" min="' + s.min + '" max="' + s.max +
-              '" step="' + s.step + '" value="' + s.value + '"> <span class="l05-predict-val"></span>';
+            el.className = 'l05-param';
+            el.innerHTML = '<span class="l05-param-label">' + esc(s.label) + '</span>' +
+              '<input type="range" min="' + s.min + '" max="' + s.max +
+              '" step="' + s.step + '" value="' + s.value + '" aria-label="' + esc(s.label) + '">' +
+              ' <span class="l05-param-val"></span>';
             row.appendChild(el);
             var input = el.querySelector('input');
-            controls[s.key] = { input: input, out: el.querySelector('.l05-predict-val') };
+            controls[s.key] = { input: input, out: el.querySelector('.l05-param-val') };
             input.addEventListener('input', recompute);
           });
 
-          var ledger = LabEngine.ledger.bar(ctl.querySelector('#l05-predict-ledger'), {
+          var ledger = LabEngine.ledger.bar(host.querySelector('#l05-predict-ledger'), {
             segments: model.segments,
             unit: model.unit
           });
@@ -718,14 +931,15 @@
             var bytes = model.predict(cfg);
             ledger.update(bytes);
 
-            var host = ctl.querySelector('#l05-predict-ledger');
-            var cap = host.querySelector('.lab-ledger-caption');
+            var holder = host.querySelector('#l05-predict-ledger');
+            var cap = holder.querySelector('.lab-ledger-caption');
             if (!cap) {
               cap = document.createElement('div');
               cap.className = 'lab-ledger-caption';
-              host.appendChild(cap);
+              holder.appendChild(cap);
             }
-            var share = bytes.kv_cache / (bytes.params + bytes.kv_cache + bytes.activations);
+            var total = bytes.params + bytes.kv_cache + bytes.activations;
+            var share = bytes.kv_cache / total;
             var perToken = 2 * cfg.layers * base.H * base.d_head * cfg.kv_bytes;
             var crossAt = bytes.params / perToken;
             cap.innerHTML = '这是 <b>预测值</b>，不是 trace 里跑过的配置：' + cfg.layers +
@@ -743,7 +957,7 @@
           }
           recompute();
 
-          return { element: ctl, ledger: ledger, controls: controls, recompute: recompute };
+          return { ledger: ledger, controls: controls, recompute: recompute };
         }
 
         /* ------------------------------------------------------ the sliders */
@@ -754,6 +968,7 @@
         ];
 
         function buildParamBar() {
+          var paramsHost = document.getElementById('lab-params');
           var cur = valuesFromTrace(traces[current]);
           var html = '<div class="l05-params"><div class="l05-params-row">';
           PARAMS.forEach(function (p) {
@@ -770,7 +985,7 @@
               '</div>';
           });
           html += '<span class="l05-param-hint">改动会重新载入对应配置的 trace，' +
-            '页面上的数字与两张图随之变化（' + manifest.traces.length +
+            '页面上的数字与视图随之变化（' + manifest.traces.length +
             ' 组合法配置，全部由同一个脚本生成）</span>';
           html += '</div><div class="l05-params-note" id="l05-params-note" hidden></div></div>';
 
@@ -819,7 +1034,7 @@
         }
 
         /* Deep links: ?cfg= and ?step=, each announced when out of range rather
-         * than silently ignored — the same terms the player uses. */
+         * than silently ignored — the same terms the view uses. */
         var query = new URLSearchParams(location.search);
         var messages = [];
         var requestedCfg = query.get('cfg');
@@ -842,16 +1057,19 @@
               len + ' 步），已停在第一步。');
           }
         }
+        /* ?more=1 opens the folded reference section — the harness uses it to
+           read the panels without clicking, and a reader can bookmark it. */
+        if (query.get('more') === '1') more.setAttribute('open', '');
         if (messages.length) {
           banner.hidden = false;
           banner.textContent = messages.join(' ');
         }
 
         document.getElementById('lab-provenance').innerHTML =
-          '本页每个数字都来自一次真实的 numpy 运行，不是手编的演示数据。' +
-          'trace 由 <code>labs/traces/kv_cache.py</code> 生成，它对<b>每一组</b>滑杆配置做五件事：' +
+          '本页每个数字都来自一次真实的 numpy / torch 运行，不是手编的演示数据。' +
+          'trace 由 <code>labs/traces/kv_cache.py</code> 生成，它对<b>每一组</b>滑杆配置做六件事：' +
           '① 用带缓存的路径逐步生成，每一步与 <b>torch 的无缓存全前缀重算</b>逐元素对拍' +
-          '（实测最大相对偏差 ~2.5e-15），并与本脚本自己的无缓存路径互查；' +
+          '（实测最大相对偏差 ~2.6e-15），并与本脚本自己的无缓存路径互查；' +
           '② 把<b>两种模式各自的注意力工作集</b>从真实数组上量出来 —— ' +
           '无缓存那一栏就是 ① 里那个参照实现真正分配的矩阵，两栏的 shape 与元素数' +
           '都要和公式对上；' +
@@ -861,15 +1079,27 @@
           '④ 把 Prefill / Decode / 参考模型三个点算上 Roofline，' +
           '每个点的算术强度由它自己的 FLOPs 与字节数重新推一遍；' +
           '⑤ 用引擎的契约 lint 自查，并跑一组「故意破坏」的对照组 —— 破坏必须被抓到，' +
-          '否则那份「0 gap」不算数。不通过就拒绝写文件。' +
+          '否则那份「0 gap」不算数；' +
+          '⑥ <b>变量图</b>的 slot → 张量映射逐 slot 声明，另有 9 条必需映射与 ' +
+          '6 条数据流钉死（<code>k_new ← h</code>、<code>attn ← (k_new, v_new, kv_cache)</code> 等）—— ' +
+          '变量图的边就是从 <code>reads</code>/<code>writes</code> 推出来的，' +
+          '少一条不会报错，只会画出另一个算法。' +
+          '不通过就拒绝写文件。' +
           '滑杆只是在<b>已经生成好的 ' + manifest.traces.length + ' 组配置之间</b>切换，' +
-          '浏览器里不算任何东西 —— 唯一的例外是「改配置，账本重算」那一块，' +
+          '浏览器里不算任何算法量 —— 唯一的例外是「改配置，账本重算」那一块，' +
           '它明确标注为<b>预测值</b>，并由自检面板证明它用的公式与 trace 用的是同一套。' +
-          '视图组件：显存账本 <code>views/ledger.js</code>（ticket #45，L14 复用）、' +
-          'Roofline 图 <code>views/roofline.js</code>（ticket #15，L05 经由 ' +
-          '<code>views/phase-roofline.js</code> 复用同一份渲染器）、' +
-          '有/无缓存对比 <code>views/attn-shape.js</code>。' +
-          '三者都不含任何 KV Cache 专属公式。';
+          '变量图里的「哪个公式变量对应图里哪个节点」不是页面猜的：' +
+          '生成脚本把 <code>step.binding_vars</code> 逐 slot 写进 trace，页面只读它。' +
+          '之所以不能像 L00 那样用正则扫公式，是因为 L05 的公式写的不是张量的名字 —— ' +
+          '符号几乎全是维度参数，而张量叫 <code>k_new</code>/<code>v_new</code>/' +
+          '<code>kv_cache</code>；按词干扫还会把 <code>KOLD</code>（这一步之前的缓存）' +
+          '错连到 <code>k_new</code>（这一步新加的行）。' +
+          '视图组件：变量图 <code>views/variable-dag.js</code>（L00 试点、L04 第二个、L05 第三个，' +
+          '此次迁移给它加了<b>环安全的分层</b>——' +
+          '<code>tokens → k_new → h → tokens</code> 是自回归的环，也是这个 lab 的主题）、' +
+          '显存账本 <code>views/ledger.js</code>（ticket #45）、' +
+          '有/无缓存对比 <code>views/attn-shape.js</code>、' +
+          'Roofline <code>views/roofline.js</code> 经 <code>views/phase-roofline.js</code> 复用。';
       })();
     </script>
   </body>
